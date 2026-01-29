@@ -1,0 +1,389 @@
+#!/bin/bash
+set -e  # Exit on error
+
+# Download and install dependencies
+sudo pacman -Sy artix-keyring expect --noconfirm
+sudo pacman-key --populate artix
+sudo pacman -Syu --noconfirm
+
+# Test mode removed. Deploytix always operates on a real, user-selected target disk.
+
+sudo rm -rf /tmp/installer
+EXECDIR="/tmp/installer"
+CONFDIR="/tmp/installer/hooks"
+CONF2DIR="/tmp/installer/install"
+mkdir -p "$EXECDIR"
+mkdir -p "$CONFDIR"
+mkdir -p "$CONF2DIR"
+
+echo "Populating Disk Partition Layout"
+# Copy required files and run Disk-Populater.sh
+cp "$APPDIR/usr/bin/Disk-Populater.sh" "$EXECDIR/Disk-Populater.sh"
+chmod +x "$EXECDIR/Disk-Populater.sh"
+
+# Select the target disk here (Disk-Populater.sh is non-interactive in normal operation)
+echo "Available block devices (disks only):"
+lsblk -d -o NAME,SIZE,MODEL,TYPE | awk 'NR==1 {print $0} NR>1 {printf "/dev/%-10s %-10s %-20s %s\n", $1, $2, $3, $4}'
+echo
+
+read -p 'Enter the target disk (example: /dev/sda or /dev/nvme0n1): ' -r TARGET_DISK < /dev/tty
+if [ -z "$TARGET_DISK" ]; then
+    echo "Error: No target disk provided. Aborting."
+    exit 1
+fi
+if [ ! -b "$TARGET_DISK" ]; then
+    echo "Error: $TARGET_DISK is not a valid block device. Aborting."
+    exit 1
+fi
+
+read -p "You selected $TARGET_DISK. This will WIPE and repartition the disk. Continue? [y/N] " -r CONFIRM
+if [[ ! $CONFIRM =~ ^[Yy]$ ]]; then
+    echo "Aborting."
+    exit 1
+fi
+
+echo "Running Disk-Populater.sh with explicit device: $TARGET_DISK"
+su root -c "sh \"$EXECDIR/Disk-Populater.sh\" --device=\"$TARGET_DISK\" --no-confirm"
+if [ $? -ne 0 ]; then
+    echo "Error: Disk-Populater.sh failed. Aborting."
+    exit 1
+fi
+
+# Read the target disk from the file created by Disk-Populater.sh
+TARGET_DISK=$(cat "$EXECDIR/target_disk")
+if [ -z "$TARGET_DISK" ]; then
+    echo "Error: No target disk found. Aborting."
+    exit 1
+fi
+
+# Determine partition naming scheme
+if [[ "$TARGET_DISK" =~ nvme ]]; then
+    PART_PREFIX="${TARGET_DISK}p"
+else
+    PART_PREFIX="${TARGET_DISK}"
+fi
+
+# Define partition device paths based on the chosen disk.
+EFI_PART="${PART_PREFIX}1"   # EFI partition
+BOOT_PART="${PART_PREFIX}2"  # Boot partition
+SWAP_PART="${PART_PREFIX}3"  # Swap partition
+ROOT_PART="${PART_PREFIX}4"  # Root partition
+USR_PART="${PART_PREFIX}5"   # Usr partition
+VAR_PART="${PART_PREFIX}6"   # Var partition
+HOME_PART="${PART_PREFIX}7"  # Home partition
+
+echo "Using target disk: $TARGET_DISK"
+echo "EFI  Partition: $EFI_PART"
+echo "Boot Partition: $BOOT_PART"
+echo "Swap Partition: $SWAP_PART"
+echo "Root Partition: $ROOT_PART"
+echo "Usr  Partition: $USR_PART"
+echo "Var  Partition: $VAR_PART"
+echo "Home Partition: $HOME_PART"
+
+################################################################################
+# 2) Prepare installation environment
+################################################################################
+echo "Creating /install directory..."
+sudo mkdir -p /install
+
+# Define partitions for reference
+declare -A partitions=(
+    [EFI]="$EFI_PART"
+    [Boot]="$BOOT_PART"
+    [Swap]="$SWAP_PART"
+    [Root]="$ROOT_PART"
+    [Usr]="$USR_PART"
+    [Var]="$VAR_PART"
+    [Home]="$HOME_PART"
+)
+
+echo "All partitions prepared."
+echo "Ready to format, mount, and continue installation steps."
+################################################################################
+# 3) Format Partitions
+################################################################################
+# Format the EFI partition
+echo "Formatting EFI partition with FAT32..."
+sudo mkfs.vfat -F32 -n EFI "$EFI_PART"
+echo "EFI partition ($EFI_PART) formatted."
+
+echo "Formatting other partitions..."
+
+# Format Boot partition
+echo "Formatting Boot partition as Btrfs..."
+sudo mkfs.btrfs -f "$BOOT_PART" || { echo "Formatting Boot as Btrfs failed"; exit 1; }
+
+# Format Root partition
+echo "Formatting Root partition as Btrfs..."
+sudo mkfs.btrfs -f "$ROOT_PART" || { echo "Formatting Root as Btrfs failed"; exit 1; }
+
+# Format Usr partition
+echo "Formatting Usr partition as Btrfs..."
+sudo mkfs.btrfs -f "$USR_PART" || { echo "Formatting Usr as Btrfs failed"; exit 1; }
+
+# Format Var partition
+echo "Formatting Var partition as Btrfs..."
+sudo mkfs.btrfs -f "$VAR_PART" || { echo "Formatting Var as Btrfs failed"; exit 1; }
+
+# Format Home partition
+echo "Formatting Home partition as Btrfs..."
+sudo mkfs.btrfs -f "$HOME_PART" || { echo "Formatting Home as Btrfs failed"; exit 1; }
+
+# Format Swap partition
+echo "Formatting Swap partition..."
+sudo mkswap "$SWAP_PART" || { echo "Formatting Swap failed"; exit 1; }
+
+echo "All partitions have been formatted appropriately."
+
+################################################################################
+# 4) Mount filesystems
+################################################################################
+# Mount Root partition
+echo "Mounting Root partition..."
+sudo mount "$ROOT_PART" /install
+
+# Create necessary directories
+for dir in boot home var usr etc; do
+    sudo mkdir -p "/install/$dir"
+done
+
+# Mount other partitions
+echo "Mounting Boot partition..."
+sudo mount "$BOOT_PART" /install/boot
+
+echo "Mounting Home partition..."
+sudo mount "$HOME_PART" /install/home
+
+echo "Mounting Var partition..."
+sudo mount "$VAR_PART" /install/var
+
+echo "Mounting Usr partition..."
+sudo mount "$USR_PART" /install/usr
+
+# Enable swap
+echo "Enabling Swap partition..."
+sudo swapon "$SWAP_PART"
+
+# Mount the EFI partition to /install/boot/efi
+echo "Mounting EFI partition to /install/boot/efi..."
+sudo mkdir -p /install/boot/efi
+sudo mount "$EFI_PART" /install/boot/efi
+
+sudo mkdir -p /install/etc
+
+################################################################################
+# 5) Install base system and configure the chroot
+################################################################################
+sleep 2
+echo "Running basestrap main system..."
+sudo basestrap /install runit seatd-runit base base-devel linux-firmware linux-zen linux-zen-headers \
+    efibootmgr grub btrfs-progs git nano curl wget iwd iwd-runit dnscrypt-proxy dnscrypt-proxy-runit \
+    openresolv mkinitcpio openssl pyenv gcc rustup iptables kexec-tools connman
+
+################################################################################
+# 5.1) Generate fstab
+################################################################################
+su root -c "fstabgen -U /install >> /install/etc/fstab"
+
+################################################################################
+################################################################################
+# 5.3) Setup the system
+################################################################################
+echo "Setting up system configuration files..."
+echo "Now transfer the fixed version of artix-chroot to the chroot"
+cp "$APPDIR/usr/bin/artix-chroot" "$EXECDIR/artix-chroot"
+sudo cp /tmp/installer/artix-chroot /install/bin/artix-chroot
+sudo mkdir -p "/install/etc/dnscrypt-proxy"
+echo "Now transfer the dnscrypt-proxy.toml file we'll be using"
+cp "$APPDIR/usr/dnscrypt-proxy.toml" "$EXECDIR/dnscrypt-proxy.toml"
+sudo cp "/tmp/installer/dnscrypt-proxy.toml" "/install/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
+################################################################################
+# 5.4) Further configuration inside the chroot
+################################################################################
+ROOT_UUID=$(sudo blkid -s UUID -o value "$ROOT_PART")
+if [ -z "$ROOT_UUID" ]; then
+    echo "Error: Could not retrieve UUID for $ROOT_PART"
+    exit 1
+fi
+echo "Root partition UUID: $ROOT_UUID"
+
+echo "Entering chroot to configure the new system..."
+su root <<EOF
+# 5.4.1) Create user if it doesn’t exist
+echo "Checking if user '.superphenotype' exists in /install..."
+artix-chroot /install id .superphenotype >/dev/null 2>&1
+if [ \$? -eq 0 ]; then
+  echo "User '.superphenotype' already exists; skipping useradd."
+else
+  echo "Creating user '.superphenotype'..."
+  artix-chroot /install useradd -b /home/.chroot -m -g wheel -G video,audio,network,log .superphenotype
+  echo "User added successfully."
+fi
+
+# 5.4.2) Set user password non-interactively
+echo "Setting password for '.superphenotype'..."
+echo ".superphenotype:angel" | artix-chroot /install chpasswd
+
+# 5.4.3) Adjust mkinitcpio.conf
+echo "Adjusting /etc/mkinitcpio.conf..."
+artix-chroot /install bash -c "
+  sed -i 's|^MODULES=.*|MODULES=(btrfs)|' /etc/mkinitcpio.conf;
+  sed -i 's|^FILES=.*|FILES=()|' /etc/mkinitcpio.conf;
+  sed -i 's|^BINARIES=.*|BINARIES=(lsblk)|' /etc/mkinitcpio.conf;
+  # Standard hooks configuration without encryption
+  sed -i 's|^HOOKS=.*|HOOKS=\\\"base udev autodetect modconf block keyboard keymap consolefont btrfs filesystems fsck usr\\\"|' /etc/mkinitcpio.conf;
+  mkinitcpio -P
+"
+echo "mkinitcpio.conf has been adjusted."
+
+# 5.4.4) Adjust GRUB configuration 
+echo "Adjusting /etc/default/grub..."
+artix-chroot /install sed -i \\
+  -e "s|^#\\?GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\\"root=UUID=${ROOT_UUID} loglevel=7 debug earlyprintk crashkernel=256M\\"|" \\
+  /etc/default/grub
+
+# 5.4.5) Regenerate mkinitcpio initramfs
+echo "Regenerating Initramfs with new hooks"
+artix-chroot /install bash -c "mkinitcpio -P"
+
+# 5.4.6) Edit Sudoers
+echo "Adjusting the Sudoers file"
+artix-chroot /install bash -c "sudo sed -i '/^# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/s/^# //' /etc/sudoers"
+
+# 5.4.7) Install Grub-Bootloader and generate the Config
+echo "Installing grub-bootloader..."
+artix-chroot /install bash -c "grub-install --target=x86_64-efi --boot-directory=/boot --efi-directory=/boot/efi --removable $TARGET_DISK"
+artix-chroot /install bash -c "grub-mkconfig -o /boot/grub/grub.cfg"
+
+# 5.4.8) Install Yay, and make a few adjustments to some configuration files
+echo "Creating the directory.."
+artix-chroot /install bash -c "mkdir -p /home/.chroot/.superphenotype/.gitrepos && chown .superphenotype:wheel /home/.chroot/.superphenotype/.gitrepos"
+echo "git clone the repo in the newly created directory and makepkg -si"
+artix-chroot /install bash -c "runuser -u .superphenotype -- bash -c 'mkdir -p /home/.chroot/.superphenotype/.gitrepos && cd /home/.chroot/.superphenotype/.gitrepos && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm'"
+echo "Install iwd network gui iwgtk"
+artix-chroot /install bash -c "runuser -u .superphenotype -- bash -c 'yay --noconfirm -S iwgtk'"
+echo "Adjust the /etc/iwd/main.conf file"
+artix-chroot /install bash -c "mkdir -p /etc/iwd/ && touch /etc/iwd/main.conf"
+artix-chroot /install bash -c "echo -e '[General]\nEnableNetworkConfiguration=true\n\n[Network]\n#NameResolvingService=resolvconf\nRoutePriorityOffset=300\nEnableIPv6=false' > /etc/iwd/main.conf"
+echo "Adjust the /etc/resolvconf.conf file"
+artix-chroot /install bash -c "[ -f /etc/resolvconf.conf ] || touch /etc/resolvconf.conf" && artix-chroot /install bash -c "sed -i 's/^#name_servers=127\\.0\\.0\\.1.*/name_servers=127.0.0.1:53/' /etc/resolvconf.conf"
+echo "Adjust the /etc/resolv.conf file"
+artix-chroot /install bash -c "[ -L /etc/resolv.conf ] && rm /etc/resolv.conf && echo 'nameserver 127.0.0.1:53' > /etc/resolv.conf"
+
+# 5.5.0) git clone inside chroot to https://github.com/Frogging-Family/linux-tkg
+echo "Git Clone linux-tkg at Host Installation"
+artix-chroot /install bash -c "runuser -u .superphenotype -- bash -c 'mkdir -p /home/.chroot/.superphenotype/.gitrepos && cd /home/.chroot/.superphenotype/.gitrepos && git clone https://github.com/Frogging-Family/linux-tkg.git'"
+EOF
+
+echo "Configuration inside chroot is complete."
+
+echo "Continuing Setup..."
+
+# 6.0.0) Configure customization.cfg for Linux-TKG kernel 6.12.16
+# Linux-tkg Section
+CONFIG_FILE="/install/home/.chroot/.superphenotype/.gitrepos/linux-tkg/customization.cfg"
+
+# Options list
+linux-tkg_options=(
+  "_distro=Arch"
+  "_version="
+  "_EXT_CONFIG_PATH=~/.config/frogminer/linux-tkg.cfg"
+  "_NUKR=true"
+  "_git_mirror=kernel.org"
+  "_kernel_work_folder="
+  "_kernel_source_folder="
+  "CUSTOM_GCC_PATH="
+  "CUSTOM_LLVM_PATH="
+  "_force_all_threads=true"
+  "_noccache=false"
+  "_kernel_on_diet=false"
+  "_modprobeddb=false"
+  "_modprobeddb_db_path=~/.config/modprobed.db"
+  "_menunconfig="
+  "_diffconfig="
+  "_diffconfig_name="
+  "_dracut_options=--lz4"
+  "_configfile=running-kernel"
+  "_config_updating=olddefconfig"
+  "_debugdisable=true"
+  "_STRIP=true"
+  "_cpusched=bore"
+  "_compiler=gcc"
+  "_libunwind_replace="
+  "_llvm_ias=1"
+  "_lto_mode="
+  "_preempt_rt="
+  "_preempt_rt_force="
+  "_sched_yield_type=0"
+  "_rr_interval=2"
+  "_ftracedisable=false"
+  "_numadisable=true"
+  "_misc_adds=true"
+  "_tickless=2"
+  "_acs_override="
+  "_bcachefs=false"
+  "_ntsync=false"
+  "_glitched_base=true"
+  "_zenify=true"
+  "_compileroptlevel=2"
+  "_processor_opt="
+  "_x86_64_isalvl="
+  "_cacule_rdb=false"
+  "_cacule_rdb_interval=19"
+  "_tt_high_hz=false"
+  "_smt_nice="
+  "_eevdf_sched_ext_support=true"
+  "_bore_min_base_slice_ns=2000000"
+  "_random_trust_cpu=true"
+  "_timer_freq=1000"
+  "_default_cpu_gov=performance"
+  "_aggressive_ondemand=true"
+  "_tcp_cong_alg=bbr"
+  "_custom_commandline=intel_pstate=passive split_lock_detect=off"
+  "_clear_patches=true"
+  "_openrgb=false"
+  "_custom_pkgbase="
+  "_kernel_localversion="
+  "_NR_CPUS_value=$(nproc)"
+  "_install_after_building=prompt"
+  "_logging_use_script=yes"
+  "_fsync_backport=true"
+  "_fsync_legacy=true"
+  "_fsync_futex2=false"
+  "_zfsfix=true"
+  "_runqueue_sharing="
+  "_irq_threading=false"
+  "_mglru=true"
+  "_community_patches="
+  "_user_patches=true"
+  "_user_patches_no_confirm=false"
+  "_config_fragments=true"
+  "_config_fragments_no_confirm=false"
+)
+
+
+# Loop over options and apply them to the configuration file
+for option in "${linux-tkg_options[@]}"; do
+  # Extract the variable name and value
+  var_name=$(echo "$option" | cut -d'=' -f1)
+  var_value=$(echo "$option" | cut -d'=' -f2-)
+
+  # Use sed to replace the value in the config file
+  sed -i "s/^$var_name=.*/$var_name=$var_value/" "$CONFIG_FILE"
+done
+
+
+echo "Now beginning build process for Linux-TKG Kernel 6.12.16 (Legion Go hardware support)"
+su root <<EOF
+artix-chroot /install bash -c "runuser -u .superphenotype -- bash -c 'cd /home/.chroot/.superphenotype/.gitrepos/linux-tkg && makepkg -si --noconfirm'"
+EOF
+
+echo "Completed Build process for Linux-TKG Kernel 6.12.16"
+sleep 1
+
+echo "Configuration applied successfully!"
+
+echo "Installation and configuration completed successfully!"
+echo "Legion Go hardware support and Linux-TKG kernel 6.12.16 have been configured."
+echo "Exiting Deploytix installation script."
