@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Information about a block device
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BlockDevice {
     /// Device path (e.g., /dev/sda)
     pub path: String,

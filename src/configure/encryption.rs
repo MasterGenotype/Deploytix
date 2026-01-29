@@ -6,6 +6,7 @@ use crate::utils::error::Result;
 use tracing::info;
 
 /// Setup LUKS encryption for partitions
+#[allow(dead_code)]
 pub fn setup_encryption(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -17,7 +18,7 @@ pub fn setup_encryption(
 
     info!("Setting up LUKS encryption");
 
-    let password = config
+    let _password = config
         .disk
         .encryption_password
         .as_ref()
@@ -39,10 +40,11 @@ pub fn setup_encryption(
 }
 
 /// Open encrypted partitions
+#[allow(dead_code)]
 pub fn open_encrypted_partitions(
-    cmd: &CommandRunner,
-    device: &str,
-    password: &str,
+    _cmd: &CommandRunner,
+    _device: &str,
+    _password: &str,
 ) -> Result<()> {
     info!("Opening encrypted partitions");
 
@@ -52,7 +54,8 @@ pub fn open_encrypted_partitions(
 }
 
 /// Close encrypted partitions
-pub fn close_encrypted_partitions(cmd: &CommandRunner) -> Result<()> {
+#[allow(dead_code)]
+pub fn close_encrypted_partitions(_cmd: &CommandRunner) -> Result<()> {
     info!("Closing encrypted partitions");
 
     // TODO: Implement closing LUKS containers

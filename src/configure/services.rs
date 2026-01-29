@@ -42,9 +42,8 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
     }
 
     // DNS
-    match config.network.dns {
-        DnsProvider::DnscryptProxy => services.push("dnscrypt-proxy".to_string()),
-        _ => {}
+    if config.network.dns == DnsProvider::DnscryptProxy {
+        services.push("dnscrypt-proxy".to_string());
     }
 
     // Display manager (if desktop environment selected)

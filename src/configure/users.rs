@@ -82,6 +82,7 @@ fn configure_sudoers(cmd: &CommandRunner, install_root: &str) -> Result<()> {
 }
 
 /// Set root password
+#[allow(dead_code)]
 pub fn set_root_password(
     cmd: &CommandRunner,
     password: &str,
@@ -101,6 +102,7 @@ pub fn set_root_password(
 }
 
 /// Lock root account (disable root login)
+#[allow(dead_code)]
 pub fn lock_root_account(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     info!("Locking root account");
 

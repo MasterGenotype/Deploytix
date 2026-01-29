@@ -7,6 +7,7 @@ use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
 
 /// GPT partition type GUIDs
+#[allow(dead_code)]
 pub mod partition_types {
     pub const EFI: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
     pub const BIOS_BOOT: &str = "21686148-6449-6E6F-744E-656564454649";
@@ -131,7 +132,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
     var_mib = floor_align(var_mib, ALIGN_MIB);
 
     // Calculate home (remainder)
-    let mut home_mib = disk_mib
+    let home_mib = disk_mib
         .saturating_sub(EFI_MIB)
         .saturating_sub(BOOT_MIB)
         .saturating_sub(swap_mib)
@@ -170,8 +171,9 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             var_mib = floor_align(var_mib, ALIGN_MIB);
         }
 
-        // Recalculate home
-        home_mib = disk_mib
+        // Note: home_mib will be 0 (remainder) in the partition definition
+        // The recalculated value here is just for validation purposes
+        let _recalculated_home = disk_mib
             .saturating_sub(EFI_MIB)
             .saturating_sub(BOOT_MIB)
             .saturating_sub(swap_mib)
@@ -326,6 +328,7 @@ pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64) -> Result<Compute
 }
 
 /// Check if layout has a separate /usr partition
+#[allow(dead_code)]
 pub fn has_usr_partition(layout: &PartitionLayout) -> bool {
     matches!(layout, PartitionLayout::Standard)
 }

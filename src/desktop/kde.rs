@@ -27,8 +27,7 @@ pub fn install(
     let sddm_service = format!("sddm-{}", config.system.init);
 
     // Build package list
-    let mut packages: Vec<&str> = KDE_PACKAGES.to_vec();
-    let sddm_service_ref: &str = &sddm_service;
+    let packages: Vec<&str> = KDE_PACKAGES.to_vec();
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would install KDE packages: {:?}", packages);

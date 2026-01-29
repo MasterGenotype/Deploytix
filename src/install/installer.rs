@@ -3,7 +3,7 @@
 use crate::config::DeploymentConfig;
 use crate::configure;
 use crate::desktop;
-use crate::disk::detection::{get_device_info, partition_path};
+use crate::disk::detection::get_device_info;
 use crate::disk::formatting::format_all_partitions;
 use crate::disk::layouts::{compute_layout, print_layout_summary, ComputedLayout};
 use crate::disk::partitioning::apply_partitions;

@@ -125,6 +125,7 @@ pub fn get_partition_uuid(partition: &str) -> Result<String> {
 }
 
 /// Get all partition UUIDs for a layout
+#[allow(dead_code)]
 pub fn get_all_uuids(
     device: &str,
     layout: &ComputedLayout,

@@ -165,7 +165,7 @@ fn cmd_list_disks(all: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<15} {:>10} {:<20} {}", "DEVICE", "SIZE", "MODEL", "TYPE");
+    println!("{:<15} {:>10} {:<20} TYPE", "DEVICE", "SIZE", "MODEL");
     println!("{}", "-".repeat(60));
 
     for dev in devices {

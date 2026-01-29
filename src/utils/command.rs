@@ -33,12 +33,14 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<Output> {
 }
 
 /// Execute a command and return stdout as string
+#[allow(dead_code)]
 pub fn run_command_output(program: &str, args: &[&str]) -> Result<String> {
     let output = run_command(program, args)?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Execute a command, allowing it to fail (returns None on failure)
+#[allow(dead_code)]
 pub fn run_command_optional(program: &str, args: &[&str]) -> Option<String> {
     run_command_output(program, args).ok()
 }
@@ -55,6 +57,7 @@ pub fn command_exists(program: &str) -> bool {
 }
 
 /// Run a command in a chroot environment
+#[allow(dead_code)]
 pub fn run_in_chroot(chroot_path: &str, program: &str, args: &[&str]) -> Result<Output> {
     let mut chroot_args = vec![chroot_path, program];
     chroot_args.extend(args);
@@ -95,6 +98,7 @@ impl CommandRunner {
         }
     }
 
+    #[allow(dead_code)]
     pub fn run_output(&self, program: &str, args: &[&str]) -> Result<Option<String>> {
         if self.dry_run {
             log_dry_run(program, args);

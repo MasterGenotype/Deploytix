@@ -160,6 +160,7 @@ impl std::fmt::Display for InitSystem {
     }
 }
 
+#[allow(dead_code)]
 impl InitSystem {
     /// Get the base package name for this init system
     pub fn base_package(&self) -> &str {

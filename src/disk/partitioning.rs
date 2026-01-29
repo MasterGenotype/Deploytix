@@ -23,14 +23,14 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
     let label_id = Uuid::new_v4();
 
     let mut script = String::new();
-    script.push_str(&format!("label: gpt\n"));
+    script.push_str("label: gpt\n");
     script.push_str(&format!("label-id: {}\n", label_id));
     script.push_str(&format!("device: {}\n", device));
-    script.push_str(&format!("unit: sectors\n"));
+    script.push_str("unit: sectors\n");
     script.push_str(&format!("first-lba: {}\n", first_lba));
     script.push_str(&format!("last-lba: {}\n", last_lba));
     script.push_str(&format!("sector-size: {}\n", sector_size));
-    script.push_str("\n");
+    script.push('\n');
 
     let align_sectors = (1024 * 1024) / sector_size; // 1 MiB alignment
     let mut current_sector = first_lba;
@@ -59,12 +59,12 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
         }
 
         script.push_str(&line);
-        script.push_str("\n");
+        script.push('\n');
 
         // Update position for next partition (aligned)
         if i < layout.partitions.len() - 1 {
             let next_sector = current_sector + size_sectors;
-            current_sector = ((next_sector + align_sectors - 1) / align_sectors) * align_sectors;
+            current_sector = next_sector.div_ceil(align_sectors) * align_sectors;
         }
     }
 
@@ -101,30 +101,8 @@ pub fn apply_partitions(
     info!("Wiping existing partition table...");
     let _ = cmd.run("wipefs", &["-a", device]);
 
-    // Apply with sfdisk
+    // Apply with sfdisk - pipe script via stdin from file
     info!("Creating new partition table...");
-    cmd.run("sfdisk", &[device, "--no-reread", "-f"])?;
-
-    // Actually apply the script via stdin
-    // We need to use a different approach - pipe the script
-    let output = std::process::Command::new("sfdisk")
-        .arg(device)
-        .arg("--no-reread")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "sfdisk".to_string(),
-            stderr: e.to_string(),
-        })?
-        .wait_with_output()
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "sfdisk".to_string(),
-            stderr: e.to_string(),
-        });
-
-    // Actually, let's use the file approach
     let result = std::process::Command::new("sfdisk")
         .arg(device)
         .stdin(fs::File::open(script_path)?)
@@ -155,6 +133,7 @@ pub fn apply_partitions(
 }
 
 /// Get list of partition paths for a layout
+#[allow(dead_code)]
 pub fn get_partition_paths(device: &str, layout: &ComputedLayout) -> Vec<(PartitionDef, String)> {
     layout
         .partitions
@@ -164,6 +143,7 @@ pub fn get_partition_paths(device: &str, layout: &ComputedLayout) -> Vec<(Partit
 }
 
 /// Wipe partition table from a device
+#[allow(dead_code)]
 pub fn wipe_partition_table(cmd: &CommandRunner, device: &str) -> Result<()> {
     info!("Wiping partition table on {}", device);
 

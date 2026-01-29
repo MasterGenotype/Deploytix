@@ -82,12 +82,13 @@ pub fn construct_binaries(_config: &DeploymentConfig) -> Vec<String> {
 
 /// Construct FILES array
 pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
-    let mut files = Vec::new();
+    let files = Vec::new();
 
-    // Add keyfile for encryption if needed
-    if config.disk.encryption {
-        // files.push("/crypto_keyfile.bin".to_string());
-    }
+    // TODO: Add keyfile for encryption if needed
+    // if config.disk.encryption {
+    //     files.push("/crypto_keyfile.bin".to_string());
+    // }
+    let _ = config; // Silence unused warning until encryption is implemented
 
     files
 }
@@ -152,6 +153,7 @@ pub fn configure_mkinitcpio(
 }
 
 /// Regenerate initramfs
+#[allow(dead_code)]
 pub fn regenerate_initramfs(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     info!("Regenerating initramfs");
 

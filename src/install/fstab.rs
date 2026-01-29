@@ -73,6 +73,7 @@ pub fn generate_fstab(
 }
 
 /// Use fstabgen to generate fstab (alternative method)
+#[allow(dead_code)]
 pub fn generate_fstab_with_fstabgen(
     cmd: &CommandRunner,
     install_root: &str,

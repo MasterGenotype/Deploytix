@@ -6,6 +6,7 @@ use crate::utils::error::Result;
 use tracing::info;
 
 /// Install headless/server configuration (no desktop)
+#[allow(dead_code)]
 pub fn install(
     _cmd: &CommandRunner,
     _config: &DeploymentConfig,

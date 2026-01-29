@@ -3,7 +3,7 @@
 use crate::disk::detection::list_block_devices;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
-use crate::utils::prompt::{prompt_confirm, prompt_input, prompt_select};
+use crate::utils::prompt::{prompt_confirm, prompt_select};
 use std::fs;
 use tracing::info;
 
@@ -69,7 +69,7 @@ impl Cleaner {
             .collect();
 
         // Sort by depth (deepest first)
-        mount_points.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
+        mount_points.sort_by_key(|b| std::cmp::Reverse(b.matches('/').count()));
 
         // Unmount each
         for mp in mount_points {

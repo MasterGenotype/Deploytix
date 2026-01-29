@@ -49,6 +49,7 @@ pub fn prompt_select<T: ToString>(prompt: &str, items: &[T], default: usize) -> 
 }
 
 /// Prompt for fuzzy selection from a list
+#[allow(dead_code)]
 pub fn prompt_fuzzy_select<T: ToString>(prompt: &str, items: &[T]) -> Result<usize> {
     let theme = ColorfulTheme::default();
     FuzzySelect::with_theme(&theme)
@@ -59,6 +60,7 @@ pub fn prompt_fuzzy_select<T: ToString>(prompt: &str, items: &[T]) -> Result<usi
 }
 
 /// Prompt for optional input (can be empty)
+#[allow(dead_code)]
 pub fn prompt_optional(prompt: &str) -> Result<Option<String>> {
     let theme = ColorfulTheme::default();
     let input: String = Input::with_theme(&theme)
@@ -81,16 +83,19 @@ pub fn warn_confirm(warning: &str) -> Result<bool> {
 }
 
 /// Display an error message
+#[allow(dead_code)]
 pub fn error(message: &str) {
     eprintln!("❌ Error: {}", message);
 }
 
 /// Display a success message
+#[allow(dead_code)]
 pub fn success(message: &str) {
     println!("✓ {}", message);
 }
 
 /// Display an info message
+#[allow(dead_code)]
 pub fn info(message: &str) {
     println!("ℹ {}", message);
 }

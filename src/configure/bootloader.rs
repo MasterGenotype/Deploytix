@@ -64,7 +64,7 @@ fn install_grub(
 /// Configure GRUB defaults
 fn configure_grub_defaults(
     cmd: &CommandRunner,
-    config: &DeploymentConfig,
+    _config: &DeploymentConfig,
     root_uuid: &str,
     install_root: &str,
 ) -> Result<()> {
@@ -76,20 +76,20 @@ fn configure_grub_defaults(
     }
 
     // Build kernel cmdline
-    let mut cmdline_parts = vec![
+    let cmdline_parts = [
         format!("root=UUID={}", root_uuid),
         "loglevel=3".to_string(),
     ];
 
-    // Add encryption parameters if enabled
-    if config.disk.encryption {
-        // cmdline_parts.push("cryptdevice=...".to_string());
-    }
+    // TODO: Add encryption parameters if enabled
+    // if config.disk.encryption {
+    //     cmdline_parts.push("cryptdevice=...".to_string());
+    // }
 
-    // Add resume for hibernation
-    if config.system.hibernation {
-        // cmdline_parts.push(format!("resume=UUID={}", swap_uuid));
-    }
+    // TODO: Add resume for hibernation
+    // if config.system.hibernation {
+    //     cmdline_parts.push(format!("resume=UUID={}", swap_uuid));
+    // }
 
     let cmdline = cmdline_parts.join(" ");
 
@@ -131,7 +131,7 @@ GRUB_DISTRIBUTOR="Artix"
 /// Install systemd-boot
 fn install_systemd_boot(
     cmd: &CommandRunner,
-    config: &DeploymentConfig,
+    _config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
     info!("Installing systemd-boot");
@@ -160,13 +160,11 @@ editor no
     let entries_dir = format!("{}/boot/loader/entries", install_root);
     fs::create_dir_all(&entries_dir)?;
 
-    let entry_content = format!(
-        r#"title   Artix Linux
+    let entry_content = r#"title   Artix Linux
 linux   /vmlinuz-linux-zen
 initrd  /initramfs-linux-zen.img
 options root=UUID=<ROOT_UUID> rw
-"#
-    );
+"#;
     fs::write(format!("{}/artix.conf", entries_dir), entry_content)?;
 
     info!("systemd-boot installation complete");

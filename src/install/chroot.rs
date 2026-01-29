@@ -3,8 +3,7 @@
 use crate::disk::detection::partition_path;
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
-use crate::utils::error::{DeploytixError, Result};
-use std::path::Path;
+use crate::utils::error::Result;
 use tracing::info;
 
 /// Mount all partitions according to the layout
@@ -83,7 +82,7 @@ pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
         .collect();
 
     // Sort by depth (deepest first for proper unmounting)
-    mount_points.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
+    mount_points.sort_by_key(|b| std::cmp::Reverse(b.matches('/').count()));
 
     // Unmount each
     for mp in mount_points {
@@ -95,6 +94,7 @@ pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
 }
 
 /// Bind mount necessary directories for chroot
+#[allow(dead_code)]
 pub fn setup_chroot_mounts(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     let binds = [
         ("/dev", "dev"),
@@ -123,6 +123,7 @@ pub fn setup_chroot_mounts(cmd: &CommandRunner, install_root: &str) -> Result<()
 }
 
 /// Clean up chroot mounts
+#[allow(dead_code)]
 pub fn cleanup_chroot_mounts(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     let targets = ["run", "sys", "proc", "dev/pts", "dev"];
 
