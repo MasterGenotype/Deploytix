@@ -1,5 +1,5 @@
 # Deploytix
-
+WIP
 A portable Rust CLI application for automated deployment of Artix Linux to removable media and disks.
 
 ## Features
