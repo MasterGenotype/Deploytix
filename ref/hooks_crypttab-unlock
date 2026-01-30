@@ -1,0 +1,105 @@
+#!/usr/bin/ash
+# SPDX-License-Identifier: GPL-2.0-only
+# crypttab-unlock: A custom mkinitcpio hook to unlock all LUKS-encrypted partitions
+# using entries from /etc/crypttab.
+
+# Function to wait for the device to appear
+wait_for_device() {
+    local devpath="$1"
+    local timeout=10
+
+    while [ ! -e "$devpath" ] && [ $timeout -gt 0 ]; do
+        sleep 0.5
+        timeout=$((timeout - 1))
+    done
+
+    if [ ! -e "$devpath" ]; then
+        echo "[crypttab-unlock] ERROR: Device $devpath not found after waiting."
+        return 1
+    fi
+    return 0
+}
+
+run_hook() {
+    # Ensure cryptsetup is available in the initramfs environment
+    if ! command -v cryptsetup >/dev/null 2>&1; then
+        echo "[crypttab-unlock] ERROR: cryptsetup not found in initramfs."
+        return 1
+    fi
+
+    local crypttab="/etc/crypttab"
+    if [ ! -f "$crypttab" ]; then
+        echo "[crypttab-unlock] No /etc/crypttab found, skipping."
+        return 0
+    fi
+
+    echo "[crypttab-unlock] Processing $crypttab ..."
+    local ret=0
+
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+
+        # Parse fields (MappingName, Device, KeyFile, Options)
+        set -- $line
+        local mapping="$1"
+        local device="$2"
+        local keyfile="$3"
+        shift 3
+        local options="$*"
+
+        # Convert UUID= to device path
+        case "$device" in
+            UUID=*)
+                local uuid="${device#UUID=}"
+                device="/dev/disk/by-uuid/$uuid"
+                ;;
+        esac
+
+        # Ensure the device is available before proceeding
+        wait_for_device "$device" || {
+            echo "[crypttab-unlock] ERROR: Device $device not found. Skipping $mapping."
+            ret=1
+            continue
+        }
+
+        # Convert the mapping name to follow proper capitalization (e.g., "ROOT" -> "Root")
+        local formatted_mapping
+        formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+
+        echo "[crypttab-unlock] Unlocking $formatted_mapping from $device ..."
+
+        # Verify keyfile existence
+        if [ -n "$keyfile" ] && [ "$keyfile" != "none" ] && [ ! -f "$keyfile" ]; then
+            echo "[crypttab-unlock] ERROR: Keyfile $keyfile does not exist. Skipping $mapping."
+            ret=1
+            continue
+        fi
+
+        # Build and run cryptsetup command with the properly formatted mapping name
+        local cmd="cryptsetup open $device Crypt-$formatted_mapping"
+        if [ -n "$keyfile" ] && [ "$keyfile" != "none" ]; then
+            cmd="$cmd --key-file $keyfile"
+        fi
+
+        # Add any additional options from /etc/crypttab
+        if [ -n "$options" ]; then
+            cmd="$cmd $options"
+        fi
+
+        # Run the cryptsetup command
+        if ! $cmd; then
+            echo "[crypttab-unlock] ERROR: Failed to unlock $formatted_mapping from $device."
+            ret=1
+            continue
+        fi
+
+        echo "[crypttab-unlock] Successfully unlocked $formatted_mapping from $device."
+    done < "$crypttab"
+
+    return $ret
+}
+
+run_hook

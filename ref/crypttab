@@ -1,0 +1,8 @@
+# Configuration for encrypted block devices.
+# See crypttab(5) for details.
+Root		UUID=	/etc/cryptfs.key
+Home		UUID=	/etc/cryptfs.key
+Usr		    UUID=	/etc/cryptfs.key
+Var		    UUID=	/etc/cryptfs.key
+Swap		UUID=	/etc/cryptfs.key
+Boot		UUID=	password

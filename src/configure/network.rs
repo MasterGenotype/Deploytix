@@ -49,6 +49,7 @@ fn configure_iwd(cmd: &CommandRunner, install_root: &str) -> Result<()> {
 EnableNetworkConfiguration=true
 
 [Network]
+NameResolvingService=resolvconf
 RoutePriorityOffset=300
 EnableIPv6=true
 

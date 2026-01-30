@@ -1,0 +1,9 @@
+#!/bin/ash
+build() {
+    # No extra binaries are needed.
+    return 0
+}
+
+help() {
+    echo "mountcrypt: Mount decrypted Crypt-Root and its Btrfs subvolumes"
+}

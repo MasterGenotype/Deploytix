@@ -1,0 +1,86 @@
+#!/bin/ash
+# mountcrypt: Mount all unlocked LUKS devices and EFI partition during initramfs.
+
+wait_for_mapped_devices() {
+    timeout=20
+    success=true
+
+    for crypt_device in $(ls /dev/mapper/ | grep -E '^Crypt-'); do
+        device_path="/dev/mapper/$crypt_device"
+
+        while [ ! -b "$device_path" ] && [ $timeout -gt 0 ]; do
+            sleep 0.5
+            timeout=$((timeout - 1))
+        done
+
+        if [ ! -b "$device_path" ]; then
+            echo "Error: $device_path not found" >&2
+            success=false
+        fi
+    done
+
+    if [ "$success" = false ]; then
+        return 1
+    fi
+    return 0
+}
+
+run_hook() {
+    new_root="/new_root"
+    cryptroot="/dev/mapper/Crypt-Root"
+
+    # Ensure all mapped devices are available
+    wait_for_mapped_devices || return 1
+
+    mkdir -p "$new_root"
+
+    # Mount primary root subvolume (@)
+    mount -o rw,subvol=@ "$cryptroot" "$new_root" || {
+        echo "Error mounting subvolume '@'" >&2
+        return 1
+    }
+
+    # Mount additional subvolumes
+    for mp in usr var home boot; do
+        target="$new_root/$mp"
+        subvol="@${mp}"
+        mapped_device="/dev/mapper/Crypt-$(echo "$mp" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+
+        mkdir -p "$target"
+
+        if [ -b "$mapped_device" ]; then
+            mount -o rw,subvol=${subvol} "$mapped_device" "$target" || {
+                echo "Warning: Could not mount $mapped_device (subvolume $subvol) on $target" >&2
+            }
+        else
+            echo "Warning: Mapped device $mapped_device not found, skipping $target" >&2
+        fi
+    done
+
+    # **Auto-detect and mount EFI partition**
+    mkdir -p "$new_root/boot/efi"
+
+    # Find EFI partition (filesystem vfat, label "EFI" or partition type EF00)
+    efi_partition=""
+    for dev in $(blkid -t TYPE=vfat -o device); do
+        if blkid "$dev" | grep -qi 'PARTLABEL="EFI"'; then
+            efi_partition="$dev"
+            break
+        fi
+    done
+
+    if [ -z "$efi_partition" ]; then
+        # Fallback: first vfat partition
+        efi_partition=$(blkid -t TYPE=vfat -o device | head -n1)
+    fi
+
+    if [ -n "$efi_partition" ] && [ -b "$efi_partition" ]; then
+        mount -o rw "$efi_partition" "$new_root/boot/efi" || {
+            echo "Error: Failed to mount EFI partition $efi_partition" >&2
+            return 1
+        }
+        echo "Mounted EFI partition $efi_partition to $new_root/boot/efi"
+    else
+        echo "Warning: EFI partition not found, skipping EFI mount" >&2
+    fi
+}
