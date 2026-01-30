@@ -1,6 +1,6 @@
 # Linux Distribution Classification and Installation Abstractions
 
-This document details the commonalities across Linux distribution installation processes, package management systems, and provides a classification schema for detecting and adapting to host OS distributions.
+This document details the commonalities across Linux distribution installation processes, package management systems, and provides a classification schema for detecting and adapting to host OS distributions. This documentation focuses exclusively on systemd-free distributions and init systems.
 
 ---
 
@@ -34,78 +34,94 @@ Linux distributions, despite their diversity, share fundamental installation pat
 
 | In Scope | Out of Scope |
 |----------|--------------|
-| Major distribution families | Embedded Linux (OpenWrt, Yocto) |
-| Standard package managers | Source-based (Gentoo, LFS) |
-| Common init systems | Container-only distributions |
+| Systemd-free distributions | Systemd-based distributions |
+| Alternative init systems (runit, OpenRC, s6, dinit) | Systemd service management |
+| Independent package managers | Distributions without alternatives |
 | UEFI and BIOS boot | Architecture-specific quirks |
+
+### 1.3 Philosophy
+
+This project prioritizes Unix philosophy and modular init systems:
+
+- **Simplicity**: Shell scripts over binary service managers
+- **Transparency**: Readable configuration over opaque databases
+- **Choice**: Multiple init systems, not monoculture
+- **Independence**: No hard dependencies on specific implementations
 
 ---
 
 ## 2. Distribution Family Taxonomy
 
-### 2.1 Primary Distribution Families
+### 2.1 Systemd-Free Distribution Families
 
 ```
-Linux Distributions
-├── Debian Family
-│   ├── Debian (upstream)
-│   ├── Ubuntu
-│   │   ├── Linux Mint
-│   │   ├── Pop!_OS
-│   │   └── Elementary OS
-│   ├── Devuan (systemd-free)
-│   └── Kali Linux
+Systemd-Free Linux Distributions
+├── Arch Family (systemd-free)
+│   ├── Artix Linux (runit, OpenRC, s6, dinit)
+│   ├── Obarun (s6)
+│   ├── Hyperbola GNU/Linux-libre (OpenRC)
+│   └── Parabola GNU/Linux-libre (OpenRC option)
 │
-├── Red Hat Family
-│   ├── RHEL (upstream)
-│   ├── Fedora
-│   ├── CentOS / Rocky / Alma
-│   └── Oracle Linux
-│
-├── Arch Family
-│   ├── Arch Linux (upstream)
-│   ├── Artix Linux (systemd-free)
-│   ├── Manjaro
-│   ├── EndeavourOS
-│   └── Garuda Linux
-│
-├── SUSE Family
-│   ├── openSUSE Tumbleweed
-│   ├── openSUSE Leap
-│   └── SLES
+├── Debian Family (systemd-free)
+│   ├── Devuan (sysvinit, OpenRC, runit)
+│   ├── Refracta (Devuan-based)
+│   └── MX Linux (sysvinit default)
 │
 ├── Void Family
-│   └── Void Linux (xbps, runit/musl)
+│   └── Void Linux (runit, musl/glibc)
 │
 ├── Alpine Family
-│   └── Alpine Linux (apk, musl, OpenRC)
+│   └── Alpine Linux (OpenRC, musl)
 │
-└── Independent
-    ├── Slackware
-    ├── NixOS
-    └── Guix
+├── Gentoo Family
+│   ├── Gentoo (OpenRC default)
+│   ├── Funtoo (OpenRC)
+│   └── Calculate Linux (OpenRC)
+│
+├── Independent
+│   ├── Chimera Linux (dinit, musl)
+│   ├── Adélie Linux (s6)
+│   ├── KISS Linux (busybox init)
+│   ├── Carbs Linux (sinit)
+│   └── Slackware (sysvinit/BSD-style)
+│
+└── Source-Based
+    ├── CRUX (sysvinit/BSD-style)
+    └── GoboLinux (custom)
 ```
 
 ### 2.2 Family Characteristics Matrix
 
 | Family | Package Format | Package Manager | Default Init | C Library | Release Model |
 |--------|---------------|-----------------|--------------|-----------|---------------|
-| Debian | .deb | apt/dpkg | systemd | glibc | Point release |
-| Red Hat | .rpm | dnf/yum | systemd | glibc | Point release |
-| Arch | .pkg.tar.zst | pacman | systemd | glibc | Rolling |
-| SUSE | .rpm | zypper | systemd | glibc | Both |
+| Artix | .pkg.tar.zst | pacman | runit/OpenRC/s6/dinit | glibc | Rolling |
+| Devuan | .deb | apt/dpkg | sysvinit | glibc | Point release |
 | Void | .xbps | xbps | runit | glibc/musl | Rolling |
 | Alpine | .apk | apk | OpenRC | musl | Point release |
+| Gentoo | ebuild | portage/emerge | OpenRC | glibc/musl | Rolling |
+| Chimera | .apk | apk | dinit | musl | Rolling |
+| Slackware | .txz/.tgz | pkgtools/slackpkg | sysvinit | glibc | Point release |
 
-### 2.3 Derivative Relationship Depth
+### 2.3 Init System Availability by Distribution
+
+| Distribution | runit | OpenRC | s6 | dinit | sysvinit |
+|--------------|-------|--------|-----|-------|----------|
+| Artix | Default | Yes | Yes | Yes | No |
+| Void | Default | No | No | No | No |
+| Alpine | No | Default | No | No | No |
+| Devuan | Yes | Yes | No | No | Default |
+| Gentoo | Yes | Default | Yes | Yes | No |
+| Chimera | No | No | No | Default | No |
+| Obarun | No | No | Default | No | No |
+
+### 2.4 Derivative Relationship Depth
 
 Understanding derivative depth helps predict compatibility:
 
 ```
-Depth 0: Root distributions (Debian, Arch, Void, Alpine)
-Depth 1: Direct derivatives (Ubuntu, Artix, Manjaro)
-Depth 2: Secondary derivatives (Mint, Pop!_OS, EndeavourOS)
-Depth 3+: Tertiary derivatives (LMDE, Peppermint)
+Depth 0: Root distributions (Arch, Debian, Void, Alpine, Gentoo)
+Depth 1: Direct derivatives (Artix←Arch, Devuan←Debian, Chimera←Alpine-ish)
+Depth 2: Secondary derivatives (Refracta←Devuan)
 ```
 
 **Rule:** Higher depth = more potential divergence from upstream tooling.
@@ -118,9 +134,9 @@ Depth 3+: Tertiary derivatives (LMDE, Peppermint)
 
 | Method | Description | Use Case | Examples |
 |--------|-------------|----------|----------|
-| **Bootstrap** | Minimal rootfs extraction | Automated deployment | debootstrap, pacstrap, basestrap |
-| **ISO Install** | Graphical/TUI installer | End-user installation | Calamares, Anaconda |
-| **Rootfs Tarball** | Pre-built filesystem archive | Containers, WSL, chroot | stage3 (Gentoo), rootfs.tar.xz |
+| **Bootstrap** | Minimal rootfs extraction | Automated deployment | basestrap, debootstrap, xbps-install |
+| **ISO Install** | Graphical/TUI installer | End-user installation | Calamares, custom TUI |
+| **Rootfs Tarball** | Pre-built filesystem archive | Containers, WSL, chroot | rootfs.tar.xz |
 | **Network Install** | Minimal boot + network packages | Server deployment | netinst, PXE boot |
 | **Image Clone** | Block-level disk image | Rapid deployment | dd, Clonezilla |
 
@@ -145,13 +161,12 @@ All bootstrap tools perform the same fundamental operations:
 
 | Distribution | Bootstrap Tool | Base Package Set | Mirror Config |
 |--------------|---------------|------------------|---------------|
-| Debian/Ubuntu | `debootstrap` | `base-files`, `apt` | `/etc/apt/sources.list` |
-| Arch | `pacstrap` | `base`, `linux` | `/etc/pacman.d/mirrorlist` |
 | Artix | `basestrap` | `base`, `linux`, `$init` | `/etc/pacman.d/mirrorlist` |
-| Fedora | `dnf --installroot` | `@core` | `/etc/yum.repos.d/` |
+| Devuan | `debootstrap` | `base-files`, `apt` | `/etc/apt/sources.list` |
 | Void | `xbps-install -R` | `base-system` | `/etc/xbps.d/` |
 | Alpine | `apk --root` | `alpine-base` | `/etc/apk/repositories` |
-| openSUSE | `zypper --root` | `patterns-base-minimal_base` | `/etc/zypp/repos.d/` |
+| Gentoo | `emerge --root` | `@system` | `/etc/portage/repos.conf/` |
+| Chimera | `apk --root` | `base-full` | `/etc/apk/repositories` |
 
 ### 3.3 Unified Bootstrap Abstraction
 
@@ -167,6 +182,9 @@ pub trait BootstrapProvider {
     /// Get default base package set
     fn default_packages(&self) -> Vec<String>;
 
+    /// Get init-specific packages
+    fn init_packages(&self, init: InitSystemType) -> Vec<String>;
+
     /// Execute command in chroot context
     fn chroot_exec(&self, target: &Path, cmd: &str) -> Result<()>;
 }
@@ -176,11 +194,11 @@ pub trait BootstrapProvider {
 
 | Distribution | Rootfs URL Pattern | Compression | Verification |
 |--------------|-------------------|-------------|--------------|
-| Arch | `archlinux.org/iso/latest/archlinux-bootstrap-*.tar.zst` | zstd | PGP sig |
-| Alpine | `alpinelinux.org/releases/*/releases/*/alpine-minirootfs-*.tar.gz` | gzip | SHA256 |
+| Artix | `iso.artixlinux.org/iso/artix-base-*.tar.zst` | zstd | SHA256 |
 | Void | `repo-default.voidlinux.org/live/current/void-*-ROOTFS-*.tar.xz` | xz | SHA256 |
-| Ubuntu | `cdimage.ubuntu.com/ubuntu-base/releases/*/release/ubuntu-base-*-base-*.tar.gz` | gzip | SHA256 |
-| Fedora | `kojipkgs.fedoraproject.org/packages/Fedora-Container-Base/` | xz | Checksum |
+| Alpine | `alpinelinux.org/releases/*/releases/*/alpine-minirootfs-*.tar.gz` | gzip | SHA256 |
+| Devuan | `files.devuan.org/devuan_*/minimal-live/*.tar.xz` | xz | SHA256 |
+| Chimera | `repo.chimera-linux.org/live/*/chimera-linux-*-ROOTFS-*.tar.gz` | gzip | SHA256 |
 
 ### 3.5 ISO Installation Phases
 
@@ -209,6 +227,7 @@ Phase 3: Storage
 
 Phase 4: Installation
 ├── Package selection
+├── Init system selection (Artix)
 ├── Base system installation
 ├── Bootloader installation
 ├── Initial configuration
@@ -218,7 +237,7 @@ Phase 5: Finalization
 ├── Generate fstab
 ├── Set root password
 ├── Create user accounts
-├── Enable services
+├── Enable services (init-specific)
 └── Unmount and reboot
 ```
 
@@ -228,18 +247,18 @@ Phase 5: Finalization
 
 ### 4.1 Operation Equivalence Matrix
 
-| Operation | apt | pacman | dnf | xbps | apk | zypper |
-|-----------|-----|--------|-----|------|-----|--------|
-| Update index | `apt update` | `pacman -Sy` | `dnf check-update` | `xbps-install -S` | `apk update` | `zypper ref` |
-| Upgrade all | `apt upgrade` | `pacman -Su` | `dnf upgrade` | `xbps-install -u` | `apk upgrade` | `zypper up` |
-| Install pkg | `apt install` | `pacman -S` | `dnf install` | `xbps-install` | `apk add` | `zypper in` |
-| Remove pkg | `apt remove` | `pacman -R` | `dnf remove` | `xbps-remove` | `apk del` | `zypper rm` |
-| Search | `apt search` | `pacman -Ss` | `dnf search` | `xbps-query -Rs` | `apk search` | `zypper se` |
-| Info | `apt show` | `pacman -Si` | `dnf info` | `xbps-query -R` | `apk info` | `zypper if` |
-| List files | `dpkg -L` | `pacman -Ql` | `rpm -ql` | `xbps-query -f` | `apk info -L` | `rpm -ql` |
-| Owner of file | `dpkg -S` | `pacman -Qo` | `rpm -qf` | `xbps-query -o` | `apk info -W` | `rpm -qf` |
-| Clean cache | `apt clean` | `pacman -Sc` | `dnf clean all` | `xbps-remove -O` | `apk cache clean` | `zypper clean` |
-| List installed | `dpkg -l` | `pacman -Q` | `dnf list installed` | `xbps-query -l` | `apk info` | `zypper se -i` |
+| Operation | apt (Devuan) | pacman (Artix) | xbps (Void) | apk (Alpine/Chimera) | emerge (Gentoo) |
+|-----------|--------------|----------------|-------------|---------------------|-----------------|
+| Update index | `apt update` | `pacman -Sy` | `xbps-install -S` | `apk update` | `emerge --sync` |
+| Upgrade all | `apt upgrade` | `pacman -Su` | `xbps-install -u` | `apk upgrade` | `emerge -uDN @world` |
+| Install pkg | `apt install` | `pacman -S` | `xbps-install` | `apk add` | `emerge` |
+| Remove pkg | `apt remove` | `pacman -R` | `xbps-remove` | `apk del` | `emerge -C` |
+| Search | `apt search` | `pacman -Ss` | `xbps-query -Rs` | `apk search` | `emerge -s` |
+| Info | `apt show` | `pacman -Si` | `xbps-query -R` | `apk info` | `emerge -pv` |
+| List files | `dpkg -L` | `pacman -Ql` | `xbps-query -f` | `apk info -L` | `equery files` |
+| Owner of file | `dpkg -S` | `pacman -Qo` | `xbps-query -o` | `apk info -W` | `equery belongs` |
+| Clean cache | `apt clean` | `pacman -Sc` | `xbps-remove -O` | `apk cache clean` | `eclean distfiles` |
+| List installed | `dpkg -l` | `pacman -Q` | `xbps-query -l` | `apk info` | `qlist -I` |
 
 ### 4.2 Package Manager Abstraction Layer
 
@@ -273,40 +292,50 @@ pub trait PackageManager {
 
 Packages have different names across distributions:
 
-| Function | Debian | Arch | Fedora | Void | Alpine |
-|----------|--------|------|--------|------|--------|
-| Kernel | `linux-image-*` | `linux` | `kernel` | `linux` | `linux-lts` |
-| Firmware | `linux-firmware` | `linux-firmware` | `linux-firmware` | `linux-firmware` | `linux-firmware` |
-| GRUB (EFI) | `grub-efi-amd64` | `grub` | `grub2-efi-x64` | `grub-x86_64-efi` | `grub-efi` |
-| NetworkManager | `network-manager` | `networkmanager` | `NetworkManager` | `NetworkManager` | `networkmanager` |
-| Wireless | `iwd` | `iwd` | `iwd` | `iwd` | `iwd` |
+| Function | Artix | Devuan | Void | Alpine | Gentoo |
+|----------|-------|--------|------|--------|--------|
+| Kernel | `linux` | `linux-image-*` | `linux` | `linux-lts` | `gentoo-sources` |
+| Firmware | `linux-firmware` | `firmware-linux` | `linux-firmware` | `linux-firmware` | `linux-firmware` |
+| GRUB (EFI) | `grub` | `grub-efi-amd64` | `grub-x86_64-efi` | `grub-efi` | `grub` |
+| NetworkManager | `networkmanager` | `network-manager` | `NetworkManager` | `networkmanager` | `networkmanager` |
+| Wireless (iwd) | `iwd` | `iwd` | `iwd` | `iwd` | `iwd` |
 | Cryptsetup | `cryptsetup` | `cryptsetup` | `cryptsetup` | `cryptsetup` | `cryptsetup` |
 | Btrfs tools | `btrfs-progs` | `btrfs-progs` | `btrfs-progs` | `btrfs-progs` | `btrfs-progs` |
 | Sudo | `sudo` | `sudo` | `sudo` | `sudo` | `sudo` |
-| Text editor | `nano` | `nano` | `nano` | `nano` | `nano` |
-| Compression | `zstd` | `zstd` | `zstd` | `zstd` | `zstd` |
+| Doas | `opendoas` | `doas` | `opendoas` | `doas` | `doas` |
 
-### 4.4 Package Group/Pattern Equivalents
+### 4.4 Init-Specific Package Names
 
-| Concept | Debian | Arch | Fedora | Void | Alpine |
-|---------|--------|------|--------|------|--------|
-| Minimal base | `--variant=minbase` | `base` | `@core` | `base-system` | `alpine-base` |
-| Desktop (GNOME) | `gnome` | `gnome` | `@gnome-desktop` | `gnome` | `gnome` |
-| Desktop (KDE) | `kde-plasma-desktop` | `plasma` | `@kde-desktop` | `kde5` | `plasma` |
-| Development | `build-essential` | `base-devel` | `@development-tools` | `base-devel` | `build-base` |
-| X.org | `xorg` | `xorg` | `@base-x` | `xorg` | `xorg-server` |
-| Fonts | `fonts-*` | `ttf-*`, `noto-fonts` | `*-fonts` | `*-fonts-ttf` | `font-*` |
+| Init System | Artix | Void | Alpine | Devuan | Gentoo |
+|-------------|-------|------|--------|--------|--------|
+| runit base | `runit` | `runit` | N/A | `runit-init` | `runit` |
+| OpenRC base | `openrc` | N/A | `openrc` | `openrc` | `openrc` |
+| s6 base | `s6-base` | N/A | N/A | N/A | `s6` |
+| dinit base | `dinit` | N/A | N/A | N/A | `dinit` |
+| elogind (runit) | `elogind-runit` | `elogind` | N/A | `elogind` | `elogind` |
+| elogind (OpenRC) | `elogind-openrc` | N/A | `elogind` | `elogind` | `elogind` |
+| seatd (runit) | `seatd-runit` | `seatd` | N/A | N/A | `seatd` |
+| seatd (OpenRC) | `seatd-openrc` | N/A | `seatd` | N/A | `seatd` |
 
-### 4.5 Repository Configuration
+### 4.5 Package Group/Pattern Equivalents
+
+| Concept | Artix | Devuan | Void | Alpine | Gentoo |
+|---------|-------|--------|------|--------|--------|
+| Minimal base | `base` | `--variant=minbase` | `base-system` | `alpine-base` | `@system` |
+| Development | `base-devel` | `build-essential` | `base-devel` | `build-base` | `@system` |
+| X.org | `xorg` | `xorg` | `xorg` | `xorg-server` | `x11-base/xorg-x11` |
+| Fonts | `noto-fonts` | `fonts-noto` | `noto-fonts-ttf` | `font-noto` | `media-fonts/noto` |
+
+### 4.6 Repository Configuration
 
 | Distribution | Config Location | Format | Mirror Variable |
 |--------------|-----------------|--------|-----------------|
-| Debian | `/etc/apt/sources.list.d/` | `deb URL dist components` | Direct URL |
-| Arch | `/etc/pacman.d/mirrorlist` | `Server = URL` | `$repo`, `$arch` |
-| Fedora | `/etc/yum.repos.d/*.repo` | INI with `baseurl=` | `$releasever`, `$basearch` |
+| Artix | `/etc/pacman.d/mirrorlist` | `Server = URL` | `$repo`, `$arch` |
+| Devuan | `/etc/apt/sources.list.d/` | `deb URL dist components` | Direct URL |
 | Void | `/etc/xbps.d/*.conf` | `repository=URL` | `$arch` |
 | Alpine | `/etc/apk/repositories` | Plain URL list | `$version`, `$arch` |
-| openSUSE | `/etc/zypp/repos.d/*.repo` | INI with `baseurl=` | `$releasever` |
+| Gentoo | `/etc/portage/repos.conf/` | INI format | Sync URI |
+| Chimera | `/etc/apk/repositories` | Plain URL list | Direct URL |
 
 ---
 
@@ -314,25 +343,25 @@ Packages have different names across distributions:
 
 ### 5.1 Init System Overview
 
-| Init System | Type | Service Format | Boot Target | Distribution Usage |
-|-------------|------|----------------|-------------|-------------------|
-| systemd | Monolithic | Unit files | `*.target` | Debian, Fedora, Arch, SUSE |
-| OpenRC | Modular | Shell scripts | Runlevels | Alpine, Gentoo, Artix |
-| runit | Minimal | Directories | N/A | Void, Artix |
-| s6 | Supervision | Execline scripts | N/A | Artix, custom |
-| dinit | Hybrid | INI-like | Boot service | Artix, Chimera |
-| SysVinit | Traditional | Shell scripts | Runlevels | Devuan, older distros |
+| Init System | Type | Service Format | Supervision | Complexity |
+|-------------|------|----------------|-------------|------------|
+| runit | Supervision | Directory + run script | Built-in | Minimal |
+| OpenRC | Dependency | Shell scripts | Optional | Moderate |
+| s6 | Supervision | Execline scripts | Built-in | Moderate |
+| dinit | Dependency + Supervision | INI-like files | Built-in | Moderate |
+| sysvinit | Sequential | Shell scripts | None | Traditional |
 
 ### 5.2 Service Management Equivalents
 
-| Operation | systemd | OpenRC | runit | s6 | dinit |
-|-----------|---------|--------|-------|-----|-------|
-| Start | `systemctl start X` | `rc-service X start` | `sv up X` | `s6-svc -u /run/s6/...` | `dinitctl start X` |
-| Stop | `systemctl stop X` | `rc-service X stop` | `sv down X` | `s6-svc -d /run/s6/...` | `dinitctl stop X` |
-| Enable | `systemctl enable X` | `rc-update add X` | `ln -s /etc/sv/X /var/service/` | Compile DB | `dinitctl enable X` |
-| Disable | `systemctl disable X` | `rc-update del X` | `rm /var/service/X` | Compile DB | `dinitctl disable X` |
-| Status | `systemctl status X` | `rc-service X status` | `sv status X` | `s6-svstat` | `dinitctl status X` |
-| List | `systemctl list-units` | `rc-status` | `ls /var/service/` | `s6-rc -a list` | `dinitctl list` |
+| Operation | runit | OpenRC | s6 | dinit | sysvinit |
+|-----------|-------|--------|-----|-------|----------|
+| Start | `sv up X` | `rc-service X start` | `s6-svc -u /run/service/X` | `dinitctl start X` | `/etc/init.d/X start` |
+| Stop | `sv down X` | `rc-service X stop` | `s6-svc -d /run/service/X` | `dinitctl stop X` | `/etc/init.d/X stop` |
+| Restart | `sv restart X` | `rc-service X restart` | `s6-svc -r /run/service/X` | `dinitctl restart X` | `/etc/init.d/X restart` |
+| Enable | `ln -s /etc/runit/sv/X /run/runit/service/` | `rc-update add X` | Compile DB | `dinitctl enable X` | `update-rc.d X defaults` |
+| Disable | `rm /run/runit/service/X` | `rc-update del X` | Compile DB | `dinitctl disable X` | `update-rc.d X remove` |
+| Status | `sv status X` | `rc-service X status` | `s6-svstat /run/service/X` | `dinitctl status X` | `/etc/init.d/X status` |
+| List | `ls /run/runit/service/` | `rc-status` | `s6-rc -a list` | `dinitctl list` | `ls /etc/init.d/` |
 
 ### 5.3 Init System Abstraction
 
@@ -355,19 +384,129 @@ pub trait InitSystem {
 
     /// Get required base packages for this init system
     fn base_packages(&self) -> Vec<&'static str>;
+
+    /// Get service suffix (e.g., "-runit", "-openrc")
+    fn service_suffix(&self) -> &'static str;
 }
 ```
 
-### 5.4 Service Name Variations
+### 5.4 Init System Directory Structures
 
-| Service | systemd | OpenRC | runit | Notes |
-|---------|---------|--------|-------|-------|
-| Networking | `systemd-networkd` | `networking` | `dhcpcd` | Varies greatly |
-| Cron | `cronie.service` | `cronie` | `cronie` | or `fcron`, `dcron` |
-| SSH | `sshd.service` | `sshd` | `sshd` | Consistent |
-| Time sync | `systemd-timesyncd` | `ntpd` / `chronyd` | `ntpd` | Different daemons |
-| Logging | `systemd-journald` | `syslog-ng` | `socklog` | Architecture differs |
-| Device mgmt | `systemd-udevd` | `udev` | `udevd` | Same udev usually |
+**runit:**
+```
+/etc/runit/
+├── 1                    # Stage 1: System initialization
+├── 2                    # Stage 2: Service supervision
+├── 3                    # Stage 3: Shutdown
+└── sv/                  # Available services
+    ├── agetty-tty1/
+    │   └── run          # Executable script
+    ├── dhcpcd/
+    │   ├── run
+    │   └── log/
+    │       └── run      # Optional logging service
+    └── sshd/
+        └── run
+
+/run/runit/service/      # Enabled services (symlinks)
+```
+
+**OpenRC:**
+```
+/etc/init.d/             # Service scripts
+├── agetty
+├── dhcpcd
+├── sshd
+└── ...
+
+/etc/runlevels/
+├── boot/                # Boot runlevel
+│   ├── hwclock -> /etc/init.d/hwclock
+│   └── ...
+├── default/             # Default runlevel
+│   ├── dhcpcd -> /etc/init.d/dhcpcd
+│   └── sshd -> /etc/init.d/sshd
+└── shutdown/            # Shutdown runlevel
+
+/etc/conf.d/             # Service configuration
+├── dhcpcd
+└── sshd
+```
+
+**s6:**
+```
+/etc/s6/sv/              # Service definitions
+├── sshd/
+│   ├── type             # "longrun" or "oneshot"
+│   ├── run              # Execline script
+│   ├── finish           # Optional cleanup
+│   └── dependencies.d/  # Service dependencies
+└── dhcpcd/
+    └── run
+
+/run/service/            # Active services (scandir)
+```
+
+**dinit:**
+```
+/etc/dinit.d/            # Service definitions
+├── boot                 # Boot target
+├── sshd                 # INI-like service file
+├── dhcpcd
+└── boot.d/              # Enabled at boot (symlinks)
+    ├── sshd -> ../sshd
+    └── dhcpcd -> ../dhcpcd
+```
+
+### 5.5 Service File Examples
+
+**runit service (`/etc/runit/sv/sshd/run`):**
+```sh
+#!/bin/sh
+exec /usr/sbin/sshd -D
+```
+
+**OpenRC service (`/etc/init.d/sshd`):**
+```sh
+#!/sbin/openrc-run
+
+name="sshd"
+command="/usr/sbin/sshd"
+command_args="-D"
+pidfile="/run/sshd.pid"
+
+depend() {
+    need net
+    use logger dns
+}
+```
+
+**s6 service (`/etc/s6/sv/sshd/run`):**
+```
+#!/bin/execlineb -P
+/usr/sbin/sshd -D
+```
+
+**dinit service (`/etc/dinit.d/sshd`):**
+```ini
+type = process
+command = /usr/sbin/sshd -D
+depends-on = network
+```
+
+### 5.6 Service Name Variations
+
+| Service | runit (Artix) | OpenRC (Alpine) | s6 (Artix) | dinit (Artix) |
+|---------|---------------|-----------------|------------|---------------|
+| Getty | `agetty-tty1` | `agetty` | `agetty-tty1` | `agetty-tty1` |
+| DHCP Client | `dhcpcd` | `dhcpcd` | `dhcpcd` | `dhcpcd` |
+| SSH Server | `sshd` | `sshd` | `sshd` | `sshd` |
+| Cron | `cronie` | `crond` | `cronie` | `cronie` |
+| NTP | `ntpd` | `ntpd` | `ntpd` | `ntpd` |
+| Logging | `socklog-unix` | `syslog-ng` | `s6-log` | `syslog-ng` |
+| Device Manager | `udevd` | `udev` | `udevd` | `udevd` |
+| Seat Manager | `seatd` | `seatd` | `seatd` | `seatd` |
+| Session Manager | `elogind` | `elogind` | `elogind` | `elogind` |
 
 ---
 
@@ -377,51 +516,49 @@ pub trait InitSystem {
 
 While FHS provides the standard, distributions have variations:
 
-| Path | Standard | Variation | Distribution |
-|------|----------|-----------|--------------|
-| `/bin`, `/sbin` | Separate | Symlink to `/usr/bin` | Arch, Fedora |
-| `/lib`, `/lib64` | Separate | Symlink to `/usr/lib` | Arch, Fedora |
-| `/etc/os-release` | Present | Always present | All modern |
-| `/etc/lsb-release` | Optional | Debian-family | Ubuntu, Mint |
-| `/usr/lib/os-release` | Fallback | systemd distros | Fedora, Arch |
+| Path | Standard | Artix | Void | Alpine |
+|------|----------|-------|------|--------|
+| `/bin`, `/sbin` | Separate | Symlink to `/usr/bin` | Symlink to `/usr/bin` | Separate |
+| `/lib`, `/lib64` | Separate | Symlink to `/usr/lib` | Symlink to `/usr/lib` | Separate |
+| `/etc/os-release` | Present | Yes | Yes | Yes |
+| Service logs | Varies | `/var/log/socklog/` | `/var/log/socklog/` | `/var/log/` |
 
 ### 6.2 Boot Configuration Locations
 
 | Bootloader | Config Location | Entry Location |
 |------------|-----------------|----------------|
 | GRUB | `/etc/default/grub` | `/boot/grub/grub.cfg` |
-| systemd-boot | `/boot/loader/loader.conf` | `/boot/loader/entries/*.conf` |
 | rEFInd | `/boot/EFI/refind/refind.conf` | Auto-detect |
 | EFISTUB | N/A (kernel params) | NVRAM |
-| LILO | `/etc/lilo.conf` | N/A |
 | Syslinux | `/boot/syslinux/syslinux.cfg` | N/A |
+| LILO | `/etc/lilo.conf` | N/A |
 
 ### 6.3 Kernel and Initramfs Paths
 
 | Distribution | Kernel Path | Initramfs Path | Naming Convention |
 |--------------|-------------|----------------|-------------------|
-| Debian | `/boot/vmlinuz-*` | `/boot/initrd.img-*` | Version suffix |
-| Arch | `/boot/vmlinuz-linux` | `/boot/initramfs-linux.img` | Variant suffix |
-| Fedora | `/boot/vmlinuz-*` | `/boot/initramfs-*.img` | Version suffix |
+| Artix | `/boot/vmlinuz-linux` | `/boot/initramfs-linux.img` | Variant suffix |
 | Void | `/boot/vmlinuz-*` | `/boot/initramfs-*.img` | Version suffix |
 | Alpine | `/boot/vmlinuz-*` | `/boot/initramfs-*` | Variant suffix |
+| Devuan | `/boot/vmlinuz-*` | `/boot/initrd.img-*` | Version suffix |
+| Gentoo | `/boot/vmlinuz-*` | `/boot/initramfs-*.img` | Custom |
 
 ### 6.4 Initramfs Generation Tools
 
 | Tool | Distribution | Config File | Regenerate Command |
 |------|--------------|-------------|-------------------|
-| mkinitcpio | Arch, Artix | `/etc/mkinitcpio.conf` | `mkinitcpio -P` |
-| dracut | Fedora, SUSE, Void | `/etc/dracut.conf.d/` | `dracut --force` |
-| initramfs-tools | Debian, Ubuntu | `/etc/initramfs-tools/` | `update-initramfs -u` |
+| mkinitcpio | Artix | `/etc/mkinitcpio.conf` | `mkinitcpio -P` |
+| dracut | Void, Gentoo | `/etc/dracut.conf.d/` | `dracut --force` |
 | mkinitfs | Alpine | `/etc/mkinitfs/mkinitfs.conf` | `mkinitfs` |
+| initramfs-tools | Devuan | `/etc/initramfs-tools/` | `update-initramfs -u` |
 
 ### 6.5 Fstab UUID vs Label vs Path
 
 | Method | Format | Reliability | Distribution Preference |
 |--------|--------|-------------|------------------------|
-| UUID | `UUID=abc-123` | Highest | Debian, Fedora, Ubuntu |
+| UUID | `UUID=abc-123` | Highest | Devuan, Void |
 | PARTUUID | `PARTUUID=abc-123` | High | GPT systems |
-| Label | `LABEL=root` | Medium | openSUSE |
+| Label | `LABEL=root` | Medium | Alpine |
 | Path | `/dev/sda1` | Low | Legacy only |
 
 ---
@@ -433,52 +570,59 @@ While FHS provides the standard, distributions have variations:
 The `/etc/os-release` file (or `/usr/lib/os-release`) is the standard detection method:
 
 ```bash
-# /etc/os-release fields
-ID=artix                    # Lowercase identifier
-ID_LIKE=arch                # Parent distribution(s)
-NAME="Artix Linux"          # Human-readable name
-VERSION_ID=2024.01.01       # Version (optional for rolling)
-PRETTY_NAME="Artix Linux"   # Display name
-HOME_URL="https://..."      # Project URL
+# /etc/os-release fields (Artix example)
+ID=artix
+ID_LIKE=arch
+NAME="Artix Linux"
+PRETTY_NAME="Artix Linux"
+HOME_URL="https://artixlinux.org/"
 ```
 
 **Key Fields:**
 
 | Field | Purpose | Example Values |
 |-------|---------|----------------|
-| `ID` | Primary identifier | `debian`, `ubuntu`, `arch`, `fedora`, `void`, `alpine` |
-| `ID_LIKE` | Parent/compatible distros | `arch`, `debian`, `rhel fedora` |
-| `VERSION_ID` | Numeric version | `22.04`, `39`, `3.18` |
-| `VERSION_CODENAME` | Release codename | `jammy`, `bookworm` |
+| `ID` | Primary identifier | `artix`, `devuan`, `void`, `alpine` |
+| `ID_LIKE` | Parent/compatible distros | `arch`, `debian` |
+| `VERSION_ID` | Numeric version | `3.18`, `5.0` |
+| `VERSION_CODENAME` | Release codename | `daedalus`, `chimaera` |
 
-### 7.2 Secondary Detection Methods
-
-When `os-release` is insufficient:
+### 7.2 Init System Detection
 
 ```rust
-/// Detection priority order
-pub enum DetectionMethod {
-    OsRelease,           // /etc/os-release (preferred)
-    LsbRelease,          // /etc/lsb-release (Debian family)
-    DistroSpecific,      // /etc/debian_version, /etc/arch-release, etc.
-    PackageManager,      // Detect by available package manager
-    InitSystem,          // Detect by running init
-    FilePresence,        // /etc/alpine-release, /etc/void-release
+/// Detect running init system (no systemd)
+pub fn detect_init_system() -> Option<InitSystemType> {
+    // Check /proc/1/comm for init process name
+    if let Ok(init_name) = std::fs::read_to_string("/proc/1/comm") {
+        match init_name.trim() {
+            "runit" => return Some(InitSystemType::Runit),
+            "init" => return detect_init_by_filesystem(),
+            "s6-svscan" => return Some(InitSystemType::S6),
+            "dinit" => return Some(InitSystemType::Dinit),
+            _ => {}
+        }
+    }
+
+    // Fallback: Check for init-specific paths
+    detect_init_by_filesystem()
+}
+
+fn detect_init_by_filesystem() -> Option<InitSystemType> {
+    if Path::new("/run/runit").exists() || Path::new("/etc/runit/runsvdir").exists() {
+        Some(InitSystemType::Runit)
+    } else if Path::new("/run/openrc").exists() {
+        Some(InitSystemType::OpenRC)
+    } else if Path::new("/run/s6").exists() || Path::new("/run/service/.s6-svscan").exists() {
+        Some(InitSystemType::S6)
+    } else if Path::new("/run/dinit").exists() || Path::new("/etc/dinit.d").exists() {
+        Some(InitSystemType::Dinit)
+    } else if Path::new("/etc/inittab").exists() {
+        Some(InitSystemType::SysVinit)
+    } else {
+        None
+    }
 }
 ```
-
-**Distribution-Specific Files:**
-
-| File | Distribution |
-|------|--------------|
-| `/etc/debian_version` | Debian and derivatives |
-| `/etc/arch-release` | Arch Linux |
-| `/etc/artix-release` | Artix Linux |
-| `/etc/fedora-release` | Fedora |
-| `/etc/redhat-release` | RHEL and derivatives |
-| `/etc/alpine-release` | Alpine |
-| `/etc/void-release` | Void Linux |
-| `/etc/SuSE-release` | openSUSE (legacy) |
 
 ### 7.3 Package Manager Detection
 
@@ -486,13 +630,12 @@ pub enum DetectionMethod {
 /// Detect package manager by binary presence
 pub fn detect_package_manager() -> Option<PackageManagerType> {
     let checks = [
-        ("/usr/bin/apt", PackageManagerType::Apt),
         ("/usr/bin/pacman", PackageManagerType::Pacman),
-        ("/usr/bin/dnf", PackageManagerType::Dnf),
         ("/usr/bin/xbps-install", PackageManagerType::Xbps),
         ("/sbin/apk", PackageManagerType::Apk),
-        ("/usr/bin/zypper", PackageManagerType::Zypper),
-        ("/usr/bin/yum", PackageManagerType::Yum),
+        ("/usr/bin/apt", PackageManagerType::Apt),
+        ("/usr/bin/emerge", PackageManagerType::Portage),
+        ("/usr/sbin/slackpkg", PackageManagerType::Slackpkg),
     ];
 
     for (path, pm_type) in checks {
@@ -504,53 +647,41 @@ pub fn detect_package_manager() -> Option<PackageManagerType> {
 }
 ```
 
-### 7.4 Init System Detection
+### 7.4 Distribution-Specific Detection Files
+
+| File | Distribution |
+|------|--------------|
+| `/etc/artix-release` | Artix Linux |
+| `/etc/devuan_version` | Devuan |
+| `/etc/void-release` | Void Linux |
+| `/etc/alpine-release` | Alpine |
+| `/etc/gentoo-release` | Gentoo |
+| `/etc/slackware-version` | Slackware |
+| `/etc/chimera-release` | Chimera Linux |
+
+### 7.5 C Library Detection
 
 ```rust
-/// Detect running init system
-pub fn detect_init_system() -> Option<InitSystemType> {
-    // Check /proc/1/comm for init process name
-    if let Ok(init_name) = std::fs::read_to_string("/proc/1/comm") {
-        return match init_name.trim() {
-            "systemd" => Some(InitSystemType::Systemd),
-            "init" => detect_init_by_filesystem(),  // Could be SysV, OpenRC, etc.
-            "runit" => Some(InitSystemType::Runit),
-            "s6-svscan" => Some(InitSystemType::S6),
-            "dinit" => Some(InitSystemType::Dinit),
-            _ => None,
-        };
+pub fn detect_libc() -> LibC {
+    // Check if musl is in use
+    if let Ok(output) = std::process::Command::new("ldd")
+        .arg("--version")
+        .output()
+    {
+        let output_str = String::from_utf8_lossy(&output.stderr);
+        if output_str.contains("musl") {
+            return LibC::Musl;
+        }
     }
-    None
-}
 
-fn detect_init_by_filesystem() -> Option<InitSystemType> {
-    if Path::new("/run/openrc").exists() {
-        Some(InitSystemType::OpenRC)
-    } else if Path::new("/run/runit").exists() {
-        Some(InitSystemType::Runit)
-    } else if Path::new("/etc/inittab").exists() {
-        Some(InitSystemType::SysVinit)
-    } else {
-        None
+    // Check for musl libc directly
+    if Path::new("/lib/ld-musl-x86_64.so.1").exists()
+        || Path::new("/lib/ld-musl-aarch64.so.1").exists()
+    {
+        return LibC::Musl;
     }
-}
-```
 
-### 7.5 Architecture Detection
-
-```rust
-pub fn detect_architecture() -> Architecture {
-    #[cfg(target_arch = "x86_64")]
-    return Architecture::X86_64;
-
-    #[cfg(target_arch = "aarch64")]
-    return Architecture::Aarch64;
-
-    #[cfg(target_arch = "x86")]
-    return Architecture::I686;
-
-    #[cfg(target_arch = "arm")]
-    return Architecture::Arm;
+    LibC::Glibc
 }
 ```
 
@@ -561,7 +692,7 @@ pub fn detect_architecture() -> Architecture {
 ### 8.1 Distribution Profile Structure
 
 ```rust
-/// Complete distribution profile
+/// Complete distribution profile (systemd-free only)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributionProfile {
     /// Primary identification
@@ -609,13 +740,12 @@ pub struct DistroIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DistroFamily {
-    Debian,
-    RedHat,
-    Arch,
-    Suse,
-    Void,
-    Alpine,
-    Slackware,
+    Arch,       // Artix, Obarun, Hyperbola
+    Debian,     // Devuan
+    Void,       // Void Linux
+    Alpine,     // Alpine, Chimera
+    Gentoo,     // Gentoo, Funtoo
+    Slackware,  // Slackware
     Independent,
 }
 
@@ -633,7 +763,54 @@ pub enum LibC {
 }
 ```
 
-### 8.2 Package Manager Profile
+### 8.2 Init System Profile
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitSystemProfile {
+    /// Init system type
+    pub init_type: InitSystemType,
+
+    /// Service directory (available services)
+    pub service_dir: PathBuf,
+
+    /// Enabled services location
+    pub enabled_dir: PathBuf,
+
+    /// Service management commands
+    pub commands: InitSystemCommands,
+
+    /// Required packages
+    pub packages: Vec<String>,
+
+    /// Service name mappings
+    pub service_map: HashMap<String, String>,
+
+    /// Package suffix for init-specific packages
+    pub package_suffix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InitSystemType {
+    Runit,
+    OpenRC,
+    S6,
+    Dinit,
+    SysVinit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitSystemCommands {
+    pub enable: String,         // "ln -sf /etc/runit/sv/{service} /run/runit/service/"
+    pub disable: String,        // "rm /run/runit/service/{service}"
+    pub start: String,          // "sv up {service}"
+    pub stop: String,           // "sv down {service}"
+    pub status: String,         // "sv status {service}"
+    pub list_enabled: String,   // "ls /run/runit/service/"
+}
+```
+
+### 8.3 Package Manager Profile
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -653,28 +830,28 @@ pub struct PackageManagerProfile {
     /// Command templates
     pub commands: PackageManagerCommands,
 
-    /// Package name mappings
+    /// Package name mappings (canonical -> distro-specific)
     pub package_map: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageManagerType {
-    Apt,
-    Pacman,
-    Dnf,
-    Yum,
-    Xbps,
-    Apk,
-    Zypper,
+    Pacman,     // Artix
+    Apt,        // Devuan
+    Xbps,       // Void
+    Apk,        // Alpine, Chimera
+    Portage,    // Gentoo
+    Slackpkg,   // Slackware
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageFormat {
-    Deb,
-    Rpm,
-    PkgTarZst,
-    Xbps,
-    Apk,
+    PkgTarZst,  // Arch family
+    Deb,        // Debian family
+    Xbps,       // Void
+    Apk,        // Alpine family
+    Ebuild,     // Gentoo
+    Txz,        // Slackware
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -682,53 +859,9 @@ pub struct PackageManagerCommands {
     pub sync: String,           // "pacman -Sy"
     pub install: String,        // "pacman -S --noconfirm {packages}"
     pub remove: String,         // "pacman -R {packages}"
-    pub upgrade: String,        // "pacman -Su"
+    pub upgrade: String,        // "pacman -Su --noconfirm"
     pub search: String,         // "pacman -Ss {query}"
-    pub bootstrap: String,      // "pacstrap {root} {packages}"
-}
-```
-
-### 8.3 Init System Profile
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitSystemProfile {
-    /// Init system type
-    pub init_type: InitSystemType,
-
-    /// Service directory
-    pub service_dir: PathBuf,
-
-    /// Enabled services location
-    pub enabled_dir: PathBuf,
-
-    /// Service management commands
-    pub commands: InitSystemCommands,
-
-    /// Required packages
-    pub packages: Vec<String>,
-
-    /// Service name mappings
-    pub service_map: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InitSystemType {
-    Systemd,
-    OpenRC,
-    Runit,
-    S6,
-    Dinit,
-    SysVinit,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitSystemCommands {
-    pub enable: String,         // "systemctl enable {service}"
-    pub disable: String,        // "systemctl disable {service}"
-    pub start: String,          // "systemctl start {service}"
-    pub stop: String,           // "systemctl stop {service}"
-    pub status: String,         // "systemctl status {service}"
+    pub bootstrap: String,      // "basestrap {root} {packages}"
 }
 ```
 
@@ -757,11 +890,20 @@ pub struct BootProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BootloaderType {
+    Grub,
+    Refind,
+    Efistub,
+    Syslinux,
+    Lilo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InitramfsTool {
-    Mkinitcpio,
-    Dracut,
-    InitramfsTools,
-    Mkinitfs,
+    Mkinitcpio,     // Artix
+    Dracut,         // Void, Gentoo
+    InitramfsTools, // Devuan
+    Mkinitfs,       // Alpine
 }
 ```
 
@@ -776,7 +918,7 @@ pub struct CapabilitySet {
     /// Supports BIOS boot
     pub bios: bool,
 
-    /// Supports Secure Boot
+    /// Supports Secure Boot (without shim)
     pub secure_boot: bool,
 
     /// Supports full disk encryption
@@ -794,14 +936,11 @@ pub struct CapabilitySet {
     /// Supports RAID
     pub raid: bool,
 
-    /// Supports containers (built-in)
-    pub containers: bool,
-
     /// Supports Flatpak
     pub flatpak: bool,
 
-    /// Supports Snap
-    pub snap: bool,
+    /// Musl-compatible
+    pub musl: bool,
 }
 ```
 
@@ -836,42 +975,35 @@ impl DistributionProfile {
         let mut profile = parent.clone();
         profile.identity.id = detected.id.clone();
         profile.identity.name = detected.name.clone();
-        // Apply any known overrides for this derivative
         profile
     }
 }
 ```
 
-### 9.2 Package Name Resolution
+### 9.2 Init-Aware Package Resolution
 
 ```rust
 impl PackageManagerProfile {
-    /// Resolve canonical package name to distribution-specific name
-    pub fn resolve_package(&self, canonical: &str) -> String {
+    /// Resolve package name with init system awareness
+    pub fn resolve_package(&self, canonical: &str, init: &InitSystemProfile) -> String {
+        // Check for init-specific package first
+        let init_specific = format!("{}{}", canonical, init.package_suffix);
+        if let Some(mapped) = self.package_map.get(&init_specific) {
+            return mapped.clone();
+        }
+
+        // Fall back to canonical mapping
         self.package_map
             .get(canonical)
             .cloned()
             .unwrap_or_else(|| canonical.to_string())
     }
-
-    /// Resolve multiple packages
-    pub fn resolve_packages(&self, packages: &[&str]) -> Vec<String> {
-        packages.iter()
-            .map(|p| self.resolve_package(p))
-            .collect()
-    }
 }
 
-// Example package map
-lazy_static! {
-    static ref DEBIAN_PACKAGE_MAP: HashMap<String, String> = {
-        let mut m = HashMap::new();
-        m.insert("kernel".into(), "linux-image-amd64".into());
-        m.insert("grub-efi".into(), "grub-efi-amd64".into());
-        m.insert("networkmanager".into(), "network-manager".into());
-        m
-    };
-}
+// Example:
+// canonical = "elogind", init.package_suffix = "-runit"
+// First tries: "elogind-runit" -> "elogind-runit"
+// If not found: "elogind" -> mapped name or "elogind"
 ```
 
 ### 9.3 Service Name Resolution
@@ -885,13 +1017,14 @@ impl InitSystemProfile {
             .cloned()
             .unwrap_or_else(|| canonical.to_string())
     }
-}
 
-// Example: Different service names for same function
-// Canonical: "network"
-// systemd: "systemd-networkd" or "NetworkManager"
-// OpenRC: "net.eth0" or "NetworkManager"
-// runit: "dhcpcd" or "NetworkManager"
+    /// Enable a service by canonical name
+    pub fn enable(&self, cmd: &CommandRunner, root: &Path, canonical: &str) -> Result<()> {
+        let service_name = self.resolve_service(canonical);
+        let command = self.commands.enable.replace("{service}", &service_name);
+        cmd.run_in_chroot(&root.to_string_lossy(), &command)
+    }
+}
 ```
 
 ### 9.4 Command Template Expansion
@@ -909,51 +1042,38 @@ impl PackageManagerCommands {
 }
 
 // Usage:
-// Template: "pacstrap {root} {packages}"
-// Vars: {"root": "/mnt", "packages": "base linux"}
-// Result: "pacstrap /mnt base linux"
+// Template: "basestrap {root} {packages}"
+// Vars: {"root": "/mnt", "packages": "base linux runit elogind-runit"}
+// Result: "basestrap /mnt base linux runit elogind-runit"
 ```
 
-### 9.5 Fallback Strategies
+### 9.5 Cross-Distribution Installation
 
 ```rust
-/// Strategy for handling unsupported features
-pub enum FallbackStrategy {
-    /// Fail with error
-    Error,
+/// Install to a target with potentially different distribution
+pub fn cross_install(
+    host: &DistributionProfile,
+    target: &DistributionProfile,
+    root: &Path,
+    packages: &[&str],
+) -> Result<()> {
+    // Resolve packages for target distribution
+    let target_packages: Vec<String> = packages
+        .iter()
+        .map(|p| target.package_manager.resolve_package(p, &target.init_system))
+        .collect();
 
-    /// Skip and continue
-    Skip,
+    // Use host package manager with target root
+    let cmd_template = &target.package_manager.commands.bootstrap;
+    let packages_str = target_packages.join(" ");
 
-    /// Use alternative implementation
-    Alternative(Box<dyn Fn() -> Result<()>>),
+    let mut vars = HashMap::new();
+    vars.insert("root", root.to_str().unwrap());
+    vars.insert("packages", &packages_str);
 
-    /// Prompt user for decision
-    Prompt,
-}
+    let command = target.package_manager.commands.expand(cmd_template, &vars);
 
-impl CapabilitySet {
-    /// Check capability with fallback
-    pub fn require(&self, cap: Capability, fallback: FallbackStrategy) -> Result<()> {
-        if self.has(cap) {
-            return Ok(());
-        }
-
-        match fallback {
-            FallbackStrategy::Error => {
-                Err(DeploytixError::UnsupportedCapability(cap))
-            }
-            FallbackStrategy::Skip => {
-                warn!("Skipping unsupported capability: {:?}", cap);
-                Ok(())
-            }
-            FallbackStrategy::Alternative(f) => f(),
-            FallbackStrategy::Prompt => {
-                // Interactive decision
-                todo!()
-            }
-        }
-    }
+    CommandRunner::new(false).run("sh", &["-c", &command])
 }
 ```
 
@@ -970,65 +1090,7 @@ lazy_static! {
     pub static ref BUILTIN_PROFILES: HashMap<String, DistributionProfile> = {
         let mut m = HashMap::new();
 
-        m.insert("arch".into(), DistributionProfile {
-            identity: DistroIdentity {
-                id: "arch".into(),
-                id_like: vec![],
-                family: DistroFamily::Arch,
-                name: "Arch Linux".into(),
-                version: None,
-                release_model: ReleaseModel::Rolling,
-                libc: LibC::Glibc,
-            },
-            package_manager: PackageManagerProfile {
-                manager_type: PackageManagerType::Pacman,
-                package_format: PackageFormat::PkgTarZst,
-                commands: PackageManagerCommands {
-                    sync: "pacman -Sy".into(),
-                    install: "pacman -S --noconfirm {packages}".into(),
-                    remove: "pacman -R {packages}".into(),
-                    upgrade: "pacman -Su --noconfirm".into(),
-                    search: "pacman -Ss {query}".into(),
-                    bootstrap: "pacstrap {root} {packages}".into(),
-                },
-                // ...
-            },
-            init_system: InitSystemProfile {
-                init_type: InitSystemType::Systemd,
-                service_dir: "/usr/lib/systemd/system".into(),
-                enabled_dir: "/etc/systemd/system".into(),
-                commands: InitSystemCommands {
-                    enable: "systemctl enable {service}".into(),
-                    disable: "systemctl disable {service}".into(),
-                    start: "systemctl start {service}".into(),
-                    stop: "systemctl stop {service}".into(),
-                    status: "systemctl status {service}".into(),
-                },
-                // ...
-            },
-            boot: BootProfile {
-                bootloaders: vec![BootloaderType::Grub, BootloaderType::SystemdBoot],
-                default_bootloader: BootloaderType::Grub,
-                initramfs_tool: InitramfsTool::Mkinitcpio,
-                kernel_path: "/boot/vmlinuz-{variant}".into(),
-                initramfs_path: "/boot/initramfs-{variant}.img".into(),
-                // ...
-            },
-            capabilities: CapabilitySet {
-                uefi: true,
-                bios: true,
-                secure_boot: true,
-                fde: true,
-                btrfs: true,
-                zfs: true,  // Via AUR/archzfs
-                lvm: true,
-                raid: true,
-                containers: true,
-                flatpak: true,
-                snap: true,
-            },
-        });
-
+        // Artix Linux (runit default)
         m.insert("artix".into(), DistributionProfile {
             identity: DistroIdentity {
                 id: "artix".into(),
@@ -1048,12 +1110,13 @@ lazy_static! {
                     remove: "pacman -R {packages}".into(),
                     upgrade: "pacman -Su --noconfirm".into(),
                     search: "pacman -Ss {query}".into(),
-                    bootstrap: "basestrap {root} {packages}".into(),  // Artix uses basestrap
+                    bootstrap: "basestrap {root} {packages}".into(),
                 },
+                package_map: artix_package_map(),
                 // ...
             },
             init_system: InitSystemProfile {
-                init_type: InitSystemType::Runit,  // Default, but supports OpenRC, s6, dinit
+                init_type: InitSystemType::Runit,
                 service_dir: "/etc/runit/sv".into(),
                 enabled_dir: "/run/runit/service".into(),
                 commands: InitSystemCommands {
@@ -1062,97 +1125,315 @@ lazy_static! {
                     start: "sv up {service}".into(),
                     stop: "sv down {service}".into(),
                     status: "sv status {service}".into(),
+                    list_enabled: "ls /run/runit/service/".into(),
                 },
+                packages: vec!["runit".into(), "elogind-runit".into()],
+                service_map: runit_service_map(),
+                package_suffix: "-runit".into(),
+            },
+            boot: BootProfile {
+                bootloaders: vec![BootloaderType::Grub, BootloaderType::Refind],
+                default_bootloader: BootloaderType::Grub,
+                initramfs_tool: InitramfsTool::Mkinitcpio,
+                kernel_path: "/boot/vmlinuz-{variant}".into(),
+                initramfs_path: "/boot/initramfs-{variant}.img".into(),
                 // ...
             },
-            // ... rest similar to arch but with init variations
+            capabilities: CapabilitySet {
+                uefi: true,
+                bios: true,
+                secure_boot: false,
+                fde: true,
+                btrfs: true,
+                zfs: true,
+                lvm: true,
+                raid: true,
+                flatpak: true,
+                musl: false,
+            },
         });
 
-        // Add more profiles: debian, ubuntu, fedora, void, alpine, etc.
+        // Void Linux
+        m.insert("void".into(), DistributionProfile {
+            identity: DistroIdentity {
+                id: "void".into(),
+                id_like: vec![],
+                family: DistroFamily::Void,
+                name: "Void Linux".into(),
+                version: None,
+                release_model: ReleaseModel::Rolling,
+                libc: LibC::Glibc, // or Musl variant
+            },
+            package_manager: PackageManagerProfile {
+                manager_type: PackageManagerType::Xbps,
+                package_format: PackageFormat::Xbps,
+                commands: PackageManagerCommands {
+                    sync: "xbps-install -S".into(),
+                    install: "xbps-install -y {packages}".into(),
+                    remove: "xbps-remove {packages}".into(),
+                    upgrade: "xbps-install -Su".into(),
+                    search: "xbps-query -Rs {query}".into(),
+                    bootstrap: "XBPS_ARCH={arch} xbps-install -S -R {mirror} -r {root} {packages}".into(),
+                },
+                package_map: void_package_map(),
+                // ...
+            },
+            init_system: InitSystemProfile {
+                init_type: InitSystemType::Runit,
+                service_dir: "/etc/sv".into(),
+                enabled_dir: "/var/service".into(),
+                commands: InitSystemCommands {
+                    enable: "ln -sf /etc/sv/{service} /var/service/".into(),
+                    disable: "rm /var/service/{service}".into(),
+                    start: "sv up {service}".into(),
+                    stop: "sv down {service}".into(),
+                    status: "sv status {service}".into(),
+                    list_enabled: "ls /var/service/".into(),
+                },
+                packages: vec!["runit".into(), "void-repo-nonfree".into()],
+                service_map: void_service_map(),
+                package_suffix: "".into(), // Void doesn't use suffix
+            },
+            // ...
+        });
+
+        // Alpine Linux
+        m.insert("alpine".into(), DistributionProfile {
+            identity: DistroIdentity {
+                id: "alpine".into(),
+                id_like: vec![],
+                family: DistroFamily::Alpine,
+                name: "Alpine Linux".into(),
+                version: Some("3.19".into()),
+                release_model: ReleaseModel::PointRelease,
+                libc: LibC::Musl,
+            },
+            package_manager: PackageManagerProfile {
+                manager_type: PackageManagerType::Apk,
+                package_format: PackageFormat::Apk,
+                commands: PackageManagerCommands {
+                    sync: "apk update".into(),
+                    install: "apk add {packages}".into(),
+                    remove: "apk del {packages}".into(),
+                    upgrade: "apk upgrade".into(),
+                    search: "apk search {query}".into(),
+                    bootstrap: "apk -X {mirror} -U --allow-untrusted --root {root} --initdb add {packages}".into(),
+                },
+                package_map: alpine_package_map(),
+                // ...
+            },
+            init_system: InitSystemProfile {
+                init_type: InitSystemType::OpenRC,
+                service_dir: "/etc/init.d".into(),
+                enabled_dir: "/etc/runlevels/default".into(),
+                commands: InitSystemCommands {
+                    enable: "rc-update add {service} default".into(),
+                    disable: "rc-update del {service} default".into(),
+                    start: "rc-service {service} start".into(),
+                    stop: "rc-service {service} stop".into(),
+                    status: "rc-service {service} status".into(),
+                    list_enabled: "rc-status default".into(),
+                },
+                packages: vec!["openrc".into()],
+                service_map: openrc_service_map(),
+                package_suffix: "".into(),
+            },
+            // ...
+        });
+
+        // Devuan
+        m.insert("devuan".into(), DistributionProfile {
+            identity: DistroIdentity {
+                id: "devuan".into(),
+                id_like: vec!["debian".into()],
+                family: DistroFamily::Debian,
+                name: "Devuan GNU/Linux".into(),
+                version: Some("5.0".into()),
+                release_model: ReleaseModel::PointRelease,
+                libc: LibC::Glibc,
+            },
+            package_manager: PackageManagerProfile {
+                manager_type: PackageManagerType::Apt,
+                package_format: PackageFormat::Deb,
+                commands: PackageManagerCommands {
+                    sync: "apt update".into(),
+                    install: "apt install -y {packages}".into(),
+                    remove: "apt remove {packages}".into(),
+                    upgrade: "apt upgrade -y".into(),
+                    search: "apt search {query}".into(),
+                    bootstrap: "debootstrap --arch={arch} {release} {root} {mirror}".into(),
+                },
+                package_map: devuan_package_map(),
+                // ...
+            },
+            init_system: InitSystemProfile {
+                init_type: InitSystemType::SysVinit,
+                service_dir: "/etc/init.d".into(),
+                enabled_dir: "/etc/rc2.d".into(), // Default runlevel 2
+                commands: InitSystemCommands {
+                    enable: "update-rc.d {service} defaults".into(),
+                    disable: "update-rc.d {service} remove".into(),
+                    start: "/etc/init.d/{service} start".into(),
+                    stop: "/etc/init.d/{service} stop".into(),
+                    status: "/etc/init.d/{service} status".into(),
+                    list_enabled: "ls /etc/rc2.d/S*".into(),
+                },
+                packages: vec!["sysvinit-core".into(), "elogind".into()],
+                service_map: sysvinit_service_map(),
+                package_suffix: "".into(),
+            },
+            // ...
+        });
+
+        // Chimera Linux
+        m.insert("chimera".into(), DistributionProfile {
+            identity: DistroIdentity {
+                id: "chimera".into(),
+                id_like: vec![],
+                family: DistroFamily::Alpine,
+                name: "Chimera Linux".into(),
+                version: None,
+                release_model: ReleaseModel::Rolling,
+                libc: LibC::Musl,
+            },
+            package_manager: PackageManagerProfile {
+                manager_type: PackageManagerType::Apk,
+                package_format: PackageFormat::Apk,
+                commands: PackageManagerCommands {
+                    sync: "apk update".into(),
+                    install: "apk add {packages}".into(),
+                    remove: "apk del {packages}".into(),
+                    upgrade: "apk upgrade".into(),
+                    search: "apk search {query}".into(),
+                    bootstrap: "apk --root {root} --initdb add {packages}".into(),
+                },
+                package_map: chimera_package_map(),
+                // ...
+            },
+            init_system: InitSystemProfile {
+                init_type: InitSystemType::Dinit,
+                service_dir: "/etc/dinit.d".into(),
+                enabled_dir: "/etc/dinit.d/boot.d".into(),
+                commands: InitSystemCommands {
+                    enable: "dinitctl enable {service}".into(),
+                    disable: "dinitctl disable {service}".into(),
+                    start: "dinitctl start {service}".into(),
+                    stop: "dinitctl stop {service}".into(),
+                    status: "dinitctl status {service}".into(),
+                    list_enabled: "dinitctl list".into(),
+                },
+                packages: vec!["dinit-chimera".into()],
+                service_map: dinit_service_map(),
+                package_suffix: "".into(),
+            },
+            // ...
+        });
 
         m
     };
 }
 ```
 
-### 10.2 Detection Implementation
+### 10.2 Package Mapping Functions
 
 ```rust
-// src/distro/detection.rs
+fn artix_package_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("kernel".into(), "linux".into());
+    m.insert("kernel-headers".into(), "linux-headers".into());
+    m.insert("firmware".into(), "linux-firmware".into());
+    m.insert("grub-efi".into(), "grub".into());
+    m.insert("networkmanager".into(), "networkmanager".into());
+    m.insert("networkmanager-runit".into(), "networkmanager-runit".into());
+    m.insert("networkmanager-openrc".into(), "networkmanager-openrc".into());
+    m.insert("iwd".into(), "iwd".into());
+    m.insert("iwd-runit".into(), "iwd-runit".into());
+    m.insert("cryptsetup".into(), "cryptsetup".into());
+    m.insert("btrfs".into(), "btrfs-progs".into());
+    m.insert("sudo".into(), "sudo".into());
+    m.insert("doas".into(), "opendoas".into());
+    m
+}
 
-pub struct DistroDetector;
+fn void_package_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("kernel".into(), "linux".into());
+    m.insert("kernel-headers".into(), "linux-headers".into());
+    m.insert("firmware".into(), "linux-firmware".into());
+    m.insert("grub-efi".into(), "grub-x86_64-efi".into());
+    m.insert("networkmanager".into(), "NetworkManager".into());
+    m.insert("iwd".into(), "iwd".into());
+    m.insert("cryptsetup".into(), "cryptsetup".into());
+    m.insert("btrfs".into(), "btrfs-progs".into());
+    m.insert("sudo".into(), "sudo".into());
+    m.insert("doas".into(), "opendoas".into());
+    m
+}
 
-impl DistroDetector {
-    pub fn detect() -> Result<DetectedDistro> {
-        // Primary: os-release
-        if let Ok(os_release) = Self::parse_os_release() {
-            return Ok(os_release);
-        }
-
-        // Secondary: lsb-release
-        if let Ok(lsb) = Self::parse_lsb_release() {
-            return Ok(lsb);
-        }
-
-        // Tertiary: distribution-specific files
-        Self::detect_by_specific_files()
-    }
-
-    fn parse_os_release() -> Result<DetectedDistro> {
-        let content = fs::read_to_string("/etc/os-release")
-            .or_else(|_| fs::read_to_string("/usr/lib/os-release"))?;
-
-        let mut id = String::new();
-        let mut id_like = Vec::new();
-        let mut name = String::new();
-        let mut version = None;
-
-        for line in content.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                let value = value.trim_matches('"');
-                match key {
-                    "ID" => id = value.to_string(),
-                    "ID_LIKE" => id_like = value.split_whitespace().map(String::from).collect(),
-                    "NAME" => name = value.to_string(),
-                    "VERSION_ID" => version = Some(value.to_string()),
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(DetectedDistro { id, id_like, name, version })
-    }
+fn alpine_package_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("kernel".into(), "linux-lts".into());
+    m.insert("kernel-headers".into(), "linux-lts-dev".into());
+    m.insert("firmware".into(), "linux-firmware".into());
+    m.insert("grub-efi".into(), "grub-efi".into());
+    m.insert("networkmanager".into(), "networkmanager".into());
+    m.insert("iwd".into(), "iwd".into());
+    m.insert("cryptsetup".into(), "cryptsetup".into());
+    m.insert("btrfs".into(), "btrfs-progs".into());
+    m.insert("sudo".into(), "sudo".into());
+    m.insert("doas".into(), "doas".into());
+    m
 }
 ```
 
-### 10.3 Integration with Deploytix
+### 10.3 Service Mapping Functions
 
 ```rust
-// src/lib.rs additions
-
-pub mod distro {
-    pub mod detection;
-    pub mod profiles;
-    pub mod adaptation;
+fn runit_service_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("getty".into(), "agetty-tty1".into());
+    m.insert("dhcp".into(), "dhcpcd".into());
+    m.insert("ssh".into(), "sshd".into());
+    m.insert("cron".into(), "cronie".into());
+    m.insert("ntp".into(), "ntpd".into());
+    m.insert("syslog".into(), "socklog-unix".into());
+    m.insert("dbus".into(), "dbus".into());
+    m.insert("elogind".into(), "elogind".into());
+    m.insert("seatd".into(), "seatd".into());
+    m.insert("networkmanager".into(), "NetworkManager".into());
+    m.insert("iwd".into(), "iwd".into());
+    m
 }
 
-// src/config/deployment.rs additions
+fn openrc_service_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("getty".into(), "agetty".into());
+    m.insert("dhcp".into(), "dhcpcd".into());
+    m.insert("ssh".into(), "sshd".into());
+    m.insert("cron".into(), "crond".into());
+    m.insert("ntp".into(), "ntpd".into());
+    m.insert("syslog".into(), "syslog-ng".into());
+    m.insert("dbus".into(), "dbus".into());
+    m.insert("elogind".into(), "elogind".into());
+    m.insert("seatd".into(), "seatd".into());
+    m.insert("networkmanager".into(), "networkmanager".into());
+    m.insert("iwd".into(), "iwd".into());
+    m
+}
 
-impl DeploymentConfig {
-    /// Load with host OS detection and adaptation
-    pub fn from_wizard_adaptive() -> Result<Self> {
-        // Detect host distribution
-        let host_distro = DistroDetector::detect()?;
-        let host_profile = DistributionProfile::resolve(&host_distro)?;
-
-        // Detect target distribution (may differ in cross-install scenarios)
-        let target_profile = Self::select_target_distro()?;
-
-        // Adapt configuration based on profiles
-        let config = Self::from_wizard_with_profiles(&host_profile, &target_profile)?;
-
-        Ok(config)
-    }
+fn dinit_service_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("getty".into(), "agetty-tty1".into());
+    m.insert("dhcp".into(), "dhcpcd".into());
+    m.insert("ssh".into(), "sshd".into());
+    m.insert("cron".into(), "crond".into());
+    m.insert("ntp".into(), "ntpd".into());
+    m.insert("syslog".into(), "syslog-ng".into());
+    m.insert("dbus".into(), "dbus".into());
+    m.insert("seatd".into(), "seatd".into());
+    m.insert("networkmanager".into(), "networkmanager".into());
+    m.insert("iwd".into(), "iwd".into());
+    m
 }
 ```
 
@@ -1163,7 +1444,7 @@ impl DeploymentConfig {
 
 [identity]
 id = "my-distro"
-id_like = ["arch"]
+id_like = ["artix", "arch"]
 family = "arch"
 name = "My Custom Distro"
 release_model = "rolling"
@@ -1178,7 +1459,7 @@ sync = "pacman -Sy"
 install = "pacman -S --noconfirm {packages}"
 remove = "pacman -R {packages}"
 upgrade = "pacman -Su --noconfirm"
-bootstrap = "pacstrap {root} {packages}"
+bootstrap = "basestrap {root} {packages}"
 
 [package_manager.package_map]
 kernel = "linux-custom"
@@ -1188,12 +1469,21 @@ networkmanager = "networkmanager"
 type = "runit"
 service_dir = "/etc/runit/sv"
 enabled_dir = "/run/runit/service"
+package_suffix = "-runit"
+
+[init_system.packages]
+base = ["runit", "elogind-runit"]
 
 [init_system.commands]
 enable = "ln -sf /etc/runit/sv/{service} /run/runit/service/"
 disable = "rm /run/runit/service/{service}"
 start = "sv up {service}"
 stop = "sv down {service}"
+
+[init_system.service_map]
+ssh = "sshd"
+dhcp = "dhcpcd"
+cron = "cronie"
 
 [boot]
 initramfs_tool = "mkinitcpio"
@@ -1208,6 +1498,7 @@ fde = true
 btrfs = true
 zfs = false
 lvm = true
+musl = false
 ```
 
 ---
@@ -1218,53 +1509,66 @@ lvm = true
 
 | Check | Command/Path | Result Interpretation |
 |-------|--------------|----------------------|
-| Primary ID | `grep ^ID= /etc/os-release` | `ID=ubuntu` → Ubuntu |
-| Family | `grep ^ID_LIKE= /etc/os-release` | `ID_LIKE=debian` → Debian family |
-| Package Manager | `which apt pacman dnf xbps-install apk` | First found = active |
-| Init System | `cat /proc/1/comm` | `systemd`, `init`, `runit`, etc. |
-| Architecture | `uname -m` | `x86_64`, `aarch64`, etc. |
+| Primary ID | `grep ^ID= /etc/os-release` | `ID=artix` → Artix |
+| Family | `grep ^ID_LIKE= /etc/os-release` | `ID_LIKE=arch` → Arch family |
+| Package Manager | `which pacman xbps-install apk apt` | First found = active |
+| Init System | `cat /proc/1/comm` | `runit`, `init`, `s6-svscan`, `dinit` |
 | C Library | `ldd --version 2>&1 \| head -1` | `musl` or `GNU` |
 
 ### A.2 Bootstrap Command Quick Reference
 
 ```bash
-# Debian/Ubuntu
-debootstrap --arch=amd64 jammy /mnt http://archive.ubuntu.com/ubuntu
-
-# Arch
-pacstrap /mnt base linux linux-firmware
-
-# Artix
+# Artix (runit)
 basestrap /mnt base linux linux-firmware runit elogind-runit
 
-# Fedora
-dnf --installroot=/mnt --releasever=39 install @core
+# Artix (OpenRC)
+basestrap /mnt base linux linux-firmware openrc elogind-openrc
 
-# Void
-XBPS_ARCH=x86_64 xbps-install -S -R https://repo.voidlinux.org/current -r /mnt base-system
+# Artix (s6)
+basestrap /mnt base linux linux-firmware s6-base elogind-s6
+
+# Artix (dinit)
+basestrap /mnt base linux linux-firmware dinit elogind-dinit
+
+# Void (glibc)
+XBPS_ARCH=x86_64 xbps-install -S -R https://repo-default.voidlinux.org/current -r /mnt base-system
+
+# Void (musl)
+XBPS_ARCH=x86_64-musl xbps-install -S -R https://repo-default.voidlinux.org/current/musl -r /mnt base-system
 
 # Alpine
 apk -X http://dl-cdn.alpinelinux.org/alpine/latest-stable/main \
     -U --allow-untrusted --root /mnt --initdb add alpine-base
 
-# openSUSE
-zypper --root /mnt install patterns-base-minimal_base
+# Devuan
+debootstrap --arch=amd64 daedalus /mnt http://deb.devuan.org/merged
+
+# Chimera
+apk --root /mnt --initdb add base-full
 ```
 
-### A.3 Common Service Names Across Init Systems
+### A.3 Service Enable Commands by Init
 
-| Function | Canonical | systemd | OpenRC | runit |
-|----------|-----------|---------|--------|-------|
-| Network (DHCP) | `dhcp` | `dhcpcd.service` | `dhcpcd` | `dhcpcd` |
-| Network (NM) | `networkmanager` | `NetworkManager.service` | `NetworkManager` | `NetworkManager` |
-| SSH Server | `sshd` | `sshd.service` | `sshd` | `sshd` |
-| Cron | `cron` | `cronie.service` | `cronie` | `cronie` |
-| Display Manager | `dm` | `sddm.service` | `sddm` | `sddm` |
-| Audio | `audio` | `pipewire.service` | `pipewire` | `pipewire` |
-| Bluetooth | `bluetooth` | `bluetooth.service` | `bluetoothd` | `bluetoothd` |
-| Time Sync | `ntp` | `systemd-timesyncd` | `ntpd` | `ntpd` |
+| Init | Enable SSH | Enable NetworkManager |
+|------|------------|----------------------|
+| runit | `ln -s /etc/runit/sv/sshd /run/runit/service/` | `ln -s /etc/runit/sv/NetworkManager /run/runit/service/` |
+| OpenRC | `rc-update add sshd default` | `rc-update add networkmanager default` |
+| s6 | `touch /etc/s6/adminsv/default/contents.d/sshd && s6-db-reload` | Similar |
+| dinit | `dinitctl enable sshd` | `dinitctl enable networkmanager` |
+| sysvinit | `update-rc.d ssh defaults` | `update-rc.d network-manager defaults` |
+
+### A.4 Artix Init System Package Suffixes
+
+| Package | runit | OpenRC | s6 | dinit |
+|---------|-------|--------|-----|-------|
+| elogind | `elogind-runit` | `elogind-openrc` | `elogind-s6` | `elogind-dinit` |
+| NetworkManager | `networkmanager-runit` | `networkmanager-openrc` | `networkmanager-s6` | `networkmanager-dinit` |
+| seatd | `seatd-runit` | `seatd-openrc` | `seatd-s6` | `seatd-dinit` |
+| cronie | `cronie-runit` | `cronie-openrc` | `cronie-s6` | `cronie-dinit` |
+| iwd | `iwd-runit` | `iwd-openrc` | `iwd-s6` | `iwd-dinit` |
+| cups | `cups-runit` | `cups-openrc` | `cups-s6` | `cups-dinit` |
 
 ---
 
 *Documentation generated: 2026-01-30*
-*Classification schema version: 1.0*
+*Classification schema version: 1.1 (systemd-free)*
