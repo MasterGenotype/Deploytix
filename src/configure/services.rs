@@ -28,8 +28,10 @@ pub fn enable_services(
 fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
     let mut services = Vec::new();
 
-    // Seat management
-    services.push("seatd".to_string());
+    // Seat management (only needed for desktop environments with Wayland support)
+    if config.desktop.environment != DesktopEnvironment::None {
+        services.push("seatd".to_string());
+    }
 
     // Network backend
     match config.network.backend {
@@ -46,12 +48,10 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         services.push("dnscrypt-proxy".to_string());
     }
 
-    // Display manager (if desktop environment selected)
-    match config.desktop.environment {
-        DesktopEnvironment::Kde => services.push("sddm".to_string()),
-        DesktopEnvironment::Gnome => services.push("gdm".to_string()),
-        DesktopEnvironment::Xfce => services.push("lightdm".to_string()),
-        DesktopEnvironment::None => {}
+    // Display manager - use greetd for all desktop environments
+    // greetd is configured separately via configure::greetd
+    if config.desktop.environment != DesktopEnvironment::None {
+        services.push("greetd".to_string());
     }
 
     services

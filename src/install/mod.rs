@@ -2,6 +2,7 @@
 
 mod basestrap;
 mod chroot;
+pub mod crypttab;
 mod fstab;
 mod installer;
 

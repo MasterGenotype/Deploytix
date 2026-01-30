@@ -33,6 +33,12 @@ pub struct DiskConfig {
     /// Encryption password (if encryption enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption_password: Option<String>,
+    /// Name for the LUKS mapper device (default: "Crypt-Root")
+    #[serde(default = "default_luks_mapper_name")]
+    pub luks_mapper_name: String,
+    /// Path to keyfile (None = password prompt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyfile_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +110,8 @@ pub enum PartitionLayout {
     Standard,
     /// Minimal layout (EFI, Swap, Root)
     Minimal,
+    /// LUKS container with btrfs subvolumes (EFI + BIOS Boot + LUKS)
+    CryptoSubvolume,
     /// Custom layout (advanced)
     Custom,
 }
@@ -113,6 +121,7 @@ impl std::fmt::Display for PartitionLayout {
         match self {
             Self::Standard => write!(f, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)"),
             Self::Minimal => write!(f, "Minimal (EFI, Swap, Root)"),
+            Self::CryptoSubvolume => write!(f, "Encrypted (EFI + LUKS with btrfs subvolumes)"),
             Self::Custom => write!(f, "Custom"),
         }
     }
@@ -287,6 +296,10 @@ fn default_hostname() -> String {
     "artix".to_string()
 }
 
+fn default_luks_mapper_name() -> String {
+    "Crypt-Root".to_string()
+}
+
 fn default_groups() -> Vec<String> {
     vec![
         "wheel".to_string(),
@@ -342,17 +355,28 @@ impl DeploymentConfig {
         let layouts = [
             PartitionLayout::Standard,
             PartitionLayout::Minimal,
+            PartitionLayout::CryptoSubvolume,
         ];
         let layout_idx = prompt_select("Partition layout", &layouts, 0)?;
         let layout = layouts[layout_idx].clone();
 
-        // Filesystem
-        let filesystems = [Filesystem::Btrfs, Filesystem::Ext4, Filesystem::Xfs, Filesystem::F2fs];
-        let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
-        let filesystem = filesystems[fs_idx].clone();
+        // Filesystem (auto-select btrfs for CryptoSubvolume)
+        let filesystem = if layout == PartitionLayout::CryptoSubvolume {
+            println!("  Filesystem: btrfs (required for CryptoSubvolume layout)");
+            Filesystem::Btrfs
+        } else {
+            let filesystems = [Filesystem::Btrfs, Filesystem::Ext4, Filesystem::Xfs, Filesystem::F2fs];
+            let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
+            filesystems[fs_idx].clone()
+        };
 
-        // Encryption
-        let encryption = prompt_confirm("Enable LUKS encryption?", false)?;
+        // Encryption (auto-enable for CryptoSubvolume)
+        let encryption = if layout == PartitionLayout::CryptoSubvolume {
+            println!("  Encryption: enabled (required for CryptoSubvolume layout)");
+            true
+        } else {
+            prompt_confirm("Enable LUKS encryption?", false)?
+        };
         let encryption_password = if encryption {
             Some(prompt_password("Encryption password", true)?)
         } else {
@@ -406,6 +430,8 @@ impl DeploymentConfig {
                 filesystem,
                 encryption,
                 encryption_password,
+                luks_mapper_name: default_luks_mapper_name(),
+                keyfile_path: None,
             },
             system: SystemConfig {
                 init,
@@ -439,6 +465,8 @@ impl DeploymentConfig {
                 filesystem: Filesystem::Btrfs,
                 encryption: false,
                 encryption_password: None,
+                luks_mapper_name: default_luks_mapper_name(),
+                keyfile_path: None,
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -503,6 +531,20 @@ impl DeploymentConfig {
             return Err(DeploytixError::ValidationError(
                 "Encryption password required when encryption is enabled".to_string(),
             ));
+        }
+
+        // CryptoSubvolume layout requires encryption and btrfs
+        if self.disk.layout == PartitionLayout::CryptoSubvolume {
+            if !self.disk.encryption {
+                return Err(DeploytixError::ValidationError(
+                    "CryptoSubvolume layout requires encryption to be enabled".to_string(),
+                ));
+            }
+            if self.disk.filesystem != Filesystem::Btrfs {
+                return Err(DeploytixError::ValidationError(
+                    "CryptoSubvolume layout requires btrfs filesystem".to_string(),
+                ));
+            }
         }
 
         Ok(())

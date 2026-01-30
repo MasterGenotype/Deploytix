@@ -19,6 +19,17 @@ pub mod partition_types {
     pub const LINUX_FILESYSTEM: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 }
 
+/// Btrfs subvolume definition
+#[derive(Debug, Clone)]
+pub struct SubvolumeDef {
+    /// Subvolume name (e.g., "@", "@home")
+    pub name: String,
+    /// Mount point (e.g., "/", "/home")
+    pub mount_point: String,
+    /// Mount options
+    pub mount_options: String,
+}
+
 /// A single partition definition
 #[derive(Debug, Clone)]
 pub struct PartitionDef {
@@ -36,6 +47,10 @@ pub struct PartitionDef {
     pub is_swap: bool,
     /// Whether this is the EFI partition
     pub is_efi: bool,
+    /// Whether this is a LUKS container partition
+    pub is_luks: bool,
+    /// Whether this is a BIOS Boot partition
+    pub is_bios_boot: bool,
     /// Additional attributes (e.g., LegacyBIOSBootable)
     pub attributes: Option<String>,
 }
@@ -45,6 +60,8 @@ pub struct PartitionDef {
 pub struct ComputedLayout {
     pub partitions: Vec<PartitionDef>,
     pub total_mib: u64,
+    /// Btrfs subvolumes (for CryptoSubvolume layout)
+    pub subvolumes: Option<Vec<SubvolumeDef>>,
 }
 
 /// Sizing constants from Disk-Populater.sh
@@ -64,6 +81,9 @@ const VAR_MIN_MIB: u64 = 8192;   // 8 GiB
 /// Swap limits
 const SWAP_MIN_MIB: u64 = 4096;  // 4 GiB
 const SWAP_MAX_MIB: u64 = 20480; // 20 GiB
+
+/// BIOS Boot partition size (650 MiB for GRUB)
+const BIOS_BOOT_MIB: u64 = 650;
 
 /// Alignment in MiB
 const ALIGN_MIB: u64 = 4;
@@ -191,6 +211,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/boot/efi".to_string()),
             is_swap: false,
             is_efi: true,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -201,6 +223,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/boot".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: true,
             attributes: Some("LegacyBIOSBootable".to_string()),
         },
         PartitionDef {
@@ -211,6 +235,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: None,
             is_swap: true,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -221,6 +247,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -231,6 +259,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/usr".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -241,6 +271,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/var".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -251,6 +283,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/home".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
     ];
@@ -258,6 +292,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
+        subvolumes: None,
     })
 }
 
@@ -286,6 +321,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/boot/efi".to_string()),
             is_swap: false,
             is_efi: true,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -296,6 +333,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: None,
             is_swap: true,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
         PartitionDef {
@@ -306,6 +345,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/".to_string()),
             is_swap: false,
             is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
             attributes: None,
         },
     ];
@@ -313,7 +354,102 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
+        subvolumes: None,
     })
+}
+
+/// Compute the CryptoSubvolume layout (EFI + BIOS Boot + LUKS container)
+/// Partition 1: EFI (512 MiB)
+/// Partition 2: BIOS Boot (650 MiB)
+/// Partition 3: LUKS container (remainder) with btrfs subvolumes
+fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
+    // Minimum: 512 MiB EFI + 650 MiB BIOS Boot + at least 20 GiB for LUKS
+    let min_total_mib = EFI_MIB + BIOS_BOOT_MIB + 20480;
+    if disk_mib < min_total_mib {
+        return Err(DeploytixError::DiskTooSmall {
+            size_mib: disk_mib,
+            required_mib: min_total_mib,
+        });
+    }
+
+    let partitions = vec![
+        // Partition 1: EFI System Partition
+        PartitionDef {
+            number: 1,
+            name: "EFI".to_string(),
+            size_mib: EFI_MIB,
+            type_guid: partition_types::EFI.to_string(),
+            mount_point: Some("/boot/efi".to_string()),
+            is_swap: false,
+            is_efi: true,
+            is_luks: false,
+            is_bios_boot: false,
+            attributes: None,
+        },
+        // Partition 2: BIOS Boot (for GRUB legacy support on GPT)
+        PartitionDef {
+            number: 2,
+            name: "BIOS".to_string(),
+            size_mib: BIOS_BOOT_MIB,
+            type_guid: partition_types::BIOS_BOOT.to_string(),
+            mount_point: None, // Never mounted
+            is_swap: false,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: true,
+            attributes: Some("LegacyBIOSBootable".to_string()),
+        },
+        // Partition 3: LUKS Container (root with btrfs subvolumes)
+        PartitionDef {
+            number: 3,
+            name: "LUKS".to_string(),
+            size_mib: 0, // Remainder
+            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+            mount_point: None, // Handled specially via LUKS
+            is_swap: false,
+            is_efi: false,
+            is_luks: true,
+            is_bios_boot: false,
+            attributes: None,
+        },
+    ];
+
+    Ok(ComputedLayout {
+        partitions,
+        total_mib: disk_mib,
+        subvolumes: Some(default_subvolumes()),
+    })
+}
+
+/// Default btrfs subvolumes for CryptoSubvolume layout
+pub fn default_subvolumes() -> Vec<SubvolumeDef> {
+    vec![
+        SubvolumeDef {
+            name: "@".to_string(),
+            mount_point: "/".to_string(),
+            mount_options: "defaults,noatime,compress=zstd".to_string(),
+        },
+        SubvolumeDef {
+            name: "@usr".to_string(),
+            mount_point: "/usr".to_string(),
+            mount_options: "defaults,noatime,compress=zstd".to_string(),
+        },
+        SubvolumeDef {
+            name: "@var".to_string(),
+            mount_point: "/var".to_string(),
+            mount_options: "defaults,noatime,compress=zstd".to_string(),
+        },
+        SubvolumeDef {
+            name: "@home".to_string(),
+            mount_point: "/home".to_string(),
+            mount_options: "defaults,noatime,compress=zstd".to_string(),
+        },
+        SubvolumeDef {
+            name: "@boot".to_string(),
+            mount_point: "/boot".to_string(),
+            mount_options: "defaults,noatime".to_string(),
+        },
+    ]
 }
 
 /// Compute partition layout for a disk
@@ -321,6 +457,7 @@ pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64) -> Result<Compute
     match layout {
         PartitionLayout::Standard => compute_standard_layout(disk_mib),
         PartitionLayout::Minimal => compute_minimal_layout(disk_mib),
+        PartitionLayout::CryptoSubvolume => compute_crypto_subvolume_layout(disk_mib),
         PartitionLayout::Custom => Err(DeploytixError::ConfigError(
             "Custom layouts not yet implemented".to_string(),
         )),

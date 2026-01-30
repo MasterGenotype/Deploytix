@@ -46,30 +46,39 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         "consolefont".to_string(),
     ]);
 
-    // Encryption hook (must come before filesystems)
-    if config.disk.encryption {
-        hooks.push("encrypt".to_string());
-    }
+    // For CryptoSubvolume layout, use custom hooks
+    if config.disk.layout == PartitionLayout::CryptoSubvolume && config.disk.encryption {
+        // Custom hooks handle encryption and mounting
+        hooks.push("crypttab-unlock".to_string());
+        hooks.push("mountcrypt".to_string());
+        // Note: filesystems hook is NOT needed when using mountcrypt
+        // as mountcrypt handles all mounting
+    } else {
+        // Standard encryption hook for other layouts
+        if config.disk.encryption {
+            hooks.push("encrypt".to_string());
+        }
 
-    // Filesystem-specific hooks
-    if config.disk.filesystem == Filesystem::Btrfs {
-        hooks.push("btrfs".to_string());
-    }
+        // Filesystem-specific hooks
+        if config.disk.filesystem == Filesystem::Btrfs {
+            hooks.push("btrfs".to_string());
+        }
 
-    // Core hooks
-    hooks.push("filesystems".to_string());
-    hooks.push("fsck".to_string());
+        // Core hooks
+        hooks.push("filesystems".to_string());
+        hooks.push("fsck".to_string());
 
-    // Separate /usr partition hook
-    if config.disk.layout == PartitionLayout::Standard {
-        hooks.push("usr".to_string());
-    }
+        // Separate /usr partition hook
+        if config.disk.layout == PartitionLayout::Standard {
+            hooks.push("usr".to_string());
+        }
 
-    // Resume hook for hibernation
-    if config.system.hibernation {
-        // Insert resume before filesystems
-        let filesystems_idx = hooks.iter().position(|h| h == "filesystems").unwrap_or(hooks.len());
-        hooks.insert(filesystems_idx, "resume".to_string());
+        // Resume hook for hibernation
+        if config.system.hibernation {
+            // Insert resume before filesystems
+            let filesystems_idx = hooks.iter().position(|h| h == "filesystems").unwrap_or(hooks.len());
+            hooks.insert(filesystems_idx, "resume".to_string());
+        }
     }
 
     hooks

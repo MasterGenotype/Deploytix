@@ -1,64 +1,177 @@
 //! LUKS encryption setup
 
 use crate::config::DeploymentConfig;
+use crate::disk::detection::partition_path;
 use crate::utils::command::CommandRunner;
-use crate::utils::error::Result;
+use crate::utils::error::{DeploytixError, Result};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use tracing::info;
 
-/// Setup LUKS encryption for partitions
-#[allow(dead_code)]
+/// LUKS container information
+#[derive(Debug, Clone)]
+pub struct LuksContainer {
+    /// Source device (e.g., /dev/sda3)
+    pub device: String,
+    /// Mapper name (e.g., Crypt-Root)
+    pub mapper_name: String,
+    /// Mapped device path (e.g., /dev/mapper/Crypt-Root)
+    pub mapped_path: String,
+}
+
+/// Setup LUKS encryption for the specified partition
 pub fn setup_encryption(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     device: &str,
-) -> Result<()> {
+    luks_partition: u32,
+) -> Result<LuksContainer> {
     if !config.disk.encryption {
-        return Ok(());
+        return Err(DeploytixError::ConfigError(
+            "Encryption not enabled in configuration".to_string(),
+        ));
     }
 
-    info!("Setting up LUKS encryption");
-
-    let _password = config
+    let password = config
         .disk
         .encryption_password
         .as_ref()
-        .expect("Encryption password required");
+        .ok_or_else(|| DeploytixError::ValidationError(
+            "Encryption password required".to_string()
+        ))?;
 
-    // TODO: Implement LUKS setup
-    // This would involve:
-    // 1. cryptsetup luksFormat on relevant partitions
-    // 2. cryptsetup open to create mapper devices
-    // 3. Update partition paths to use /dev/mapper/*
+    let luks_device = partition_path(device, luks_partition);
+    let mapper_name = config.disk.luks_mapper_name.clone();
+    let mapped_path = format!("/dev/mapper/{}", mapper_name);
+
+    info!("Setting up LUKS encryption on {}", luks_device);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would setup LUKS encryption on {}", device);
+        println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", luks_device);
+        println!("  [dry-run] cryptsetup open {} {}", luks_device, mapper_name);
+        return Ok(LuksContainer {
+            device: luks_device,
+            mapper_name,
+            mapped_path,
+        });
+    }
+
+    // Format LUKS container
+    luks_format(&luks_device, password)?;
+
+    // Open LUKS container
+    luks_open(&luks_device, &mapper_name, password)?;
+
+    info!("LUKS encryption setup complete: {}", mapped_path);
+
+    Ok(LuksContainer {
+        device: luks_device,
+        mapper_name,
+        mapped_path,
+    })
+}
+
+/// Format a device as LUKS2
+fn luks_format(device: &str, password: &str) -> Result<()> {
+    info!("Formatting {} as LUKS2 container", device);
+
+    // Use stdin to pass password securely (fixes command injection vulnerability)
+    let mut child = Command::new("cryptsetup")
+        .args([
+            "luksFormat",
+            "--type", "luks2",
+            "--cipher", "aes-xts-plain64",
+            "--key-size", "512",
+            "--hash", "sha256",
+            "--pbkdf", "argon2id",
+            "--batch-mode",
+            device,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "cryptsetup luksFormat".to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    // Write password to stdin
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(password.as_bytes())?;
+    }
+    drop(child.stdin.take()); // Close stdin to signal EOF
+
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup luksFormat".to_string(),
+            stderr: "Failed to format LUKS container".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Open a LUKS container
+fn luks_open(device: &str, mapper_name: &str, password: &str) -> Result<()> {
+    info!("Opening LUKS container {} as {}", device, mapper_name);
+
+    let mut child = Command::new("cryptsetup")
+        .args(["open", device, mapper_name])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "cryptsetup open".to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(password.as_bytes())?;
+    }
+    drop(child.stdin.take()); // Close stdin to signal EOF
+
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup open".to_string(),
+            stderr: "Failed to open LUKS container".to_string(),
+        });
+    }
+
+    // Wait for device to appear
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    Ok(())
+}
+
+/// Close a LUKS container
+pub fn close_luks(cmd: &CommandRunner, mapper_name: &str) -> Result<()> {
+    info!("Closing LUKS container {}", mapper_name);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] cryptsetup close {}", mapper_name);
         return Ok(());
     }
 
-    info!("LUKS encryption setup complete");
+    cmd.run("cryptsetup", &["close", mapper_name])?;
     Ok(())
 }
 
-/// Open encrypted partitions
-#[allow(dead_code)]
-pub fn open_encrypted_partitions(
-    _cmd: &CommandRunner,
-    _device: &str,
-    _password: &str,
-) -> Result<()> {
-    info!("Opening encrypted partitions");
+/// Get UUID of LUKS container
+pub fn get_luks_uuid(device: &str) -> Result<String> {
+    let output = Command::new("cryptsetup")
+        .args(["luksUUID", device])
+        .output()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "cryptsetup luksUUID".to_string(),
+            stderr: e.to_string(),
+        })?;
 
-    // TODO: Implement opening LUKS containers
+    if !output.status.success() {
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup luksUUID".to_string(),
+            stderr: format!("Failed to get LUKS UUID for {}", device),
+        });
+    }
 
-    Ok(())
-}
-
-/// Close encrypted partitions
-#[allow(dead_code)]
-pub fn close_encrypted_partitions(_cmd: &CommandRunner) -> Result<()> {
-    info!("Closing encrypted partitions");
-
-    // TODO: Implement closing LUKS containers
-
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
