@@ -40,17 +40,19 @@ The crypttab hooks provide early boot LUKS encryption support for Artix Linux in
 ### 1.3 Boot Sequence
 
 ```
-1. Kernel loads initramfs
-2. mkinitcpio executes hooks in order
-3. crypttab-unlock:
-   └── Parse /etc/crypttab
-   └── Wait for devices (UUID resolution)
-   └── cryptsetup open → /dev/mapper/Crypt-{Name}
-4. mountcrypt:
-   └── Wait for mapped devices
-   └── Mount root (Crypt-Root) to /new_root
-   └── Mount subvolumes (@usr, @var, @home, @boot)
-   └── Auto-detect and mount EFI partition
+1. GRUB loads initramfs
+2. initramfs loads kernel
+3. Kernel starts userland
+4. mkinitcpio hooks execute in order:
+   a. crypttab-unlock:
+      └── Parse /etc/crypttab
+      └── Wait for devices (UUID resolution)
+      └── cryptsetup open → /dev/mapper/Crypt-{Name}
+   b. mountcrypt:
+      └── Wait for mapped devices
+      └── Mount root (Crypt-Root) to /new_root
+      └── Mount subvolumes (@usr, @var, @home, @boot)
+      └── Auto-detect and mount EFI partition
 5. Switch root to /new_root
 ```
 
@@ -258,44 +260,7 @@ run_hook() {
 }
 ```
 
-### 5.2 Keyfile Management
-
-**Current Limitation:** Keyfiles must be embedded in initramfs at build time.
-
-**Recommended Enhancements:**
-
-1. **USB keyfile support:**
-   ```ash
-   find_keyfile() {
-       # Check for keyfile on removable media
-       for dev in /dev/sd[a-z]1; do
-           mount -t vfat "$dev" /mnt 2>/dev/null && {
-               if [ -f "/mnt/cryptfs.key" ]; then
-                   echo "/mnt/cryptfs.key"
-                   return 0
-               fi
-               umount /mnt
-           }
-       done
-       return 1
-   }
-   ```
-
-2. **TPM-based unlock (systemd-cryptenroll):**
-   ```
-   # Future integration point for TPM2 unlock
-   options tpm2-device=auto
-   ```
-
-3. **Network-based key server:**
-   ```ash
-   # For enterprise deployments
-   fetch_key_from_server() {
-       curl -s "http://keyserver/keys/$1" > /tmp/key
-   }
-   ```
-
-### 5.3 LUKS2 Features
+### 5.2 LUKS2 Features
 
 The current implementation is LUKS1-compatible. LUKS2 enhancements to support:
 
@@ -303,9 +268,8 @@ The current implementation is LUKS1-compatible. LUKS2 enhancements to support:
 |---------|---------|----------------|
 | Argon2id | Memory-hard KDF | `cryptsetup --pbkdf argon2id` |
 | Integrity | Authenticated encryption | `dm-integrity` kernel module |
-| Tokens | External unlock mechanisms | TPM, FIDO2, PKCS#11 |
 
-### 5.4 Hibernation Support
+### 5.3 Hibernation Support
 
 **Problem:** Encrypted swap requires special handling for hibernation.
 
@@ -320,7 +284,7 @@ if [ -n "$SWAP_DEVICE" ] && [ -f /sys/power/resume ]; then
 fi
 ```
 
-### 5.5 Multi-Device LUKS (RAID/LVM)
+### 5.4 Multi-Device LUKS (RAID/LVM)
 
 Support for advanced storage configurations:
 
@@ -342,33 +306,7 @@ fi
 
 ## 6. Optimization Opportunities
 
-### 6.1 Parallel Unlock
-
-**Current:** Sequential unlock of each LUKS volume.
-
-**Optimization:** Parallel unlock for multiple volumes with same keyfile:
-
-```ash
-# Pseudo-parallel approach using background processes
-unlock_parallel() {
-    local pids=""
-    while IFS= read -r line; do
-        parse_crypttab_line "$line"
-        if [ "$keyfile" = "$SHARED_KEYFILE" ]; then
-            cryptsetup open "$device" "Crypt-$mapping" --key-file "$keyfile" &
-            pids="$pids $!"
-        fi
-    done < /etc/crypttab
-
-    for pid in $pids; do
-        wait "$pid"
-    done
-}
-```
-
-**Estimated Impact:** 2-4x faster boot with multiple encrypted volumes.
-
-### 6.2 Reduced Timeout Strategy
+### 6.1 Reduced Timeout Strategy
 
 **Current:** Fixed 10-second timeout per device.
 
@@ -385,7 +323,7 @@ get_device_timeout() {
 }
 ```
 
-### 6.3 Initramfs Size Reduction
+### 6.2 Initramfs Size Reduction
 
 **Current:** Includes all crypto modules.
 
@@ -403,7 +341,7 @@ else
 fi
 ```
 
-### 6.4 Caching for Repeated Keyfile Use
+### 6.3 Caching for Repeated Keyfile Use
 
 ```ash
 # Cache decrypted keyfile in memory
@@ -642,10 +580,7 @@ pub fn generate_crypttab(
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
-| USB keyfile support | P2 | Medium | Phase 1 |
-| TPM2 unlock integration | P3 | High | systemd-cryptenroll |
 | LUKS2 integrity support | P3 | High | Phase 1 |
-| Parallel unlock optimization | P3 | Medium | Phase 1 |
 
 ### Phase 4: Testing & Validation
 
