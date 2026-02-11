@@ -36,6 +36,12 @@ pub struct DiskConfig {
     /// Name for the LUKS mapper device (default: "Crypt-Root")
     #[serde(default = "default_luks_mapper_name")]
     pub luks_mapper_name: String,
+    /// Enable LUKS1 encryption on the separate /boot partition
+    #[serde(default)]
+    pub boot_encryption: bool,
+    /// Name for the LUKS boot mapper device (default: "Crypt-Boot")
+    #[serde(default = "default_luks_boot_mapper_name")]
+    pub luks_boot_mapper_name: String,
     /// Path to keyfile (None = password prompt)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyfile_path: Option<String>,
@@ -300,6 +306,10 @@ fn default_luks_mapper_name() -> String {
     "Crypt-Root".to_string()
 }
 
+fn default_luks_boot_mapper_name() -> String {
+    "Crypt-Boot".to_string()
+}
+
 fn default_groups() -> Vec<String> {
     vec![
         "wheel".to_string(),
@@ -377,6 +387,13 @@ impl DeploymentConfig {
         } else {
             prompt_confirm("Enable LUKS encryption?", false)?
         };
+        // Boot encryption (LUKS1 on separate /boot partition)
+        let boot_encryption = if encryption && layout == PartitionLayout::CryptoSubvolume {
+            prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
+        } else {
+            false
+        };
+
         let encryption_password = if encryption {
             Some(prompt_password("Encryption password", true)?)
         } else {
@@ -431,6 +448,8 @@ impl DeploymentConfig {
                 encryption,
                 encryption_password,
                 luks_mapper_name: default_luks_mapper_name(),
+                boot_encryption,
+                luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
             },
             system: SystemConfig {
@@ -466,6 +485,8 @@ impl DeploymentConfig {
                 encryption: false,
                 encryption_password: None,
                 luks_mapper_name: default_luks_mapper_name(),
+                boot_encryption: false,
+                luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
             },
             system: SystemConfig {
@@ -543,6 +564,20 @@ impl DeploymentConfig {
             if self.disk.filesystem != Filesystem::Btrfs {
                 return Err(DeploytixError::ValidationError(
                     "CryptoSubvolume layout requires btrfs filesystem".to_string(),
+                ));
+            }
+        }
+
+        // Boot encryption requires CryptoSubvolume layout with encryption enabled
+        if self.disk.boot_encryption {
+            if self.disk.layout != PartitionLayout::CryptoSubvolume {
+                return Err(DeploytixError::ValidationError(
+                    "Boot encryption requires CryptoSubvolume layout".to_string(),
+                ));
+            }
+            if !self.disk.encryption {
+                return Err(DeploytixError::ValidationError(
+                    "Boot encryption requires disk encryption to be enabled".to_string(),
                 ));
             }
         }

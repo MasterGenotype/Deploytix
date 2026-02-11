@@ -27,8 +27,10 @@ pub struct Installer {
     config: DeploymentConfig,
     cmd: CommandRunner,
     layout: Option<ComputedLayout>,
-    /// LUKS container (for encrypted installations)
+    /// LUKS container for root (for encrypted installations)
     luks_container: Option<LuksContainer>,
+    /// LUKS1 container for /boot (when boot_encryption is enabled)
+    luks_boot_container: Option<LuksContainer>,
 }
 
 impl Installer {
@@ -38,6 +40,7 @@ impl Installer {
             cmd: CommandRunner::new(dry_run),
             layout: None,
             luks_container: None,
+            luks_boot_container: None,
         }
     }
 
@@ -277,7 +280,12 @@ impl Installer {
         // Unmount all partitions
         unmount_all(&self.cmd, INSTALL_ROOT)?;
 
-        // Close LUKS container if opened
+        // Close LUKS boot container if opened (close before root)
+        if let Some(ref boot_container) = self.luks_boot_container {
+            configure::encryption::close_luks(&self.cmd, &boot_container.mapper_name)?;
+        }
+
+        // Close LUKS root container if opened
         if let Some(ref container) = self.luks_container {
             configure::encryption::close_luks(&self.cmd, &container.mapper_name)?;
         }
@@ -306,6 +314,25 @@ impl Installer {
         )?;
 
         self.luks_container = Some(container);
+
+        // Setup LUKS1 encryption on /boot partition if enabled
+        if self.config.disk.boot_encryption {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+
+            let boot_container = configure::encryption::setup_boot_encryption(
+                &self.cmd,
+                &self.config,
+                &self.config.disk.device,
+                boot_part.number,
+            )?;
+
+            self.luks_boot_container = Some(boot_container);
+        }
+
         Ok(())
     }
 
@@ -313,7 +340,7 @@ impl Installer {
     ///
     /// Step 1: Partition and format all partitions before any mounting:
     ///   - BTRFS filesystem on the LUKS-mapped device
-    ///   - BOOT partition as BTRFS
+    ///   - BOOT partition as BTRFS (on LUKS1 mapped device if boot_encryption enabled)
     ///   - EFI partition as FAT32
     fn format_crypto_partitions(&self) -> Result<()> {
         info!("[Phase 2/6] Formatting encrypted partitions (btrfs on LUKS, boot, EFI)");
@@ -325,13 +352,18 @@ impl Installer {
         create_btrfs_filesystem(&self.cmd, &container.mapped_path, "ROOT")?;
 
         // Format BOOT partition as BTRFS
-        let boot_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_boot_fs)
-            .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
-        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
-        format_boot(&self.cmd, &boot_device)?;
+        // If boot_encryption is enabled, format the LUKS1-mapped device instead of raw partition
+        if let Some(ref boot_container) = self.luks_boot_container {
+            format_boot(&self.cmd, &boot_container.mapped_path)?;
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+            let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+            format_boot(&self.cmd, &boot_device)?;
+        }
 
         // Format EFI partition as FAT32
         let efi_part = layout
@@ -389,19 +421,23 @@ impl Installer {
             )?;
         }
 
-        // Mount BOOT partition
-        let boot_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_boot_fs)
-            .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
-        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+        // Mount BOOT partition (from LUKS1 mapped device if boot_encryption is enabled)
+        let boot_source = if let Some(ref boot_container) = self.luks_boot_container {
+            boot_container.mapped_path.clone()
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+            partition_path(&self.config.disk.device, boot_part.number)
+        };
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
         if !self.cmd.is_dry_run() {
             std::fs::create_dir_all(&boot_mount)?;
         }
-        self.cmd.run("mount", &[&boot_device, &boot_mount])?;
+        self.cmd.run("mount", &[&boot_source, &boot_mount])?;
 
         // Mount EFI partition
         let efi_part = layout
@@ -427,19 +463,24 @@ impl Installer {
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
-        let boot_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_boot_fs)
-            .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+        // Use LUKS1 mapped device for boot if boot_encryption is enabled,
+        // otherwise use the raw partition
+        let boot_device = if let Some(ref boot_container) = self.luks_boot_container {
+            boot_container.mapped_path.clone()
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+            partition_path(&self.config.disk.device, boot_part.number)
+        };
 
         let efi_part = layout
             .partitions
             .iter()
             .find(|p| p.is_efi)
             .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
-
-        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
 
         if let Some(ref subvolumes) = layout.subvolumes {
@@ -465,11 +506,24 @@ impl Installer {
             .find(|p| p.is_luks)
             .ok_or_else(|| DeploytixError::ConfigError("No LUKS partition found in layout".to_string()))?;
 
+        // Find boot partition number for boot encryption entry
+        let boot_luks_partition = if self.config.disk.boot_encryption {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .map(|p| p.number);
+            boot_part
+        } else {
+            None
+        };
+
         generate_crypttab(
             &self.cmd,
             &self.config,
             &self.config.disk.device,
             luks_part.number,
+            boot_luks_partition,
             INSTALL_ROOT,
         )
     }
