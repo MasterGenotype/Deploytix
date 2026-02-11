@@ -72,16 +72,29 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             let iwd_service_pkg = format!("iwd-{}", config.system.init);
             packages.push(nm_service_pkg);
             packages.push(iwd_service_pkg);
+            // Add nm-applet for desktop environments
+            if config.desktop.environment != DesktopEnvironment::None {
+                packages.push("network-manager-applet".to_string());
+            }
         }
     }
 
-    // Desktop environment prerequisites (display server, seat management, display manager)
+    // Desktop environment prerequisites (display server, seat management, display manager, audio)
     if config.desktop.environment != DesktopEnvironment::None {
         packages.extend([
+            // Display
             "xorg-server".to_string(),
             "xorg-xinit".to_string(),
             "seatd".to_string(),
             "greetd".to_string(),
+            // Audio - ALSA base
+            "alsa-utils".to_string(),
+            "alsa-tools".to_string(),
+            // Audio - PipeWire (modern audio server)
+            "pipewire".to_string(),
+            "wireplumber".to_string(),
+            "pipewire-pulse".to_string(),
+            "pipewire-alsa".to_string(),
         ]);
         let seatd_service = format!("seatd-{}", config.system.init);
         let greetd_service = format!("greetd-{}", config.system.init);

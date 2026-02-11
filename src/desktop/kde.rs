@@ -13,6 +13,9 @@ const KDE_PACKAGES: &[&str] = &[
     "konsole",
     "dolphin",
     "sddm",
+    // KDE audio integration
+    "plasma-pa",
+    "kpipewire",
 ];
 
 /// Install KDE Plasma desktop environment
