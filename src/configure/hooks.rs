@@ -214,6 +214,9 @@ build() {
     # cryptsetup loads the legacy provider which is required for whirlpool
     add_binary '/usr/lib/ossl-modules/legacy.so'
 
+    # Include /etc/crypttab so the hook can read it at boot
+    add_file '/etc/crypttab'
+
     add_runscript
 }
 "#.to_string();

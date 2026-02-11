@@ -96,13 +96,18 @@ pub fn construct_binaries(_config: &DeploymentConfig) -> Vec<String> {
 
 /// Construct FILES array
 pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
-    let files = Vec::new();
+    let mut files = Vec::new();
+
+    // Include /etc/crypttab in the initramfs so the crypttab-unlock hook can
+    // parse it at early boot and open LUKS containers.
+    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
+        files.push("/etc/crypttab".to_string());
+    }
 
     // TODO: Add keyfile for encryption if needed
     // if config.disk.encryption {
     //     files.push("/crypto_keyfile.bin".to_string());
     // }
-    let _ = config; // Silence unused warning until encryption is implemented
 
     files
 }
