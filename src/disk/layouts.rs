@@ -459,11 +459,6 @@ pub fn default_subvolumes() -> Vec<SubvolumeDef> {
             mount_point: "/home".to_string(),
             mount_options: "defaults,noatime,compress=zstd".to_string(),
         },
-        SubvolumeDef {
-            name: "@boot".to_string(),
-            mount_point: "/boot".to_string(),
-            mount_options: "defaults,noatime".to_string(),
-        },
     ]
 }
 

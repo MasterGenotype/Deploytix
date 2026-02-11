@@ -97,6 +97,7 @@ pub fn generate_fstab_with_fstabgen(
 pub fn generate_fstab_crypto_subvolume(
     cmd: &CommandRunner,
     mapped_device: &str,
+    boot_device: &str,
     efi_device: &str,
     subvolumes: &[SubvolumeDef],
     install_root: &str,
@@ -112,11 +113,13 @@ pub fn generate_fstab_crypto_subvolume(
                 if sv.mount_point == "/" { 1 } else { 0 }
             );
         }
+        println!("    UUID=<BOOT_UUID> /boot btrfs defaults,noatime 0 2");
         println!("    UUID=<EFI_UUID> /boot/efi vfat umask=0077,defaults 0 2");
         return Ok(());
     }
 
     let btrfs_uuid = get_partition_uuid(mapped_device)?;
+    let boot_uuid = get_partition_uuid(boot_device)?;
     let efi_uuid = get_partition_uuid(efi_device)?;
 
     let mut content = String::from(
@@ -139,6 +142,13 @@ pub fn generate_fstab_crypto_subvolume(
             pass,
         ));
     }
+
+    // Add boot partition entry
+    content.push_str(&format!(
+        "\n# Boot partition\n\
+         UUID={}  /boot  btrfs  defaults,noatime  0  2\n",
+        boot_uuid
+    ));
 
     // Add EFI entry
     content.push_str(&format!(
