@@ -356,7 +356,6 @@ impl Installer {
         }
         self.cmd.run("mount", &[&boot_device, &boot_mount])?;
         
-        Ok::<(),
         // Format and mount EFI partition
         let efi_part = layout
             .partitions
