@@ -114,8 +114,7 @@ pub fn format_all_partitions(
             // LUKS partitions are handled separately by encryption module
             info!("Skipping LUKS partition {} (handled by encryption module)", part_path);
         } else if part.is_bios_boot {
-            // BIOS Boot partition is never formatted
-            info!("Skipping BIOS Boot partition {} (no filesystem)", part_path);
+            format_boot(cmd, &part_path)?;
         } else {
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;
         }

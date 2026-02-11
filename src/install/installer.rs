@@ -338,7 +338,25 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
         }
-
+        // Format and mount BOOT partition
+        let boot_part = layout
+            .partitions
+            .iter()
+            .find(|p| p.is_boot_fs)
+            .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+        
+        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+        let boot_mount = format!("{}/boot", INSTALL_ROOT);
+        
+        // Format Boot as BTRFS
+        format_boot(&self.cmd, &boot_device)?;
+        
+        if !self.cmd.is_dry_run() {
+            std::fs::create_dir_all(&boot_mount)?;
+        }
+        self.cmd.run("mount", &[&boot_device, &boot_mount])?;
+        
+        Ok::<(),
         // Format and mount EFI partition
         let efi_part = layout
             .partitions

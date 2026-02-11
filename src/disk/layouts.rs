@@ -51,6 +51,8 @@ pub struct PartitionDef {
     pub is_luks: bool,
     /// Whether this is a BIOS Boot partition
     pub is_bios_boot: bool,
+    /// Whether this is a BIOS FileSystem Partition
+    pub is_boot_fs: bool,
     /// Additional attributes (e.g., LegacyBIOSBootable)
     pub attributes: Option<String>,
 }
@@ -213,6 +215,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: true,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -225,7 +228,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
-            attributes: None,
+            is_boot_fs: true,
+            attributes: Some("LegacyBIOSBootable".to_string()),
         },
         PartitionDef {
             number: 3,
@@ -237,6 +241,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -249,6 +254,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -261,6 +267,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -273,6 +280,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -285,6 +293,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
     ];
@@ -323,6 +332,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: true,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -335,6 +345,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         PartitionDef {
@@ -347,6 +358,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
     ];
@@ -384,6 +396,7 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: true,
             is_luks: false,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
         // Partition 2: BIOS Boot (for GRUB legacy support on GPT)
@@ -391,12 +404,13 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             number: 2,
             name: "BIOS".to_string(),
             size_mib: BIOS_BOOT_MIB,
-            type_guid: partition_types::BIOS_BOOT.to_string(),
-            mount_point: None, // Never mounted
+            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+            mount_point: Some("/boot".to_string()),
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: true,
+            is_bios_boot: false,
+            is_boot_fs: true,
             attributes: Some("LegacyBIOSBootable".to_string()),
         },
         // Partition 3: LUKS Container (root with btrfs subvolumes)
@@ -410,6 +424,7 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_efi: false,
             is_luks: true,
             is_bios_boot: false,
+            is_boot_fs: false,
             attributes: None,
         },
     ];
