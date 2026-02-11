@@ -67,6 +67,17 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
             DeploytixError::FilesystemError(format!("Failed to format EFI partition: {}", e))
         })
 }
+/// Format BOOT as BTRFS
+pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
+    info!("Formatting {} as BTRFS (BOOT)", partition);
+    
+    cmd.run("mkfs.btrfs", & ["-f", "-L", "BOOT", partition])
+        .map(|_| ())
+        .map_err(|e| {
+            DeploytixError::FilesystemError(format!("Failed to format BOOT Partition: {}", e))
+        })
+}
+
 
 /// Format a swap partition
 pub fn format_swap(cmd: &CommandRunner, partition: &str, label: Option<&str>) -> Result<()> {

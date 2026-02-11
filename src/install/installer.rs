@@ -6,7 +6,7 @@ use crate::configure::encryption::LuksContainer;
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    format_all_partitions, create_btrfs_filesystem, create_btrfs_subvolumes, mount_btrfs_subvolumes
+    format_all_partitions, format_efi, format_boot, create_btrfs_filesystem, create_btrfs_subvolumes, mount_btrfs_subvolumes
 };
 use crate::disk::layouts::{compute_layout, print_layout_summary, ComputedLayout};
 use crate::disk::partitioning::apply_partitions;
@@ -339,7 +339,7 @@ impl Installer {
             )?;
         }
 
-        // Mount EFI partition
+        // Format and mount EFI partition
         let efi_part = layout
             .partitions
             .iter()
@@ -348,6 +348,9 @@ impl Installer {
 
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
+
+        // Format EFI as FAT32 (this is skipped in format_all_partitions for CryptoSubvolume)
+        format_efi(&self.cmd, &efi_device)?;
 
         if !self.cmd.is_dry_run() {
             std::fs::create_dir_all(&efi_mount)?;
