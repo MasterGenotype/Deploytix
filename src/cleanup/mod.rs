@@ -24,7 +24,7 @@ impl Cleaner {
 
     /// Perform cleanup operations
     pub fn cleanup(&self, device: Option<&str>, wipe: bool) -> Result<()> {
-        info!("Starting cleanup");
+        info!("Starting cleanup (unmount, close LUKS{})", if wipe { ", wipe" } else { "" });
 
         // Unmount all filesystems
         self.unmount_all()?;
@@ -43,13 +43,13 @@ impl Cleaner {
             self.wipe_device(&device)?;
         }
 
-        info!("Cleanup complete");
+        info!("Cleanup complete (all resources released)");
         Ok(())
     }
 
     /// Unmount all filesystems under install root
     fn unmount_all(&self) -> Result<()> {
-        info!("Unmounting all filesystems");
+        info!("Unmounting all filesystems under {}", INSTALL_ROOT);
 
         // Disable swap first
         let _ = self.cmd.run("swapoff", &["-a"]);
@@ -82,7 +82,7 @@ impl Cleaner {
 
     /// Close any open LUKS encrypted volumes
     fn close_encrypted_volumes(&self) -> Result<()> {
-        info!("Closing encrypted volumes");
+        info!("Closing any open LUKS encrypted volumes");
 
         // Common mapper names used in the original script
         let mapper_names = [
@@ -144,7 +144,7 @@ impl Cleaner {
             return Err(DeploytixError::UserCancelled);
         }
 
-        info!("Wiping partition table on {}", device);
+        info!("Wiping partition table and filesystem signatures on {}", device);
 
         if self.cmd.is_dry_run() {
             println!("  [dry-run] Would wipe partition table on {}", device);
@@ -177,7 +177,7 @@ impl Cleaner {
             }
         }
 
-        info!("Partition table wiped on {}", device);
+        info!("Partition table wiped and blank GPT created on {}", device);
         Ok(())
     }
 }

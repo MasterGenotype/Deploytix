@@ -43,7 +43,10 @@ impl Installer {
 
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
-        info!("Starting Deploytix installation");
+        info!(
+            "Starting Deploytix installation on {} ({} layout, {} init)",
+            self.config.disk.device, self.config.disk.layout, self.config.system.init
+        );
 
         // Phase 1: Preparation
         self.prepare()?;
@@ -96,7 +99,7 @@ impl Installer {
         // Phase 6: Finalization
         self.finalize()?;
 
-        info!("Installation complete!");
+        info!("Installation to {} finished successfully", self.config.disk.device);
         println!("\n✓ Installation completed successfully!");
         println!("  You can now reboot into your new Artix Linux system.");
 
@@ -105,7 +108,7 @@ impl Installer {
 
     /// Prepare for installation
     fn prepare(&mut self) -> Result<()> {
-        info!("Preparing installation");
+        info!("[Phase 1/6] Preparing installation for {}", self.config.disk.device);
 
         // Get device info and compute layout
         let device_info = get_device_info(&self.config.disk.device)?;
@@ -143,7 +146,7 @@ impl Installer {
 
     /// Partition the disk
     fn partition_disk(&self) -> Result<()> {
-        info!("Partitioning disk");
+        info!("[Phase 2/6] Partitioning {} with {} layout", self.config.disk.device, self.config.disk.layout);
 
         let layout = self.layout.as_ref().unwrap();
         apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
@@ -153,7 +156,7 @@ impl Installer {
 
     /// Format partitions
     fn format_partitions(&self) -> Result<()> {
-        info!("Formatting partitions");
+        info!("[Phase 2/6] Formatting partitions on {} as {}", self.config.disk.device, self.config.disk.filesystem);
 
         let layout = self.layout.as_ref().unwrap();
         format_all_partitions(
@@ -168,7 +171,7 @@ impl Installer {
 
     /// Mount partitions
     fn mount_partitions(&self) -> Result<()> {
-        info!("Mounting partitions");
+        info!("[Phase 2/6] Mounting partitions to {}", INSTALL_ROOT);
 
         let layout = self.layout.as_ref().unwrap();
         mount_partitions(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
@@ -178,7 +181,7 @@ impl Installer {
 
     /// Install base system using basestrap
     fn install_base_system(&self) -> Result<()> {
-        info!("Installing base system");
+        info!("[Phase 3/6] Installing base system via basestrap");
 
         run_basestrap(&self.cmd, &self.config, INSTALL_ROOT)?;
 
@@ -187,7 +190,7 @@ impl Installer {
 
     /// Generate fstab
     fn generate_fstab(&self) -> Result<()> {
-        info!("Generating fstab");
+        info!("[Phase 3/6] Generating /etc/fstab with partition UUIDs");
 
         let layout = self.layout.as_ref().unwrap();
         generate_fstab(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
@@ -197,7 +200,7 @@ impl Installer {
 
     /// Configure the system in chroot
     fn configure_system(&self) -> Result<()> {
-        info!("Configuring system");
+        info!("[Phase 4/6] Configuring system in chroot (locale, users, bootloader, network, services)");
 
         // Locale and timezone
         configure::locale::configure_locale(&self.cmd, &self.config, INSTALL_ROOT)?;
@@ -245,18 +248,18 @@ impl Installer {
 
         match &self.config.desktop.environment {
             DesktopEnvironment::None => {
-                info!("No desktop environment selected");
+                info!("[Phase 5/6] Skipping desktop environment (none selected)");
             }
             DesktopEnvironment::Kde => {
-                info!("Installing KDE Plasma");
+                info!("[Phase 5/6] Installing KDE Plasma desktop environment");
                 desktop::kde::install(&self.cmd, &self.config, INSTALL_ROOT)?;
             }
             DesktopEnvironment::Gnome => {
-                info!("Installing GNOME");
+                info!("[Phase 5/6] Installing GNOME desktop environment");
                 desktop::gnome::install(&self.cmd, &self.config, INSTALL_ROOT)?;
             }
             DesktopEnvironment::Xfce => {
-                info!("Installing XFCE");
+                info!("[Phase 5/6] Installing XFCE desktop environment");
                 desktop::xfce::install(&self.cmd, &self.config, INSTALL_ROOT)?;
             }
         }
@@ -266,7 +269,7 @@ impl Installer {
 
     /// Finalize installation
     fn finalize(&self) -> Result<()> {
-        info!("Finalizing installation");
+        info!("[Phase 6/6] Finalizing installation (regenerating initramfs, unmounting)");
 
         // Regenerate initramfs
         self.cmd.run_in_chroot(INSTALL_ROOT, "mkinitcpio -P")?;
@@ -286,7 +289,7 @@ impl Installer {
 
     /// Setup LUKS encryption
     fn setup_encryption(&mut self) -> Result<()> {
-        info!("Setting up LUKS encryption");
+        info!("[Phase 2/6] Setting up LUKS2 encryption on {}", self.config.disk.device);
 
         let layout = self.layout.as_ref().unwrap();
         let luks_part = layout
@@ -313,7 +316,7 @@ impl Installer {
     ///   - BOOT partition as BTRFS
     ///   - EFI partition as FAT32
     fn format_crypto_partitions(&self) -> Result<()> {
-        info!("Formatting all crypto partitions");
+        info!("[Phase 2/6] Formatting encrypted partitions (btrfs on LUKS, boot, EFI)");
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
@@ -339,7 +342,7 @@ impl Installer {
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         format_efi(&self.cmd, &efi_device)?;
 
-        info!("All crypto partitions formatted successfully");
+        info!("Encrypted partitions formatted successfully");
         Ok(())
     }
 
@@ -348,7 +351,7 @@ impl Installer {
     /// Step 2-3: Mount raw BTRFS filesystem to INSTALL_ROOT,
     /// create subvolumes inside it (@ prefixed), then unmount.
     fn create_btrfs_subvolumes(&self) -> Result<()> {
-        info!("Creating btrfs subvolumes");
+        info!("[Phase 2/6] Creating btrfs subvolumes inside LUKS container");
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
@@ -371,7 +374,7 @@ impl Installer {
     /// Step 4: Remount with proper subvol= options to the parent
     /// directory mountpoints, then mount BOOT and EFI.
     fn mount_crypto_subvolumes(&self) -> Result<()> {
-        info!("Mounting btrfs subvolumes with subvol= options");
+        info!("[Phase 2/6] Mounting btrfs subvolumes with subvol= options to {}", INSTALL_ROOT);
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
@@ -419,7 +422,7 @@ impl Installer {
 
     /// Generate fstab for encrypted btrfs subvolumes
     fn generate_fstab_crypto(&self) -> Result<()> {
-        info!("Generating fstab for encrypted system");
+        info!("[Phase 3/6] Generating /etc/fstab for encrypted btrfs subvolumes");
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();

@@ -119,7 +119,7 @@ pub fn run_basestrap(
 ) -> Result<()> {
     let packages = build_package_list(config);
 
-    info!("Installing {} packages with basestrap", packages.len());
+    info!("Installing {} packages with basestrap to {}", packages.len(), install_root);
 
     // Build argument list
     let mut args = vec![install_root];

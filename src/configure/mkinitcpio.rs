@@ -145,9 +145,9 @@ pub fn configure_mkinitcpio(
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
-    info!("Configuring mkinitcpio");
-
     let mkinitcpio_conf = generate_mkinitcpio_conf(config);
+    let hooks = construct_hooks(config);
+    info!("Configuring mkinitcpio with {} hooks: [{}]", hooks.len(), hooks.join(", "));
     let conf_path = format!("{}/etc/mkinitcpio.conf", install_root);
 
     if cmd.is_dry_run() {
@@ -167,7 +167,7 @@ pub fn configure_mkinitcpio(
     // Write new config
     fs::write(&conf_path, mkinitcpio_conf)?;
 
-    info!("mkinitcpio.conf written");
+    info!("mkinitcpio.conf written to {}", conf_path);
     Ok(())
 }
 

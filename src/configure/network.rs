@@ -12,7 +12,7 @@ pub fn configure_network(
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
-    info!("Configuring network");
+    info!("Configuring network (backend: {}, dns: {})", config.network.backend, config.network.dns);
 
     // Configure network backend
     match config.network.backend {

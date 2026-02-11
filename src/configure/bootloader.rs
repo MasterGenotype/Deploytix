@@ -44,7 +44,7 @@ fn install_grub(
     device: &str,
     install_root: &str,
 ) -> Result<()> {
-    info!("Installing GRUB bootloader");
+    info!("Installing GRUB bootloader to {} (x86_64-efi)", device);
 
     // Get root partition - find it dynamically based on layout
     let root_partition_num = match config.disk.layout {
@@ -83,7 +83,7 @@ fn install_grub_with_layout(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    info!("Installing GRUB bootloader for encrypted system");
+    info!("Installing GRUB bootloader to {} (x86_64-efi, encrypted)", device);
 
     // Find LUKS partition from layout
     let luks_part = layout.partitions.iter().find(|p| p.is_luks);
@@ -199,7 +199,7 @@ GRUB_CMDLINE_LINUX_DEFAULT="{}"
     fs::create_dir_all(format!("{}/etc/default", install_root))?;
     fs::write(&grub_default_path, content)?;
 
-    info!("GRUB defaults configured");
+    info!("GRUB defaults written to /etc/default/grub");
     Ok(())
 }
 

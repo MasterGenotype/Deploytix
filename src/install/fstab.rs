@@ -16,7 +16,7 @@ pub fn generate_fstab(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    info!("Generating fstab");
+    info!("Generating /etc/fstab for {} partitions on {}", layout.partitions.len(), device);
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate fstab with entries:");
@@ -102,7 +102,7 @@ pub fn generate_fstab_crypto_subvolume(
     subvolumes: &[SubvolumeDef],
     install_root: &str,
 ) -> Result<()> {
-    info!("Generating fstab for encrypted btrfs subvolumes");
+    info!("Generating /etc/fstab for {} encrypted btrfs subvolumes", subvolumes.len());
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate fstab with btrfs subvolumes:");

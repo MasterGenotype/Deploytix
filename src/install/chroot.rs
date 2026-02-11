@@ -13,7 +13,7 @@ pub fn mount_partitions(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    info!("Mounting partitions to {}", install_root);
+    info!("Mounting {} partitions from {} to {}", layout.partitions.len(), device, install_root);
 
     // Sort partitions by mount point depth (root first, then deeper paths)
     let mut mount_order: Vec<_> = layout
