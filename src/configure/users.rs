@@ -16,7 +16,7 @@ pub fn create_user(
     let password = &config.user.password;
     let groups = &config.user.groups;
 
-    info!("Creating user: {}", username);
+    info!("Creating user '{}' with groups [{}]", username, groups.join(", "));
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would create user {} with groups {:?}", username, groups);

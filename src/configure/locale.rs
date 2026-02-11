@@ -13,7 +13,7 @@ pub fn configure_locale(
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
-    info!("Configuring locale and timezone");
+    info!("Configuring locale, timezone, keymap, and hostname");
 
     // Set timezone
     set_timezone(cmd, &config.system.timezone, install_root)?;

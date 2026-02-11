@@ -22,9 +22,9 @@ pub fn install_custom_hooks(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    info!("Installing custom mkinitcpio hooks");
-
     let hooks = generate_hooks(config, layout)?;
+    let hook_names: Vec<&str> = hooks.iter().map(|h| h.name.as_str()).collect();
+    info!("Installing {} custom mkinitcpio hooks: [{}]", hooks.len(), hook_names.join(", "));
 
     if cmd.is_dry_run() {
         for hook in &hooks {
@@ -53,7 +53,7 @@ pub fn install_custom_hooks(
         fs::write(&install_path, &hook.install_content)?;
         fs::set_permissions(&install_path, fs::Permissions::from_mode(0o755))?;
 
-        info!("Installed hook: {}", hook.name);
+        info!("Installed hook '{}' to {}", hook.name, hooks_dir);
     }
 
     Ok(())

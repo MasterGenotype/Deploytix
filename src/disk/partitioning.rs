@@ -77,7 +77,7 @@ pub fn apply_partitions(
     device: &str,
     layout: &ComputedLayout,
 ) -> Result<()> {
-    info!("Applying partition layout to {}", device);
+    info!("Applying {} partition layout to {}", layout.partitions.len(), device);
 
     // Generate sfdisk script
     let script = generate_sfdisk_script(device, layout);
@@ -98,11 +98,11 @@ pub fn apply_partitions(
     drop(file);
 
     // Wipe existing partition table
-    info!("Wiping existing partition table...");
+    info!("Wiping existing partition table on {}...", device);
     let _ = cmd.run("wipefs", &["-a", device]);
 
     // Apply with sfdisk - pipe script via stdin from file
-    info!("Creating new partition table...");
+    info!("Writing new GPT partition table to {}...", device);
     let result = std::process::Command::new("sfdisk")
         .arg(device)
         .stdin(fs::File::open(script_path)?)
@@ -121,14 +121,14 @@ pub fn apply_partitions(
     }
 
     // Notify kernel of partition changes
-    info!("Notifying kernel of partition changes...");
+    info!("Notifying kernel of partition table changes on {}...", device);
     let _ = cmd.run("partprobe", &[device]);
     let _ = cmd.run("udevadm", &["settle"]);
 
     // Clean up
     let _ = fs::remove_file(script_path);
 
-    info!("Partitioning complete");
+    info!("Partitioning of {} complete ({} partitions created)", device, layout.partitions.len());
     Ok(())
 }
 

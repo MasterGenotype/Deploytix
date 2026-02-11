@@ -13,9 +13,8 @@ pub fn enable_services(
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
-    info!("Enabling services for {}", config.system.init);
-
     let services = build_service_list(config);
+    info!("Enabling {} services for {} init system: [{}]", services.len(), config.system.init, services.join(", "));
 
     for service in services {
         enable_service(cmd, &config.system.init, &service, install_root)?;

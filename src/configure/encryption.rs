@@ -44,7 +44,7 @@ pub fn setup_encryption(
     let mapper_name = config.disk.luks_mapper_name.clone();
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-    info!("Setting up LUKS encryption on {}", luks_device);
+    info!("Setting up LUKS2 encryption on {} (mapper: {})", luks_device, mapper_name);
 
     if cmd.is_dry_run() {
         println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", luks_device);
@@ -62,7 +62,7 @@ pub fn setup_encryption(
     // Open LUKS container
     luks_open(&luks_device, &mapper_name, password)?;
 
-    info!("LUKS encryption setup complete: {}", mapped_path);
+    info!("LUKS encryption setup complete: {} -> {}", luks_device, mapped_path);
 
     Ok(LuksContainer {
         device: luks_device,
@@ -73,7 +73,7 @@ pub fn setup_encryption(
 
 /// Format a device as LUKS2
 fn luks_format(device: &str, password: &str) -> Result<()> {
-    info!("Formatting {} as LUKS2 container", device);
+    info!("Formatting {} as LUKS2 container (aes-xts-plain64, argon2id)", device);
 
     // Use stdin to pass password securely (fixes command injection vulnerability)
     let mut child = Command::new("cryptsetup")

@@ -101,7 +101,7 @@ pub fn format_all_partitions(
     layout: &ComputedLayout,
     filesystem: &Filesystem,
 ) -> Result<()> {
-    info!("Formatting all partitions on {}", device);
+    info!("Formatting {} partitions on {} (default fs: {})", layout.partitions.len(), device, filesystem);
 
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
@@ -112,7 +112,7 @@ pub fn format_all_partitions(
             format_swap(cmd, &part_path, Some(&part.name))?;
         } else if part.is_luks {
             // LUKS partitions are handled separately by encryption module
-            info!("Skipping LUKS partition {} (handled by encryption module)", part_path);
+            info!("Skipping {} (LUKS partition, formatted by encryption module)", part_path);
         } else if part.is_bios_boot {
             format_boot(cmd, &part_path)?;
         } else {
@@ -191,7 +191,7 @@ pub fn create_btrfs_subvolumes(
     subvolumes: &[SubvolumeDef],
     fs_mount: &str,
 ) -> Result<()> {
-    info!("Creating btrfs subvolumes on {} (mounted at {})", device, fs_mount);
+    info!("Creating {} btrfs subvolumes on {} (mounted at {})", subvolumes.len(), device, fs_mount);
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mount {} {}", device, fs_mount);

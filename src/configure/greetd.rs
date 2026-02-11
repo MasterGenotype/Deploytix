@@ -14,11 +14,12 @@ pub fn configure_greetd(
 ) -> Result<()> {
     // Only configure greetd if a desktop environment is selected
     if config.desktop.environment == DesktopEnvironment::None {
-        info!("No desktop environment selected, skipping greetd configuration");
+        info!("Skipping greetd configuration (no desktop environment selected)");
         return Ok(());
     }
 
-    info!("Configuring greetd");
+    info!("Configuring greetd for user '{}' with session '{}'",
+        config.user.name, get_session_command(&config.desktop.environment));
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would configure /etc/greetd/config.toml");
@@ -48,7 +49,7 @@ user = "{user}"
     fs::create_dir_all(&greetd_dir)?;
     fs::write(format!("{}/config.toml", greetd_dir), config_content)?;
 
-    info!("greetd configured for user: {}", username);
+    info!("greetd config written to /etc/greetd/config.toml for user '{}'", username);
     Ok(())
 }
 
