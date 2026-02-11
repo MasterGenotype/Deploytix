@@ -143,6 +143,101 @@ fn luks_open(device: &str, mapper_name: &str, password: &str) -> Result<()> {
     Ok(())
 }
 
+/// Setup LUKS1 encryption for the /boot partition
+///
+/// LUKS1 is required because GRUB's cryptodisk module does not support LUKS2.
+/// Uses pbkdf2 as the KDF since GRUB cannot handle argon2id.
+pub fn setup_boot_encryption(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    device: &str,
+    boot_partition: u32,
+) -> Result<LuksContainer> {
+    if !config.disk.boot_encryption {
+        return Err(DeploytixError::ConfigError(
+            "Boot encryption not enabled in configuration".to_string(),
+        ));
+    }
+
+    let password = config
+        .disk
+        .encryption_password
+        .as_ref()
+        .ok_or_else(|| DeploytixError::ValidationError(
+            "Encryption password required".to_string()
+        ))?;
+
+    let boot_device = partition_path(device, boot_partition);
+    let mapper_name = config.disk.luks_boot_mapper_name.clone();
+    let mapped_path = format!("/dev/mapper/{}", mapper_name);
+
+    info!("Setting up LUKS1 encryption on {} for /boot (mapper: {})", boot_device, mapper_name);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] cryptsetup luksFormat --type luks1 {}", boot_device);
+        println!("  [dry-run] cryptsetup open {} {}", boot_device, mapper_name);
+        return Ok(LuksContainer {
+            device: boot_device,
+            mapper_name,
+            mapped_path,
+        });
+    }
+
+    // Format as LUKS1
+    luks_format_v1(&boot_device, password)?;
+
+    // Open LUKS container
+    luks_open(&boot_device, &mapper_name, password)?;
+
+    info!("LUKS1 boot encryption setup complete: {} -> {}", boot_device, mapped_path);
+
+    Ok(LuksContainer {
+        device: boot_device,
+        mapper_name,
+        mapped_path,
+    })
+}
+
+/// Format a device as LUKS1 (required for GRUB-accessible encrypted /boot)
+///
+/// Uses pbkdf2 instead of argon2id because GRUB's cryptodisk module only
+/// supports pbkdf2 for LUKS1 containers.
+fn luks_format_v1(device: &str, password: &str) -> Result<()> {
+    info!("Formatting {} as LUKS1 container (aes-xts-plain64, pbkdf2)", device);
+
+    let mut child = Command::new("cryptsetup")
+        .args([
+            "luksFormat",
+            "--type", "luks1",
+            "--cipher", "aes-xts-plain64",
+            "--key-size", "512",
+            "--hash", "sha512",
+            "--batch-mode",
+            device,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "cryptsetup luksFormat (LUKS1)".to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(password.as_bytes())?;
+    }
+    drop(child.stdin.take());
+
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup luksFormat (LUKS1)".to_string(),
+            stderr: "Failed to format LUKS1 container for /boot".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 /// Close a LUKS container
 pub fn close_luks(cmd: &CommandRunner, mapper_name: &str) -> Result<()> {
     info!("Closing LUKS container {}", mapper_name);

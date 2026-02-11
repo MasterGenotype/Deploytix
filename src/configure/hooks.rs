@@ -231,6 +231,7 @@ build() {
 /// Generate the mountcrypt hook (dynamically based on layout)
 fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) -> GeneratedHook {
     let mapper_name = &config.disk.luks_mapper_name;
+    let boot_mapper_name = &config.disk.luks_boot_mapper_name;
 
     // Generate subvolume mount commands
     let subvolume_mounts = if let Some(ref subvols) = layout.subvolumes {
@@ -251,6 +252,48 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
             .join("\n\n")
     } else {
         String::new()
+    };
+
+    // Generate /boot mount section depending on boot encryption
+    let boot_mount_section = if config.disk.boot_encryption {
+        format!(
+            r#"    # Mount encrypted /boot from LUKS1 container
+    cryptboot="/dev/mapper/{boot_mapper}"
+    timeout=20
+    while [ ! -b "$cryptboot" ] && [ $timeout -gt 0 ]; do
+        sleep 0.5
+        timeout=$((timeout - 1))
+    done
+
+    mkdir -p "$new_root/boot"
+    if [ -b "$cryptboot" ]; then
+        mount -o rw "$cryptboot" "$new_root/boot" || {{
+            echo "Warning: Failed to mount encrypted /boot from $cryptboot" >&2
+        }}
+        echo "Mounted encrypted /boot from $cryptboot"
+    else
+        echo "Warning: $cryptboot not found, /boot not mounted" >&2
+    fi"#,
+            boot_mapper = boot_mapper_name
+        )
+    } else {
+        // Auto-detect boot partition (original behavior)
+        String::from(
+            r#"    # Mount unencrypted /boot partition
+    mkdir -p "$new_root/boot"
+    boot_partition=""
+    for dev in $(blkid -t LABEL=BOOT -o device); do
+        boot_partition="$dev"
+        break
+    done
+
+    if [ -n "$boot_partition" ] && [ -b "$boot_partition" ]; then
+        mount -o rw "$boot_partition" "$new_root/boot" || {
+            echo "Warning: Failed to mount /boot partition $boot_partition" >&2
+        }
+        echo "Mounted /boot partition $boot_partition"
+    fi"#,
+        )
     };
 
     let hook_content = format!(
@@ -285,6 +328,8 @@ run_hook() {{
     # Mount additional subvolumes
 {subvol_mounts}
 
+{boot_mount}
+
     # Auto-detect and mount EFI partition
     mkdir -p "$new_root/boot/efi"
     efi_partition=""
@@ -311,7 +356,8 @@ run_hook() {{
 }}
 "#,
         mapper = mapper_name,
-        subvol_mounts = subvolume_mounts
+        subvol_mounts = subvolume_mounts,
+        boot_mount = boot_mount_section
     );
 
     let install_content = r#"#!/bin/bash
