@@ -180,32 +180,37 @@ pub fn create_btrfs_filesystem(
 }
 
 /// Create btrfs subvolumes on a device
+///
+/// Follows the canonical BTRFS subvolume setup order:
+/// 1. Mount the raw BTRFS filesystem to the filesystem mountpoint
+/// 2. Create each subvolume inside the mountpoint (prefixed with @)
+/// 3. Unmount from the filesystem mountpoint
 pub fn create_btrfs_subvolumes(
     cmd: &CommandRunner,
     device: &str,
     subvolumes: &[SubvolumeDef],
-    temp_mount: &str,
+    fs_mount: &str,
 ) -> Result<()> {
-    info!("Creating btrfs subvolumes on {}", device);
+    info!("Creating btrfs subvolumes on {} (mounted at {})", device, fs_mount);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] mount {} {}", device, temp_mount);
+        println!("  [dry-run] mount {} {}", device, fs_mount);
         for sv in subvolumes {
-            println!("  [dry-run] btrfs subvolume create {}/{}", temp_mount, sv.name);
+            println!("  [dry-run] btrfs subvolume create {}/{}", fs_mount, sv.name);
         }
-        println!("  [dry-run] umount {}", temp_mount);
+        println!("  [dry-run] umount {}", fs_mount);
         return Ok(());
     }
 
-    // Create temp mount point
-    fs::create_dir_all(temp_mount)?;
+    // Create filesystem mountpoint
+    fs::create_dir_all(fs_mount)?;
 
-    // Mount the btrfs root
-    cmd.run("mount", &[device, temp_mount])?;
+    // Mount the raw btrfs filesystem to its mountpoint
+    cmd.run("mount", &[device, fs_mount])?;
 
-    // Create each subvolume
+    // Create each subvolume inside the filesystem mountpoint
     for sv in subvolumes {
-        let subvol_path = format!("{}/{}", temp_mount, sv.name);
+        let subvol_path = format!("{}/{}", fs_mount, sv.name);
         cmd.run("btrfs", &["subvolume", "create", &subvol_path])
             .map_err(|e| {
                 DeploytixError::FilesystemError(format!("Failed to create subvolume {}: {}", sv.name, e))
@@ -213,8 +218,8 @@ pub fn create_btrfs_subvolumes(
         info!("Created subvolume: {}", sv.name);
     }
 
-    // Unmount
-    cmd.run("umount", &[temp_mount])?;
+    // Unmount from filesystem mountpoint
+    cmd.run("umount", &[fs_mount])?;
 
     info!("All subvolumes created successfully");
     Ok(())
