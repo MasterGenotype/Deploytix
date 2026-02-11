@@ -206,13 +206,17 @@ build() {
     map add_udev_rule \
         '10-dm.rules' \
         '13-dm-disk.rules' \
-        '95-dm-notify.rules'
+        '95-dm-notify.rules' \
+        '/usr/lib/initcpio/udev/11-dm-initramfs.rules'
 
     # cryptsetup calls pthread_create(), which dlopen()s libgcc_s.so.1
     add_binary '/usr/lib/libgcc_s.so.1'
 
     # cryptsetup loads the legacy provider which is required for whirlpool
     add_binary '/usr/lib/ossl-modules/legacy.so'
+
+    # Include /etc/crypttab so the hook can read it at boot
+    add_file '/etc/crypttab'
 
     add_runscript
 }
