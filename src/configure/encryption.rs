@@ -82,7 +82,7 @@ fn luks_format(device: &str, password: &str) -> Result<()> {
             "--type", "luks2",
             "--cipher", "aes-xts-plain64",
             "--key-size", "512",
-            "--hash", "sha256",
+            "--hash", "sha512",
             "--pbkdf", "argon2id",
             "--batch-mode",
             device,
