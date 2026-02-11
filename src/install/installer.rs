@@ -384,18 +384,26 @@ impl Installer {
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
+        let boot_part = layout
+            .partitions
+            .iter()
+            .find(|p| p.is_boot_fs)
+            .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+
         let efi_part = layout
             .partitions
             .iter()
             .find(|p| p.is_efi)
             .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
 
+        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
 
         if let Some(ref subvolumes) = layout.subvolumes {
             generate_fstab_crypto_subvolume(
                 &self.cmd,
                 &container.mapped_path,
+                &boot_device,
                 &efi_device,
                 subvolumes,
                 INSTALL_ROOT,
