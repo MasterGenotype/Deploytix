@@ -8,6 +8,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tracing::info;
 
+/// Convert string to title case (e.g., "ROOT" -> "Root", "USR" -> "Usr")
+fn to_title_case(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 /// LUKS container information
 #[derive(Debug, Clone)]
 pub struct LuksContainer {
@@ -19,7 +29,8 @@ pub struct LuksContainer {
     pub mapped_path: String,
 }
 
-/// Setup LUKS encryption for the specified partition
+/// Setup LUKS encryption for the specified partition (legacy single-volume)
+#[allow(dead_code)]
 pub fn setup_encryption(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -269,4 +280,75 @@ pub fn get_luks_uuid(device: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Setup LUKS2 encryption for multiple partitions (multi-volume encryption)
+///
+/// Creates and opens LUKS containers for ROOT, USR, VAR, and HOME partitions.
+/// Each container gets a unique mapper name (e.g., Crypt-Root, Crypt-Usr, etc.).
+pub fn setup_multi_volume_encryption(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    device: &str,
+    luks_partitions: &[(u32, &str)], // (partition_number, name)
+) -> Result<Vec<LuksContainer>> {
+    if !config.disk.encryption {
+        return Err(DeploytixError::ConfigError(
+            "Encryption not enabled in configuration".to_string(),
+        ));
+    }
+
+    let password = config
+        .disk
+        .encryption_password
+        .as_ref()
+        .ok_or_else(|| DeploytixError::ValidationError(
+            "Encryption password required".to_string()
+        ))?;
+
+    let mut containers = Vec::new();
+
+    for (part_num, name) in luks_partitions {
+        let luks_device = partition_path(device, *part_num);
+        // Convert partition name to title case (e.g., "ROOT" -> "Root")
+        let title_case_name = to_title_case(name);
+        let mapper_name = format!("Crypt-{}", title_case_name);
+        let mapped_path = format!("/dev/mapper/{}", mapper_name);
+
+        info!("Setting up LUKS2 encryption on {} (mapper: {})", luks_device, mapper_name);
+
+        if cmd.is_dry_run() {
+            println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", luks_device);
+            println!("  [dry-run] cryptsetup open {} {}", luks_device, mapper_name);
+        } else {
+            // Format LUKS container
+            luks_format(&luks_device, password)?;
+
+            // Open LUKS container
+            luks_open(&luks_device, &mapper_name, password)?;
+        }
+
+        info!("LUKS encryption setup complete: {} -> {}", luks_device, mapped_path);
+
+        containers.push(LuksContainer {
+            device: luks_device,
+            mapper_name,
+            mapped_path,
+        });
+    }
+
+    info!("Multi-volume encryption setup complete: {} containers created", containers.len());
+    Ok(containers)
+}
+
+/// Close multiple LUKS containers
+pub fn close_multi_luks(cmd: &CommandRunner, containers: &[LuksContainer]) -> Result<()> {
+    info!("Closing {} LUKS containers", containers.len());
+
+    // Close in reverse order (home, var, usr, root)
+    for container in containers.iter().rev() {
+        close_luks(cmd, &container.mapper_name)?;
+    }
+
+    Ok(())
 }

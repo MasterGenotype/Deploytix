@@ -2,21 +2,25 @@
 
 use crate::config::{DeploymentConfig, PartitionLayout};
 use crate::configure;
-use crate::configure::encryption::LuksContainer;
+use crate::configure::encryption::{LuksContainer, setup_multi_volume_encryption, close_multi_luks};
+use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    format_all_partitions, format_efi, format_boot, create_btrfs_filesystem, create_btrfs_subvolumes, mount_btrfs_subvolumes
+    format_all_partitions, format_efi, format_boot, format_swap,
+    create_btrfs_filesystem,
 };
-use crate::disk::layouts::{compute_layout, print_layout_summary, ComputedLayout};
+use crate::disk::layouts::{compute_layout, print_layout_summary, ComputedLayout, get_luks_partitions};
 use crate::disk::partitioning::apply_partitions;
 use crate::install::{
-    generate_fstab, generate_fstab_crypto_subvolume, mount_partitions, run_basestrap, unmount_all
+    generate_fstab, mount_partitions, run_basestrap, unmount_all
 };
-use crate::install::crypttab::generate_crypttab;
+use crate::install::fstab::generate_fstab_multi_volume;
+use crate::install::crypttab::generate_crypttab_multi_volume;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
+use std::fs;
 use tracing::info;
 
 /// Installation target path
@@ -27,10 +31,12 @@ pub struct Installer {
     config: DeploymentConfig,
     cmd: CommandRunner,
     layout: Option<ComputedLayout>,
-    /// LUKS container for root (for encrypted installations)
-    luks_container: Option<LuksContainer>,
+    /// LUKS containers for multi-volume encryption (root, usr, var, home)
+    luks_containers: Vec<LuksContainer>,
     /// LUKS1 container for /boot (when boot_encryption is enabled)
     luks_boot_container: Option<LuksContainer>,
+    /// Keyfiles for automatic unlocking
+    keyfiles: Vec<VolumeKeyfile>,
 }
 
 impl Installer {
@@ -39,8 +45,9 @@ impl Installer {
             config,
             cmd: CommandRunner::new(dry_run),
             layout: None,
-            luks_container: None,
+            luks_containers: Vec::new(),
             luks_boot_container: None,
+            keyfiles: Vec::new(),
         }
     }
 
@@ -58,16 +65,11 @@ impl Installer {
         self.partition_disk()?;
 
         // Phase 2.5: LUKS setup (for CryptoSubvolume layout)
-        // Follows canonical BTRFS subvolume setup order:
-        //   1. Partition and format all partitions
-        //   2. Mount each partition to its filesystem mountpoint
-        //   3. Create subvolumes inside the mountpoint (@ prefixed)
-        //   4. Unmount and remount with proper subvol= options
+        // Multi-volume encryption: separate LUKS containers for root, usr, var, home
         if self.config.disk.layout == PartitionLayout::CryptoSubvolume {
-            self.setup_encryption()?;
-            self.format_crypto_partitions()?;
-            self.create_btrfs_subvolumes()?;
-            self.mount_crypto_subvolumes()?;
+            self.setup_multi_volume_encryption()?;
+            self.format_multi_volume_partitions()?;
+            self.mount_multi_volume_partitions()?;
         } else {
             self.format_partitions()?;
             self.mount_partitions()?;
@@ -78,14 +80,15 @@ impl Installer {
 
         // Phase 3.5: Generate fstab (different method for encrypted)
         if self.config.disk.layout == PartitionLayout::CryptoSubvolume {
-            self.generate_fstab_crypto()?;
+            self.generate_fstab_multi_volume()?;
         } else {
             self.generate_fstab()?;
         }
 
-        // Phase 3.6: Crypttab (for encrypted systems)
+        // Phase 3.6: Crypttab and keyfiles (for multi-volume encrypted systems)
         if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::CryptoSubvolume {
-            self.generate_crypttab()?;
+            self.setup_keyfiles()?;
+            self.generate_crypttab_multi_volume()?;
         }
 
         // Phase 4: System configuration
@@ -280,40 +283,48 @@ impl Installer {
         // Unmount all partitions
         unmount_all(&self.cmd, INSTALL_ROOT)?;
 
-        // Close LUKS boot container if opened (close before root)
+        // Close LUKS boot container if opened (close before root volumes)
         if let Some(ref boot_container) = self.luks_boot_container {
             configure::encryption::close_luks(&self.cmd, &boot_container.mapper_name)?;
         }
 
-        // Close LUKS root container if opened
-        if let Some(ref container) = self.luks_container {
-            configure::encryption::close_luks(&self.cmd, &container.mapper_name)?;
+        // Close all LUKS containers (in reverse order: home, var, usr, root)
+        if !self.luks_containers.is_empty() {
+            close_multi_luks(&self.cmd, &self.luks_containers)?;
         }
 
         Ok(())
     }
 
-    // ==================== ENCRYPTION-SPECIFIC METHODS ====================
+    // ==================== MULTI-VOLUME ENCRYPTION METHODS ====================
 
-    /// Setup LUKS encryption
-    fn setup_encryption(&mut self) -> Result<()> {
-        info!("[Phase 2/6] Setting up LUKS2 encryption on {}", self.config.disk.device);
+    /// Setup multi-volume LUKS encryption (root, usr, var, home)
+    fn setup_multi_volume_encryption(&mut self) -> Result<()> {
+        info!("[Phase 2/6] Setting up multi-volume LUKS2 encryption on {}", self.config.disk.device);
 
         let layout = self.layout.as_ref().unwrap();
-        let luks_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_luks)
-            .ok_or_else(|| DeploytixError::ConfigError("No LUKS partition found in layout".to_string()))?;
 
-        let container = configure::encryption::setup_encryption(
+        // Get all LUKS partitions from layout
+        let luks_parts: Vec<(u32, &str)> = get_luks_partitions(layout)
+            .iter()
+            .map(|p| (p.number, p.name.as_str()))
+            .collect();
+
+        if luks_parts.is_empty() {
+            return Err(DeploytixError::ConfigError(
+                "No LUKS partitions found in layout".to_string(),
+            ));
+        }
+
+        // Setup LUKS encryption for all volumes
+        let containers = setup_multi_volume_encryption(
             &self.cmd,
             &self.config,
             &self.config.disk.device,
-            luks_part.number,
+            &luks_parts,
         )?;
 
-        self.luks_container = Some(container);
+        self.luks_containers = containers;
 
         // Setup LUKS1 encryption on /boot partition if enabled
         if self.config.disk.boot_encryption {
@@ -333,26 +344,30 @@ impl Installer {
             self.luks_boot_container = Some(boot_container);
         }
 
+        info!("Multi-volume encryption setup complete: {} containers", self.luks_containers.len());
         Ok(())
     }
 
-    /// Format all partitions for CryptoSubvolume layout upfront
-    ///
-    /// Step 1: Partition and format all partitions before any mounting:
-    ///   - BTRFS filesystem on the LUKS-mapped device
-    ///   - BOOT partition as BTRFS (on LUKS1 mapped device if boot_encryption enabled)
-    ///   - EFI partition as FAT32
-    fn format_crypto_partitions(&self) -> Result<()> {
-        info!("[Phase 2/6] Formatting encrypted partitions (btrfs on LUKS, boot, EFI)");
+    /// Format all partitions for multi-volume encrypted layout
+    fn format_multi_volume_partitions(&self) -> Result<()> {
+        info!("[Phase 2/6] Formatting multi-volume encrypted partitions");
 
-        let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
-        // Format BTRFS filesystem on LUKS-mapped device
-        create_btrfs_filesystem(&self.cmd, &container.mapped_path, "ROOT")?;
+        // Format each LUKS-mapped device as BTRFS
+        for container in &self.luks_containers {
+            let label = container.mapper_name.trim_start_matches("Crypt-");
+            create_btrfs_filesystem(&self.cmd, &container.mapped_path, label)?;
+        }
+
+        // Format SWAP partition
+        let swap_part = layout.partitions.iter().find(|p| p.is_swap);
+        if let Some(swap) = swap_part {
+            let swap_device = partition_path(&self.config.disk.device, swap.number);
+            format_swap(&self.cmd, &swap_device, Some("SWAP"))?;
+        }
 
         // Format BOOT partition as BTRFS
-        // If boot_encryption is enabled, format the LUKS1-mapped device instead of raw partition
         if let Some(ref boot_container) = self.luks_boot_container {
             format_boot(&self.cmd, &boot_container.mapped_path)?;
         } else {
@@ -360,7 +375,7 @@ impl Installer {
                 .partitions
                 .iter()
                 .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
             let boot_device = partition_path(&self.config.disk.device, boot_part.number);
             format_boot(&self.cmd, &boot_device)?;
         }
@@ -374,54 +389,49 @@ impl Installer {
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         format_efi(&self.cmd, &efi_device)?;
 
-        info!("Encrypted partitions formatted successfully");
+        info!("Multi-volume partitions formatted successfully");
         Ok(())
     }
 
-    /// Create btrfs subvolumes inside LUKS container
-    ///
-    /// Step 2-3: Mount raw BTRFS filesystem to INSTALL_ROOT,
-    /// create subvolumes inside it (@ prefixed), then unmount.
-    fn create_btrfs_subvolumes(&self) -> Result<()> {
-        info!("[Phase 2/6] Creating btrfs subvolumes inside LUKS container");
+    /// Mount multi-volume encrypted partitions for installation
+    fn mount_multi_volume_partitions(&self) -> Result<()> {
+        info!("[Phase 2/6] Mounting multi-volume encrypted partitions to {}", INSTALL_ROOT);
 
-        let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
-        // Mount raw btrfs to INSTALL_ROOT, create subvolumes, unmount
-        if let Some(ref subvolumes) = layout.subvolumes {
-            create_btrfs_subvolumes(
-                &self.cmd,
-                &container.mapped_path,
-                subvolumes,
-                INSTALL_ROOT,
-            )?;
+        // Mount in order: root first, then usr, var, home
+        // Find root container
+        let root_container = self.luks_containers
+            .iter()
+            .find(|c| c.mapper_name == "Crypt-Root")
+            .ok_or_else(|| DeploytixError::ConfigError("No Crypt-Root container found".to_string()))?;
+
+        // Mount root
+        if !self.cmd.is_dry_run() {
+            fs::create_dir_all(INSTALL_ROOT)?;
+        }
+        self.cmd.run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
+        info!("Mounted {} to {}", root_container.mapped_path, INSTALL_ROOT);
+
+        // Mount other encrypted volumes
+        for container in &self.luks_containers {
+            if container.mapper_name == "Crypt-Root" {
+                continue; // Already mounted
+            }
+
+            let mount_name = container.mapper_name
+                .trim_start_matches("Crypt-")
+                .to_lowercase();
+            let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
+
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&mount_point)?;
+            }
+            self.cmd.run("mount", &[&container.mapped_path, &mount_point])?;
+            info!("Mounted {} to {}", container.mapped_path, mount_point);
         }
 
-        Ok(())
-    }
-
-    /// Mount btrfs subvolumes and other partitions for installation
-    ///
-    /// Step 4: Remount with proper subvol= options to the parent
-    /// directory mountpoints, then mount BOOT and EFI.
-    fn mount_crypto_subvolumes(&self) -> Result<()> {
-        info!("[Phase 2/6] Mounting btrfs subvolumes with subvol= options to {}", INSTALL_ROOT);
-
-        let container = self.luks_container.as_ref().unwrap();
-        let layout = self.layout.as_ref().unwrap();
-
-        // Remount each subvolume with proper subvol= option
-        if let Some(ref subvolumes) = layout.subvolumes {
-            mount_btrfs_subvolumes(
-                &self.cmd,
-                &container.mapped_path,
-                subvolumes,
-                INSTALL_ROOT,
-            )?;
-        }
-
-        // Mount BOOT partition (from LUKS1 mapped device if boot_encryption is enabled)
+        // Mount BOOT partition
         let boot_source = if let Some(ref boot_container) = self.luks_boot_container {
             boot_container.mapped_path.clone()
         } else {
@@ -429,15 +439,16 @@ impl Installer {
                 .partitions
                 .iter()
                 .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
             partition_path(&self.config.disk.device, boot_part.number)
         };
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
         if !self.cmd.is_dry_run() {
-            std::fs::create_dir_all(&boot_mount)?;
+            fs::create_dir_all(&boot_mount)?;
         }
         self.cmd.run("mount", &[&boot_source, &boot_mount])?;
+        info!("Mounted {} to {}", boot_source, boot_mount);
 
         // Mount EFI partition
         let efi_part = layout
@@ -449,81 +460,61 @@ impl Installer {
         let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
 
         if !self.cmd.is_dry_run() {
-            std::fs::create_dir_all(&efi_mount)?;
+            fs::create_dir_all(&efi_mount)?;
         }
         self.cmd.run("mount", &[&efi_device, &efi_mount])?;
+        info!("Mounted {} to {}", efi_device, efi_mount);
 
         Ok(())
     }
 
-    /// Generate fstab for encrypted btrfs subvolumes
-    fn generate_fstab_crypto(&self) -> Result<()> {
-        info!("[Phase 3/6] Generating /etc/fstab for encrypted btrfs subvolumes");
+    /// Setup keyfiles for automatic unlocking
+    fn setup_keyfiles(&mut self) -> Result<()> {
+        info!("[Phase 3/6] Setting up keyfiles for automatic unlocking");
 
-        let container = self.luks_container.as_ref().unwrap();
-        let layout = self.layout.as_ref().unwrap();
+        let password = self.config
+            .disk
+            .encryption_password
+            .as_ref()
+            .ok_or_else(|| DeploytixError::ValidationError(
+                "Encryption password required for keyfile setup".to_string()
+            ))?;
 
-        // Use LUKS1 mapped device for boot if boot_encryption is enabled,
-        // otherwise use the raw partition
-        let boot_device = if let Some(ref boot_container) = self.luks_boot_container {
-            boot_container.mapped_path.clone()
-        } else {
-            let boot_part = layout
-                .partitions
-                .iter()
-                .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
-            partition_path(&self.config.disk.device, boot_part.number)
-        };
-
-        let efi_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_efi)
-            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
-        let efi_device = partition_path(&self.config.disk.device, efi_part.number);
-
-        if let Some(ref subvolumes) = layout.subvolumes {
-            generate_fstab_crypto_subvolume(
-                &self.cmd,
-                &container.mapped_path,
-                &boot_device,
-                &efi_device,
-                subvolumes,
-                INSTALL_ROOT,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    /// Generate crypttab
-    fn generate_crypttab(&self) -> Result<()> {
-        let layout = self.layout.as_ref().unwrap();
-        let luks_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_luks)
-            .ok_or_else(|| DeploytixError::ConfigError("No LUKS partition found in layout".to_string()))?;
-
-        // Find boot partition number for boot encryption entry
-        let boot_luks_partition = if self.config.disk.boot_encryption {
-            let boot_part = layout
-                .partitions
-                .iter()
-                .find(|p| p.is_boot_fs)
-                .map(|p| p.number);
-            boot_part
-        } else {
-            None
-        };
-
-        generate_crypttab(
+        let keyfiles = setup_keyfiles_for_volumes(
             &self.cmd,
-            &self.config,
+            &self.luks_containers,
+            password,
+            INSTALL_ROOT,
+        )?;
+
+        self.keyfiles = keyfiles;
+        info!("Keyfiles created for {} volumes", self.luks_containers.len());
+        Ok(())
+    }
+
+    /// Generate fstab for multi-volume encrypted system
+    fn generate_fstab_multi_volume(&self) -> Result<()> {
+        info!("[Phase 3/6] Generating /etc/fstab for multi-volume encrypted system");
+
+        let layout = self.layout.as_ref().unwrap();
+
+        generate_fstab_multi_volume(
+            &self.cmd,
+            &self.luks_containers,
             &self.config.disk.device,
-            luks_part.number,
-            boot_luks_partition,
+            layout,
+            INSTALL_ROOT,
+        )
+    }
+
+    /// Generate crypttab for multi-volume encrypted system
+    fn generate_crypttab_multi_volume(&self) -> Result<()> {
+        info!("[Phase 3/6] Generating /etc/crypttab for multi-volume encrypted system");
+
+        generate_crypttab_multi_volume(
+            &self.cmd,
+            &self.luks_containers,
+            &self.keyfiles,
             INSTALL_ROOT,
         )
     }

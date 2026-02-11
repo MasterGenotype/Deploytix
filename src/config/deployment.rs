@@ -45,6 +45,9 @@ pub struct DiskConfig {
     /// Path to keyfile (None = password prompt)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyfile_path: Option<String>,
+    /// Enable keyfile-based automatic unlocking (default: true for CryptoSubvolume)
+    #[serde(default = "default_true")]
+    pub keyfile_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,9 +94,6 @@ pub struct NetworkConfig {
     /// Network backend
     #[serde(default)]
     pub backend: NetworkBackend,
-    /// DNS provider
-    #[serde(default)]
-    pub dns: DnsProvider,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +116,9 @@ pub enum PartitionLayout {
     Standard,
     /// Minimal layout (EFI, Swap, Root)
     Minimal,
-    /// LUKS container with btrfs subvolumes (EFI + BIOS Boot + LUKS)
+    /// Multi-volume encrypted layout (EFI, Boot, Swap, LUKS-Root, LUKS-Usr, LUKS-Var, LUKS-Home)
+    /// Each of Root, Usr, Var, Home is a separate LUKS2 encrypted partition with keyfile-based
+    /// automatic unlocking during initramfs.
     CryptoSubvolume,
     /// Custom layout (advanced)
     Custom,
@@ -127,7 +129,7 @@ impl std::fmt::Display for PartitionLayout {
         match self {
             Self::Standard => write!(f, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)"),
             Self::Minimal => write!(f, "Minimal (EFI, Swap, Root)"),
-            Self::CryptoSubvolume => write!(f, "Encrypted (EFI + LUKS with btrfs subvolumes)"),
+            Self::CryptoSubvolume => write!(f, "Encrypted Multi-Volume (separate LUKS for Root, Usr, Var, Home)"),
             Self::Custom => write!(f, "Custom"),
         }
     }
@@ -231,7 +233,6 @@ pub enum NetworkBackend {
     #[default]
     Iwd,
     NetworkManager,
-    Connman,
 }
 
 impl std::fmt::Display for NetworkBackend {
@@ -239,26 +240,6 @@ impl std::fmt::Display for NetworkBackend {
         match self {
             Self::Iwd => write!(f, "iwd (standalone)"),
             Self::NetworkManager => write!(f, "NetworkManager + iwd"),
-            Self::Connman => write!(f, "ConnMan"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum DnsProvider {
-    #[default]
-    DnscryptProxy,
-    Systemd,
-    None,
-}
-
-impl std::fmt::Display for DnsProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DnscryptProxy => write!(f, "dnscrypt-proxy"),
-            Self::Systemd => write!(f, "systemd-resolved"),
-            Self::None => write!(f, "None (use DHCP)"),
         }
     }
 }
@@ -422,13 +403,9 @@ impl DeploymentConfig {
         let password = prompt_password("User password", true)?;
 
         // Network
-        let backends = [NetworkBackend::Iwd, NetworkBackend::NetworkManager, NetworkBackend::Connman];
+        let backends = [NetworkBackend::Iwd, NetworkBackend::NetworkManager];
         let net_idx = prompt_select("Network backend", &backends, 0)?;
         let backend = backends[net_idx].clone();
-
-        let dns_providers = [DnsProvider::DnscryptProxy, DnsProvider::Systemd, DnsProvider::None];
-        let dns_idx = prompt_select("DNS provider", &dns_providers, 0)?;
-        let dns = dns_providers[dns_idx].clone();
 
         // Desktop
         let desktops = [
@@ -443,7 +420,7 @@ impl DeploymentConfig {
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
-                layout,
+                layout: layout.clone(),
                 filesystem,
                 encryption,
                 encryption_password,
@@ -451,6 +428,7 @@ impl DeploymentConfig {
                 boot_encryption,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
+                keyfile_enabled: layout == PartitionLayout::CryptoSubvolume,
             },
             system: SystemConfig {
                 init,
@@ -467,7 +445,7 @@ impl DeploymentConfig {
                 groups: default_groups(),
                 sudoer: true,
             },
-            network: NetworkConfig { backend, dns },
+            network: NetworkConfig { backend },
             desktop: DesktopConfig {
                 environment,
                 display_manager: None,
@@ -488,6 +466,7 @@ impl DeploymentConfig {
                 boot_encryption: false,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
+                keyfile_enabled: false,
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -506,7 +485,6 @@ impl DeploymentConfig {
             },
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,
-                dns: DnsProvider::DnscryptProxy,
             },
             desktop: DesktopConfig {
                 environment: DesktopEnvironment::Kde,

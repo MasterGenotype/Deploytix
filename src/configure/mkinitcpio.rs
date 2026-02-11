@@ -18,6 +18,14 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
         Filesystem::F2fs => modules.push("f2fs".to_string()),
     }
 
+    // Always include vfat and dependencies for EFI partition mounting in initramfs
+    modules.extend([
+        "vfat".to_string(),
+        "fat".to_string(),
+        "nls_cp437".to_string(),
+        "nls_iso8859_1".to_string(),
+    ]);
+
     // Encryption modules
     if config.disk.encryption {
         modules.extend([
@@ -102,12 +110,35 @@ pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
     // parse it at early boot and open LUKS containers.
     if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
         files.push("/etc/crypttab".to_string());
+
+        // Include keyfiles for automatic unlocking during initramfs
+        // These are referenced by /etc/crypttab entries
+        files.push("/etc/cryptsetup-keys.d/cryptroot.key".to_string());
+        files.push("/etc/cryptsetup-keys.d/cryptusr.key".to_string());
+        files.push("/etc/cryptsetup-keys.d/cryptvar.key".to_string());
+        files.push("/etc/cryptsetup-keys.d/crypthome.key".to_string());
     }
 
-    // TODO: Add keyfile for encryption if needed
-    // if config.disk.encryption {
-    //     files.push("/crypto_keyfile.bin".to_string());
-    // }
+    files
+}
+
+/// Construct FILES array with dynamic keyfile paths
+#[allow(dead_code)]
+pub fn construct_files_with_keyfiles(
+    config: &DeploymentConfig,
+    keyfile_paths: &[String],
+) -> Vec<String> {
+    let mut files = Vec::new();
+
+    // Include /etc/crypttab in the initramfs
+    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
+        files.push("/etc/crypttab".to_string());
+
+        // Include all provided keyfiles
+        for keyfile in keyfile_paths {
+            files.push(keyfile.clone());
+        }
+    }
 
     files
 }

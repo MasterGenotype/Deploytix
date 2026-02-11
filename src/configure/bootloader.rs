@@ -110,7 +110,7 @@ fn install_grub_with_layout(
     Ok(())
 }
 
-/// Run grub-install and grub-mkconfig
+/// Run grub-install, grub-mkconfig, and create EFI boot entry
 fn run_grub_install(
     cmd: &CommandRunner,
     device: &str,
@@ -119,6 +119,7 @@ fn run_grub_install(
     if cmd.is_dry_run() {
         println!("  [dry-run] grub-install --target=x86_64-efi --boot-directory=/boot --efi-directory=/boot/efi --removable {}", device);
         println!("  [dry-run] grub-mkconfig -o /boot/grub/grub.cfg");
+        println!("  [dry-run] efibootmgr --create --disk {} --part 1 --loader /EFI/BOOT/BOOTX64.EFI --label 'Artix Linux'", device);
         return Ok(());
     }
 
@@ -132,6 +133,41 @@ fn run_grub_install(
     // Generate GRUB config
     cmd.run_in_chroot(install_root, "grub-mkconfig -o /boot/grub/grub.cfg")?;
 
+    // Create EFI boot entry using efibootmgr (required for bootable system)
+    create_efi_boot_entry(cmd, device, 1, "Artix Linux")?;
+
+    Ok(())
+}
+
+/// Create EFI boot entry using efibootmgr
+///
+/// This is REQUIRED after grub-install to register the boot entry in UEFI firmware.
+/// Without this, the system will not present a bootable option after reboot.
+pub fn create_efi_boot_entry(
+    cmd: &CommandRunner,
+    device: &str,
+    efi_partition: u32,
+    label: &str,
+) -> Result<()> {
+    info!("Creating EFI boot entry for {} on {} partition {}", label, device, efi_partition);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] efibootmgr --create --disk {} --part {} --loader /EFI/BOOT/BOOTX64.EFI --label '{}'",
+            device, efi_partition, label);
+        return Ok(());
+    }
+
+    // Create boot entry pointing to GRUB's EFI binary
+    // --removable flag in grub-install places it at /EFI/BOOT/BOOTX64.EFI
+    cmd.run("efibootmgr", &[
+        "--create",
+        "--disk", device,
+        "--part", &efi_partition.to_string(),
+        "--loader", "/EFI/BOOT/BOOTX64.EFI",
+        "--label", label,
+    ])?;
+
+    info!("EFI boot entry '{}' created successfully", label);
     Ok(())
 }
 

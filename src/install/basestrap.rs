@@ -1,6 +1,6 @@
 //! Basestrap wrapper for base system installation
 
-use crate::config::{DeploymentConfig, DesktopEnvironment, DnsProvider, Filesystem, NetworkBackend};
+use crate::config::{DeploymentConfig, DesktopEnvironment, Filesystem, NetworkBackend};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use tracing::info;
@@ -54,7 +54,10 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Network packages based on config
     match config.network.backend {
         NetworkBackend::Iwd => {
-            packages.push("iwd".to_string());
+            packages.extend([
+                "iwd".to_string(),
+                "openresolv".to_string(),
+            ]);
             // Add init-specific service package
             let service_pkg = format!("iwd-{}", config.system.init);
             packages.push(service_pkg);
@@ -63,42 +66,27 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             packages.extend([
                 "networkmanager".to_string(),
                 "iwd".to_string(),
+                "openresolv".to_string(),
             ]);
-            let service_pkg = format!("networkmanager-{}", config.system.init);
-            packages.push(service_pkg);
-        }
-        NetworkBackend::Connman => {
-            packages.push("connman".to_string());
-            let service_pkg = format!("connman-{}", config.system.init);
-            packages.push(service_pkg);
+            let nm_service_pkg = format!("networkmanager-{}", config.system.init);
+            let iwd_service_pkg = format!("iwd-{}", config.system.init);
+            packages.push(nm_service_pkg);
+            packages.push(iwd_service_pkg);
         }
     }
 
-    // DNS
-    match config.network.dns {
-        DnsProvider::DnscryptProxy => {
-            packages.push("dnscrypt-proxy".to_string());
-            let service_pkg = format!("dnscrypt-proxy-{}", config.system.init);
-            packages.push(service_pkg);
-            packages.push("openresolv".to_string());
-        }
-        DnsProvider::Systemd => {
-            // systemd-resolved is part of systemd, not available on Artix
-        }
-        DnsProvider::None => {}
-    }
-
-    // Seat management
-    packages.push("seatd".to_string());
-    let seatd_service = format!("seatd-{}", config.system.init);
-    packages.push(seatd_service);
-
-    // Desktop environment prerequisites (display server, etc.)
+    // Desktop environment prerequisites (display server, seat management, display manager)
     if config.desktop.environment != DesktopEnvironment::None {
         packages.extend([
             "xorg-server".to_string(),
             "xorg-xinit".to_string(),
+            "seatd".to_string(),
+            "greetd".to_string(),
         ]);
+        let seatd_service = format!("seatd-{}", config.system.init);
+        let greetd_service = format!("greetd-{}", config.system.init);
+        packages.push(seatd_service);
+        packages.push(greetd_service);
     }
 
     // Encryption tools (if enabled)

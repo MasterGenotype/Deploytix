@@ -56,9 +56,9 @@ user = "{user}"
 /// Get the session command for a desktop environment
 fn get_session_command(de: &DesktopEnvironment) -> &'static str {
     match de {
-        DesktopEnvironment::Kde => "startplasma-wayland",
-        DesktopEnvironment::Gnome => "gnome-session",
-        DesktopEnvironment::Xfce => "startxfce4",
+        DesktopEnvironment::Kde => "dbus-launch startplasma-wayland",
+        DesktopEnvironment::Gnome => "dbus-launch gnome-session",
+        DesktopEnvironment::Xfce => "dbus-launch startxfce4",
         DesktopEnvironment::None => "",
     }
 }

@@ -80,11 +80,16 @@ fn generate_crypttab_unlock_hook() -> GeneratedHook {
 # SPDX-License-Identifier: GPL-2.0-only
 # crypttab-unlock: A custom mkinitcpio hook to unlock all LUKS-encrypted partitions
 # using entries from /etc/crypttab.
+#
+# Features:
+# - Checks if device is already unlocked before attempting
+# - Waits for each unlock to complete before proceeding
+# - Sequential processing to ensure proper ordering
 
-# Function to wait for the device to appear
+# Function to wait for the source device to appear
 wait_for_device() {
     local devpath="$1"
-    local timeout=10
+    local timeout=30
 
     while [ ! -e "$devpath" ] && [ $timeout -gt 0 ]; do
         sleep 0.5
@@ -95,6 +100,72 @@ wait_for_device() {
         echo "[crypttab-unlock] ERROR: Device $devpath not found after waiting."
         return 1
     fi
+    return 0
+}
+
+# Function to wait for mapped device to appear after unlock
+wait_for_mapper() {
+    local mapper_path="$1"
+    local timeout=20
+
+    while [ ! -b "$mapper_path" ] && [ $timeout -gt 0 ]; do
+        sleep 0.5
+        timeout=$((timeout - 1))
+    done
+
+    if [ ! -b "$mapper_path" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to check if a LUKS device is already open
+is_already_unlocked() {
+    local mapper_name="$1"
+    local mapper_path="/dev/mapper/$mapper_name"
+
+    # Check if the mapper device exists
+    if [ -b "$mapper_path" ]; then
+        return 0  # Already unlocked
+    fi
+    return 1  # Not unlocked
+}
+
+# Function to unlock a single LUKS device
+unlock_device() {
+    local device="$1"
+    local mapper_name="$2"
+    local keyfile="$3"
+    local options="$4"
+    local mapper_path="/dev/mapper/$mapper_name"
+
+    # Check if already unlocked
+    if is_already_unlocked "$mapper_name"; then
+        echo "[crypttab-unlock] $mapper_name is already unlocked, skipping."
+        return 0
+    fi
+
+    # Build cryptsetup command
+    local cmd="cryptsetup open $device $mapper_name"
+    if [ -n "$keyfile" ] && [ "$keyfile" != "none" ]; then
+        cmd="$cmd --key-file $keyfile"
+    fi
+
+    # Run the cryptsetup command
+    echo "[crypttab-unlock] Running: $cmd"
+    if ! $cmd; then
+        echo "[crypttab-unlock] ERROR: cryptsetup failed for $mapper_name"
+        return 1
+    fi
+
+    # Wait for the mapped device to appear
+    echo "[crypttab-unlock] Waiting for $mapper_path to appear..."
+    if ! wait_for_mapper "$mapper_path"; then
+        echo "[crypttab-unlock] ERROR: $mapper_path did not appear after unlock"
+        return 1
+    fi
+
+    echo "[crypttab-unlock] Successfully unlocked $mapper_name -> $mapper_path"
     return 0
 }
 
@@ -113,6 +184,9 @@ run_hook() {
 
     echo "[crypttab-unlock] Processing $crypttab ..."
     local ret=0
+    local unlock_count=0
+    local skip_count=0
+    local fail_count=0
 
     while IFS= read -r line; do
         # Skip empty lines and comments
@@ -125,7 +199,7 @@ run_hook() {
         local mapping="$1"
         local device="$2"
         local keyfile="$3"
-        shift 3
+        shift 3 2>/dev/null || true
         local options="$*"
 
         # Convert UUID= to device path
@@ -136,47 +210,71 @@ run_hook() {
                 ;;
         esac
 
-        # Ensure the device is available before proceeding
-        wait_for_device "$device" || {
-            echo "[crypttab-unlock] ERROR: Device $device not found. Skipping $mapping."
-            ret=1
-            continue
-        }
-
-        # Convert the mapping name to follow proper capitalization (e.g., "ROOT" -> "Root")
+        # Convert the mapping name to title case (e.g., "Root" -> "Root", "ROOT" -> "Root")
         local formatted_mapping
         formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+        local full_mapper_name="Crypt-$formatted_mapping"
 
-        echo "[crypttab-unlock] Unlocking $formatted_mapping from $device ..."
+        # Skip Boot partition - it's unlocked by GRUB, not by this hook
+        case "$formatted_mapping" in
+            Boot|boot|BOOT)
+                echo "[crypttab-unlock] Skipping Boot partition (unlocked by GRUB)"
+                skip_count=$((skip_count + 1))
+                continue
+                ;;
+        esac
+
+        # Skip EFI partition entries (should never be encrypted, but guard against misconfiguration)
+        case "$formatted_mapping" in
+            Efi|efi|EFI)
+                echo "[crypttab-unlock] Skipping EFI partition (not encrypted)"
+                skip_count=$((skip_count + 1))
+                continue
+                ;;
+        esac
+
+        echo "[crypttab-unlock] Processing entry: $mapping -> $full_mapper_name"
+
+        # Check if already unlocked first (before waiting for device)
+        if is_already_unlocked "$full_mapper_name"; then
+            echo "[crypttab-unlock] $full_mapper_name already unlocked, skipping."
+            skip_count=$((skip_count + 1))
+            continue
+        fi
+
+        # Wait for the source device to be available
+        echo "[crypttab-unlock] Waiting for source device $device ..."
+        if ! wait_for_device "$device"; then
+            echo "[crypttab-unlock] ERROR: Device $device not found. Skipping $full_mapper_name."
+            fail_count=$((fail_count + 1))
+            ret=1
+            continue
+        fi
 
         # Verify keyfile existence
-        if [ -n "$keyfile" ] && [ "$keyfile" != "none" ] && [ ! -f "$keyfile" ]; then
-            echo "[crypttab-unlock] ERROR: Keyfile $keyfile does not exist. Skipping $mapping."
-            ret=1
-            continue
-        fi
-
-        # Build and run cryptsetup command with the properly formatted mapping name
-        local cmd="cryptsetup open $device Crypt-$formatted_mapping"
         if [ -n "$keyfile" ] && [ "$keyfile" != "none" ]; then
-            cmd="$cmd --key-file $keyfile"
+            if [ ! -f "$keyfile" ]; then
+                echo "[crypttab-unlock] ERROR: Keyfile $keyfile does not exist. Skipping $full_mapper_name."
+                fail_count=$((fail_count + 1))
+                ret=1
+                continue
+            fi
         fi
 
-        # Add any additional options from /etc/crypttab
-        if [ -n "$options" ]; then
-            cmd="$cmd $options"
-        fi
-
-        # Run the cryptsetup command
-        if ! $cmd; then
-            echo "[crypttab-unlock] ERROR: Failed to unlock $formatted_mapping from $device."
+        # Unlock the device
+        if unlock_device "$device" "$full_mapper_name" "$keyfile" "$options"; then
+            unlock_count=$((unlock_count + 1))
+        else
+            fail_count=$((fail_count + 1))
             ret=1
-            continue
         fi
 
-        echo "[crypttab-unlock] Successfully unlocked $formatted_mapping from $device."
+        # Small delay to ensure device mapper settles
+        sleep 0.2
+
     done < "$crypttab"
 
+    echo "[crypttab-unlock] Complete: $unlock_count unlocked, $skip_count skipped, $fail_count failed"
     return $ret
 }
 
@@ -228,113 +326,145 @@ build() {
     }
 }
 
-/// Generate the mountcrypt hook (dynamically based on layout)
-fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) -> GeneratedHook {
-    let mapper_name = &config.disk.luks_mapper_name;
+/// Generate the mountcrypt hook for multi-volume encrypted system
+///
+/// Mounts separate encrypted partitions (Crypt-Root, Crypt-Usr, Crypt-Var, Crypt-Home)
+/// instead of btrfs subvolumes.
+fn generate_mountcrypt_hook(config: &DeploymentConfig, _layout: &ComputedLayout) -> GeneratedHook {
     let boot_mapper_name = &config.disk.luks_boot_mapper_name;
-
-    // Generate subvolume mount commands
-    let subvolume_mounts = if let Some(ref subvols) = layout.subvolumes {
-        subvols
-            .iter()
-            .filter(|sv| sv.mount_point != "/")
-            .map(|sv| {
-                format!(
-                    r#"    mkdir -p "$new_root{mp}"
-    mount -o rw,subvol={name} "$cryptroot" "$new_root{mp}" || {{
-        echo "Warning: Could not mount subvolume {name} on $new_root{mp}" >&2
-    }}"#,
-                    mp = sv.mount_point,
-                    name = sv.name
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    } else {
-        String::new()
-    };
 
     // Generate /boot mount section depending on boot encryption
     let boot_mount_section = if config.disk.boot_encryption {
         format!(
             r#"    # Mount encrypted /boot from LUKS1 container
-    cryptboot="/dev/mapper/{boot_mapper}"
-    timeout=20
-    while [ ! -b "$cryptboot" ] && [ $timeout -gt 0 ]; do
-        sleep 0.5
-        timeout=$((timeout - 1))
-    done
-
-    mkdir -p "$new_root/boot"
-    if [ -b "$cryptboot" ]; then
-        mount -o rw "$cryptboot" "$new_root/boot" || {{
-            echo "Warning: Failed to mount encrypted /boot from $cryptboot" >&2
-        }}
-        echo "Mounted encrypted /boot from $cryptboot"
-    else
-        echo "Warning: $cryptboot not found, /boot not mounted" >&2
-    fi"#,
+    mount_volume "/dev/mapper/{boot_mapper}" "$new_root/boot" "boot" || true"#,
             boot_mapper = boot_mapper_name
         )
     } else {
-        // Auto-detect boot partition (original behavior)
+        // Auto-detect boot partition
         String::from(
             r#"    # Mount unencrypted /boot partition
-    mkdir -p "$new_root/boot"
     boot_partition=""
-    for dev in $(blkid -t LABEL=BOOT -o device); do
+    for dev in $(blkid -t LABEL=BOOT -o device 2>/dev/null); do
         boot_partition="$dev"
         break
     done
 
     if [ -n "$boot_partition" ] && [ -b "$boot_partition" ]; then
-        mount -o rw "$boot_partition" "$new_root/boot" || {
-            echo "Warning: Failed to mount /boot partition $boot_partition" >&2
-        }
-        echo "Mounted /boot partition $boot_partition"
+        mount_volume "$boot_partition" "$new_root/boot" "boot" || true
+    else
+        echo "[mountcrypt] Warning: BOOT partition not found" >&2
     fi"#,
         )
     };
 
     let hook_content = format!(
         r#"#!/usr/bin/ash
-# mountcrypt: Mount decrypted LUKS device with btrfs subvolumes
+# mountcrypt: Mount multi-volume encrypted system
 # Generated by Deploytix
+#
+# Mounts separate LUKS-encrypted partitions:
+#   - Crypt-Root -> /
+#   - Crypt-Usr  -> /usr
+#   - Crypt-Var  -> /var
+#   - Crypt-Home -> /home
+#
+# This hook runs AFTER crypttab-unlock has unlocked all volumes.
 
-run_hook() {{
-    new_root="/new_root"
-    cryptroot="/dev/mapper/{mapper}"
+# Wait for a block device to appear
+wait_for_block_device() {{
+    local device="$1"
+    local timeout=30
 
-    # Wait for mapped device
-    timeout=20
-    while [ ! -b "$cryptroot" ] && [ $timeout -gt 0 ]; do
+    while [ ! -b "$device" ] && [ $timeout -gt 0 ]; do
         sleep 0.5
         timeout=$((timeout - 1))
     done
 
-    if [ ! -b "$cryptroot" ]; then
-        echo "Error: $cryptroot not found" >&2
+    [ -b "$device" ]
+}}
+
+# Check if a path is already mounted
+is_mounted() {{
+    local mount_point="$1"
+    grep -q " $mount_point " /proc/mounts 2>/dev/null
+}}
+
+# Mount a volume with checks
+mount_volume() {{
+    local device="$1"
+    local mount_point="$2"
+    local name="$3"
+
+    # Wait for device
+    echo "[mountcrypt] Waiting for $device ($name)..."
+    if ! wait_for_block_device "$device"; then
+        echo "[mountcrypt] ERROR: $device not found for $name" >&2
         return 1
     fi
 
-    mkdir -p "$new_root"
+    # Check if already mounted
+    if is_mounted "$mount_point"; then
+        echo "[mountcrypt] $mount_point already mounted, skipping"
+        return 0
+    fi
 
-    # Mount root subvolume (@)
-    mount -o rw,subvol=@ "$cryptroot" "$new_root" || {{
-        echo "Error mounting root subvolume @" >&2
+    # Create mount point and mount
+    mkdir -p "$mount_point"
+    if mount -o rw "$device" "$mount_point"; then
+        echo "[mountcrypt] Mounted $device -> $mount_point"
+        return 0
+    else
+        echo "[mountcrypt] ERROR: Failed to mount $device -> $mount_point" >&2
         return 1
-    }}
+    fi
+}}
 
-    # Mount additional subvolumes
-{subvol_mounts}
+run_hook() {{
+    local new_root="/new_root"
+    local ret=0
 
+    echo "[mountcrypt] Starting multi-volume mount sequence..."
+
+    # List available mapper devices for debugging
+    echo "[mountcrypt] Available /dev/mapper devices:"
+    ls -la /dev/mapper/ 2>/dev/null || echo "[mountcrypt] No mapper devices found"
+
+    # Mount root first (required)
+    echo "[mountcrypt] === Mounting root ==="
+    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root"; then
+        echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
+        return 1
+    fi
+
+    # Mount /usr (required for most systems)
+    echo "[mountcrypt] === Mounting /usr ==="
+    if ! mount_volume "/dev/mapper/Crypt-Usr" "$new_root/usr" "usr"; then
+        echo "[mountcrypt] ERROR: Failed to mount /usr" >&2
+        ret=1
+    fi
+
+    # Mount /var
+    echo "[mountcrypt] === Mounting /var ==="
+    if ! mount_volume "/dev/mapper/Crypt-Var" "$new_root/var" "var"; then
+        echo "[mountcrypt] WARNING: Failed to mount /var" >&2
+    fi
+
+    # Mount /home
+    echo "[mountcrypt] === Mounting /home ==="
+    if ! mount_volume "/dev/mapper/Crypt-Home" "$new_root/home" "home"; then
+        echo "[mountcrypt] WARNING: Failed to mount /home" >&2
+    fi
+
+    # Mount /boot
+    echo "[mountcrypt] === Mounting /boot ==="
 {boot_mount}
 
-    # Auto-detect and mount EFI partition
-    mkdir -p "$new_root/boot/efi"
+    # Mount EFI partition
+    echo "[mountcrypt] === Mounting EFI ==="
     efi_partition=""
-    for dev in $(blkid -t TYPE=vfat -o device); do
-        if blkid "$dev" | grep -qi 'PARTLABEL="EFI"'; then
+    for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+        if blkid "$dev" 2>/dev/null | grep -qi 'PARTLABEL="EFI"'; then
             efi_partition="$dev"
             break
         fi
@@ -342,32 +472,30 @@ run_hook() {{
 
     if [ -z "$efi_partition" ]; then
         # Fallback: first vfat partition
-        efi_partition=$(blkid -t TYPE=vfat -o device | head -n1)
+        efi_partition=$(blkid -t TYPE=vfat -o device 2>/dev/null | head -n1)
     fi
 
-    if [ -n "$efi_partition" ] && [ -b "$efi_partition" ]; then
-        mount -o rw "$efi_partition" "$new_root/boot/efi" || {{
-            echo "Warning: Failed to mount EFI partition $efi_partition" >&2
-        }}
-        echo "Mounted EFI partition $efi_partition to $new_root/boot/efi"
+    if [ -n "$efi_partition" ]; then
+        mount_volume "$efi_partition" "$new_root/boot/efi" "EFI" || true
     else
-        echo "Warning: EFI partition not found, skipping EFI mount" >&2
+        echo "[mountcrypt] Warning: EFI partition not found" >&2
     fi
+
+    echo "[mountcrypt] Mount sequence complete"
+    return $ret
 }}
 "#,
-        mapper = mapper_name,
-        subvol_mounts = subvolume_mounts,
         boot_mount = boot_mount_section
     );
 
     let install_content = r#"#!/bin/bash
 build() {
-    # No extra binaries are needed.
+    # No extra binaries are needed - crypttab-unlock handles device setup
     add_runscript
 }
 
 help() {
-    echo "mountcrypt: Mount decrypted Crypt-Root and its Btrfs subvolumes"
+    echo "mountcrypt: Mount multi-volume encrypted system (Crypt-Root, Crypt-Usr, Crypt-Var, Crypt-Home)"
 }
 "#.to_string();
 

@@ -19,7 +19,8 @@ pub mod partition_types {
     pub const LINUX_FILESYSTEM: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 }
 
-/// Btrfs subvolume definition
+/// Btrfs subvolume definition (legacy - kept for future subvolume support)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SubvolumeDef {
     /// Subvolume name (e.g., "@", "@home")
@@ -62,7 +63,8 @@ pub struct PartitionDef {
 pub struct ComputedLayout {
     pub partitions: Vec<PartitionDef>,
     pub total_mib: u64,
-    /// Btrfs subvolumes (for CryptoSubvolume layout)
+    /// Btrfs subvolumes (legacy - kept for future subvolume support)
+    #[allow(dead_code)]
     pub subvolumes: Option<Vec<SubvolumeDef>>,
 }
 
@@ -370,19 +372,51 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     })
 }
 
-/// Compute the CryptoSubvolume layout (EFI + BIOS Boot + LUKS container)
-/// Partition 1: EFI (512 MiB)
-/// Partition 2: BIOS Boot (650 MiB)
-/// Partition 3: LUKS container (remainder) with btrfs subvolumes
+/// Compute the CryptoSubvolume layout (multi-volume encrypted partitions)
+/// Partition 1: EFI (512 MiB) - FAT32
+/// Partition 2: BOOT (650 MiB) - BTRFS (optionally LUKS1)
+/// Partition 3: SWAP (2x RAM, capped) - swap
+/// Partition 4: ROOT (dynamic) - LUKS2 -> BTRFS
+/// Partition 5: USR (dynamic) - LUKS2 -> BTRFS
+/// Partition 6: VAR (dynamic) - LUKS2 -> BTRFS
+/// Partition 7: HOME (remainder) - LUKS2 -> BTRFS
 fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
-    // Minimum: 512 MiB EFI + 650 MiB BIOS Boot + at least 20 GiB for LUKS
-    let min_total_mib = EFI_MIB + BIOS_BOOT_MIB + 20480;
+    let ram_mib = get_ram_mib();
+    let swap_mib = calculate_swap_mib(ram_mib);
+
+    // Reserved space (fixed partitions)
+    let reserved_mib = EFI_MIB + BIOS_BOOT_MIB + swap_mib;
+    let remain_mib = disk_mib.saturating_sub(reserved_mib);
+
+    // Minimum total required
+    let min_total_mib = reserved_mib + ROOT_MIN_MIB + USR_MIN_MIB + VAR_MIN_MIB + 1;
     if disk_mib < min_total_mib {
         return Err(DeploytixError::DiskTooSmall {
             size_mib: disk_mib,
             required_mib: min_total_mib,
         });
     }
+
+    // Calculate sizes based on ratios
+    let mut root_mib = ((remain_mib as f64) * ROOT_RATIO) as u64;
+    let mut usr_mib = ((remain_mib as f64) * USR_RATIO) as u64;
+    let mut var_mib = ((remain_mib as f64) * VAR_RATIO) as u64;
+
+    // Apply minimums
+    if root_mib < ROOT_MIN_MIB {
+        root_mib = ROOT_MIN_MIB;
+    }
+    if usr_mib < USR_MIN_MIB {
+        usr_mib = USR_MIN_MIB;
+    }
+    if var_mib < VAR_MIN_MIB {
+        var_mib = VAR_MIN_MIB;
+    }
+
+    // Align down
+    root_mib = floor_align(root_mib, ALIGN_MIB);
+    usr_mib = floor_align(usr_mib, ALIGN_MIB);
+    var_mib = floor_align(var_mib, ALIGN_MIB);
 
     let partitions = vec![
         // Partition 1: EFI System Partition
@@ -399,10 +433,10 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_boot_fs: false,
             attributes: None,
         },
-        // Partition 2: BIOS Boot (for GRUB legacy support on GPT)
+        // Partition 2: BOOT (for GRUB, optionally LUKS1 encrypted)
         PartitionDef {
             number: 2,
-            name: "BIOS".to_string(),
+            name: "BOOT".to_string(),
             size_mib: BIOS_BOOT_MIB,
             type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
             mount_point: Some("/boot".to_string()),
@@ -413,13 +447,69 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_boot_fs: true,
             attributes: Some("LegacyBIOSBootable".to_string()),
         },
-        // Partition 3: LUKS Container (root with btrfs subvolumes)
+        // Partition 3: SWAP
         PartitionDef {
             number: 3,
-            name: "LUKS".to_string(),
+            name: "SWAP".to_string(),
+            size_mib: swap_mib,
+            type_guid: partition_types::LINUX_SWAP.to_string(),
+            mount_point: None,
+            is_swap: true,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        },
+        // Partition 4: ROOT (LUKS2 encrypted)
+        PartitionDef {
+            number: 4,
+            name: "ROOT".to_string(),
+            size_mib: root_mib,
+            type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
+            mount_point: Some("/".to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: true,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        },
+        // Partition 5: USR (LUKS2 encrypted)
+        PartitionDef {
+            number: 5,
+            name: "USR".to_string(),
+            size_mib: usr_mib,
+            type_guid: partition_types::LINUX_USR_X86_64.to_string(),
+            mount_point: Some("/usr".to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: true,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        },
+        // Partition 6: VAR (LUKS2 encrypted)
+        PartitionDef {
+            number: 6,
+            name: "VAR".to_string(),
+            size_mib: var_mib,
+            type_guid: partition_types::LINUX_VAR.to_string(),
+            mount_point: Some("/var".to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: true,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        },
+        // Partition 7: HOME (LUKS2 encrypted, remainder)
+        PartitionDef {
+            number: 7,
+            name: "HOME".to_string(),
             size_mib: 0, // Remainder
-            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
-            mount_point: None, // Handled specially via LUKS
+            type_guid: partition_types::LINUX_HOME.to_string(),
+            mount_point: Some("/home".to_string()),
             is_swap: false,
             is_efi: false,
             is_luks: true,
@@ -432,34 +522,13 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        subvolumes: Some(default_subvolumes()),
+        subvolumes: None, // No subvolumes - separate encrypted partitions
     })
 }
 
-/// Default btrfs subvolumes for CryptoSubvolume layout
-pub fn default_subvolumes() -> Vec<SubvolumeDef> {
-    vec![
-        SubvolumeDef {
-            name: "@".to_string(),
-            mount_point: "/".to_string(),
-            mount_options: "defaults,noatime,compress=zstd".to_string(),
-        },
-        SubvolumeDef {
-            name: "@usr".to_string(),
-            mount_point: "/usr".to_string(),
-            mount_options: "defaults,noatime,compress=zstd".to_string(),
-        },
-        SubvolumeDef {
-            name: "@var".to_string(),
-            mount_point: "/var".to_string(),
-            mount_options: "defaults,noatime,compress=zstd".to_string(),
-        },
-        SubvolumeDef {
-            name: "@home".to_string(),
-            mount_point: "/home".to_string(),
-            mount_options: "defaults,noatime,compress=zstd".to_string(),
-        },
-    ]
+/// Get all LUKS partition definitions from layout
+pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
+    layout.partitions.iter().filter(|p| p.is_luks).collect()
 }
 
 /// Compute partition layout for a disk

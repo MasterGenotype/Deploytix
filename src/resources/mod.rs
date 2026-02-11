@@ -3,10 +3,6 @@
 //! This module provides embedded configuration templates and resources
 //! that are compiled into the binary for portability.
 
-/// Embedded dnscrypt-proxy configuration template
-#[allow(dead_code)]
-pub const DNSCRYPT_PROXY_TOML: &str = include_str!("dnscrypt-proxy.toml");
-
 /// Runtime directory for temporary files
 #[allow(dead_code)]
 pub const RUNTIME_DIR: &str = "/tmp/deploytix";
