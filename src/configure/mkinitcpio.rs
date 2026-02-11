@@ -46,6 +46,11 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         "consolefont".to_string(),
     ]);
 
+    // lvm2 hook provides device-mapper support required by encryption hooks
+    if config.disk.encryption {
+        hooks.push("lvm2".to_string());
+    }
+
     // For CryptoSubvolume layout, use custom hooks
     if config.disk.layout == PartitionLayout::CryptoSubvolume && config.disk.encryption {
         // Custom hooks handle encryption and mounting
