@@ -52,8 +52,14 @@ impl Installer {
         self.partition_disk()?;
 
         // Phase 2.5: LUKS setup (for CryptoSubvolume layout)
+        // Follows canonical BTRFS subvolume setup order:
+        //   1. Partition and format all partitions
+        //   2. Mount each partition to its filesystem mountpoint
+        //   3. Create subvolumes inside the mountpoint (@ prefixed)
+        //   4. Unmount and remount with proper subvol= options
         if self.config.disk.layout == PartitionLayout::CryptoSubvolume {
             self.setup_encryption()?;
+            self.format_crypto_partitions()?;
             self.create_btrfs_subvolumes()?;
             self.mount_crypto_subvolumes()?;
         } else {
@@ -300,36 +306,77 @@ impl Installer {
         Ok(())
     }
 
-    /// Create btrfs subvolumes inside LUKS container
-    fn create_btrfs_subvolumes(&self) -> Result<()> {
-        info!("Creating btrfs filesystem and subvolumes");
+    /// Format all partitions for CryptoSubvolume layout upfront
+    ///
+    /// Step 1: Partition and format all partitions before any mounting:
+    ///   - BTRFS filesystem on the LUKS-mapped device
+    ///   - BOOT partition as BTRFS
+    ///   - EFI partition as FAT32
+    fn format_crypto_partitions(&self) -> Result<()> {
+        info!("Formatting all crypto partitions");
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
-        // Create btrfs filesystem
+        // Format BTRFS filesystem on LUKS-mapped device
         create_btrfs_filesystem(&self.cmd, &container.mapped_path, "ROOT")?;
 
-        // Create subvolumes
+        // Format BOOT partition as BTRFS
+        let boot_part = layout
+            .partitions
+            .iter()
+            .find(|p| p.is_boot_fs)
+            .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
+        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+        format_boot(&self.cmd, &boot_device)?;
+
+        // Format EFI partition as FAT32
+        let efi_part = layout
+            .partitions
+            .iter()
+            .find(|p| p.is_efi)
+            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
+        let efi_device = partition_path(&self.config.disk.device, efi_part.number);
+        format_efi(&self.cmd, &efi_device)?;
+
+        info!("All crypto partitions formatted successfully");
+        Ok(())
+    }
+
+    /// Create btrfs subvolumes inside LUKS container
+    ///
+    /// Step 2-3: Mount raw BTRFS filesystem to INSTALL_ROOT,
+    /// create subvolumes inside it (@ prefixed), then unmount.
+    fn create_btrfs_subvolumes(&self) -> Result<()> {
+        info!("Creating btrfs subvolumes");
+
+        let container = self.luks_container.as_ref().unwrap();
+        let layout = self.layout.as_ref().unwrap();
+
+        // Mount raw btrfs to INSTALL_ROOT, create subvolumes, unmount
         if let Some(ref subvolumes) = layout.subvolumes {
             create_btrfs_subvolumes(
                 &self.cmd,
                 &container.mapped_path,
                 subvolumes,
-                "/tmp/deploytix-btrfs",
+                INSTALL_ROOT,
             )?;
         }
 
         Ok(())
     }
 
-    /// Mount btrfs subvolumes for installation
+    /// Mount btrfs subvolumes and other partitions for installation
+    ///
+    /// Step 4: Remount with proper subvol= options to the parent
+    /// directory mountpoints, then mount BOOT and EFI.
     fn mount_crypto_subvolumes(&self) -> Result<()> {
-        info!("Mounting btrfs subvolumes");
+        info!("Mounting btrfs subvolumes with subvol= options");
 
         let container = self.luks_container.as_ref().unwrap();
         let layout = self.layout.as_ref().unwrap();
 
+        // Remount each subvolume with proper subvol= option
         if let Some(ref subvolumes) = layout.subvolumes {
             mount_btrfs_subvolumes(
                 &self.cmd,
@@ -338,36 +385,29 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
         }
-        // Format and mount BOOT partition
+
+        // Mount BOOT partition
         let boot_part = layout
             .partitions
             .iter()
             .find(|p| p.is_boot_fs)
             .ok_or_else(|| DeploytixError::ConfigError("No Boot Partition Found in Layout".to_string()))?;
-        
         let boot_device = partition_path(&self.config.disk.device, boot_part.number);
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
-        
-        // Format Boot as BTRFS
-        format_boot(&self.cmd, &boot_device)?;
-        
+
         if !self.cmd.is_dry_run() {
             std::fs::create_dir_all(&boot_mount)?;
         }
         self.cmd.run("mount", &[&boot_device, &boot_mount])?;
-        
-        // Format and mount EFI partition
+
+        // Mount EFI partition
         let efi_part = layout
             .partitions
             .iter()
             .find(|p| p.is_efi)
             .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
-
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
-
-        // Format EFI as FAT32 (this is skipped in format_all_partitions for CryptoSubvolume)
-        format_efi(&self.cmd, &efi_device)?;
 
         if !self.cmd.is_dry_run() {
             std::fs::create_dir_all(&efi_mount)?;
