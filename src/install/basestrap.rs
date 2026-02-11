@@ -104,6 +104,8 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Encryption tools (if enabled)
     if config.disk.encryption {
         packages.push("cryptsetup".to_string());
+        // lvm2 provides device-mapper, required by mkinitcpio encrypt/lvm2 hooks
+        packages.push("lvm2".to_string());
     }
 
     packages
