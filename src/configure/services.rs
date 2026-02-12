@@ -117,20 +117,54 @@ fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str)
 
 /// Enable an s6 service
 fn enable_s6_service(service: &str, install_root: &str) -> Result<()> {
-    let service_dir_check = format!("{}/etc/s6/sv/{}", install_root, service);
+    let service_dir = format!("{}/etc/s6/sv/{}", install_root, service);
     let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
     let link_path = format!("{}/{}", enabled_dir, service);
 
-    if !Path::new(&service_dir_check).exists() {
-        warn!("Service {} not found at {}, skipping", service, service_dir_check);
+    // If the service directory is missing, try to create a minimal one
+    if !Path::new(&service_dir).exists() {
+        warn!("Service {} not found at {}, attempting to auto-create", service, service_dir);
+        maybe_create_builtin_s6_service(service, install_root)?;
+    }
+
+    // If it's still missing after auto-create, skip with a warning
+    if !Path::new(&service_dir).exists() {
+        warn!("Service {} is not available and could not be auto-created; skipping enable.", service);
         return Ok(());
     }
 
     fs::create_dir_all(&enabled_dir)?;
 
-    // s6 uses touch files instead of symlinks for some configurations
+    // s6 uses touch files to declare wanted services in a bundle
     fs::write(&link_path, "")?;
     info!("Enabled s6 service {}", service);
+
+    Ok(())
+}
+
+/// Create a minimal s6 service directory for well-known services if not present
+fn maybe_create_builtin_s6_service(service: &str, install_root: &str) -> Result<()> {
+    let run_cmd = match service {
+        "greetd" => Some("exec /usr/bin/greetd -c /etc/greetd/config.toml"),
+        "seatd" => Some("exec /usr/bin/seatd -g video"),
+        "iwd" => Some("exec /usr/bin/iwd"),
+        "NetworkManager" | "networkmanager" => Some("exec /usr/bin/NetworkManager"),
+        _ => None,
+    };
+
+    if let Some(cmdline) = run_cmd {
+        let svc_dir = format!("{}/etc/s6/sv/{}", install_root, service);
+        let run_path = format!("{}/run", svc_dir);
+        fs::create_dir_all(&svc_dir)?;
+        fs::write(&run_path, format!("#!/bin/sh\nexec {}
+", cmdline))?;
+        // make executable
+        let mut perms = fs::metadata(&run_path)?.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&run_path, perms)?;
+        info!("Auto-created s6 service for {} at {}", service, svc_dir);
+    }
 
     Ok(())
 }

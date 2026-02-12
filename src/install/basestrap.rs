@@ -58,9 +58,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            // Add init-specific service package
-            let service_pkg = format!("iwd-{}", config.system.init);
-            packages.push(service_pkg);
+            // Add init-specific service package for non-s6 inits only
+            if config.system.init != crate::config::InitSystem::S6 {
+                let service_pkg = format!("iwd-{}", config.system.init);
+                packages.push(service_pkg);
+            }
         }
         NetworkBackend::NetworkManager => {
             packages.extend([
@@ -68,10 +70,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            let nm_service_pkg = format!("networkmanager-{}", config.system.init);
-            let iwd_service_pkg = format!("iwd-{}", config.system.init);
-            packages.push(nm_service_pkg);
-            packages.push(iwd_service_pkg);
+            if config.system.init != crate::config::InitSystem::S6 {
+                let nm_service_pkg = format!("networkmanager-{}", config.system.init);
+                let iwd_service_pkg = format!("iwd-{}", config.system.init);
+                packages.push(nm_service_pkg);
+                packages.push(iwd_service_pkg);
+            }
             // Add nm-applet for desktop environments
             if config.desktop.environment != DesktopEnvironment::None {
                 packages.push("network-manager-applet".to_string());
@@ -96,10 +100,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             "pipewire-pulse".to_string(),
             "pipewire-alsa".to_string(),
         ]);
-        let seatd_service = format!("seatd-{}", config.system.init);
-        let greetd_service = format!("greetd-{}", config.system.init);
-        packages.push(seatd_service);
-        packages.push(greetd_service);
+        if config.system.init != crate::config::InitSystem::S6 {
+            let seatd_service = format!("seatd-{}", config.system.init);
+            let greetd_service = format!("greetd-{}", config.system.init);
+            packages.push(seatd_service);
+            packages.push(greetd_service);
+        }
     }
 
     // Encryption tools (if enabled)
