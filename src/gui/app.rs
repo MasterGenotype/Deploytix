@@ -401,7 +401,8 @@ impl eframe::App for DeploytixGui {
                             }
                         }
                         WizardStep::Summary => {
-                            let enabled = can_proceed;
+                            // Enable when user has confirmed the warning OR is running dry-run
+                            let enabled = self.confirmed || self.dry_run;
                             if ui.add_enabled(enabled, egui::Button::new("Install →")).clicked() {
                                 if let Some(next) = self.step.next() {
                                     self.step = next;
