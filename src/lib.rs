@@ -9,5 +9,8 @@ pub mod install;
 pub mod resources;
 pub mod utils;
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 pub use config::DeploymentConfig;
 pub use utils::error::DeploytixError;
