@@ -18,9 +18,9 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 
     // For s6, pre-select providers to avoid interactive prompts
     if config.system.init == crate::config::InitSystem::S6 {
-        // D-Bus and logind stack for s6
+        // D-Bus provider for s6; no elogind, use seatd for seats
         packages.push("dbus-s6".to_string());
-        packages.push("elogind-s6".to_string());
+        // no elogind-s6
     }
 
     // Kernel and firmware

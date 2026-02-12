@@ -184,7 +184,7 @@ impl InitSystem {
         match self {
             Self::Runit => "runit",
             Self::OpenRC => "openrc",
-            Self::S6 => "s6",
+            Self::S6 => "s6-base",
             Self::Dinit => "dinit",
         }
     }
