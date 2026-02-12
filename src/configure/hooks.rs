@@ -455,6 +455,10 @@ run_hook() {{
     if ! mount_volume "/dev/mapper/Crypt-Home" "$new_root/home" "home"; then
         echo "[mountcrypt] WARNING: Failed to mount /home" >&2
     fi
+
+    # Mount /boot
+    echo "[mountcrypt] === Mounting /boot ==="
+{boot_mount}
         
     echo "[mountcrypt] Mount sequence complete"
     return $ret

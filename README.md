@@ -45,7 +45,25 @@ cargo portable
 
 ## Usage
 
-### Interactive Installation
+### GUI Installation (Recommended)
+
+```bash
+# Build with GUI support
+cargo build --release --features gui
+
+# Run GUI as root
+sudo ./target/release/deploytix-gui
+```
+
+The GUI provides a step-by-step wizard for:
+- Selecting target disk
+- Configuring partitions, filesystem, and encryption
+- Setting up system options (init, bootloader, locale)
+- Creating user account
+- Choosing network backend and desktop environment
+- Reviewing configuration before installation
+
+### CLI Interactive Installation
 
 ```bash
 # Run as root
