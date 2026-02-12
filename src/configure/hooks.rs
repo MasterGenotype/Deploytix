@@ -455,32 +455,7 @@ run_hook() {{
     if ! mount_volume "/dev/mapper/Crypt-Home" "$new_root/home" "home"; then
         echo "[mountcrypt] WARNING: Failed to mount /home" >&2
     fi
-
-    # Mount /boot
-    echo "[mountcrypt] === Mounting /boot ==="
-{boot_mount}
-
-    # Mount EFI partition
-    echo "[mountcrypt] === Mounting EFI ==="
-    efi_partition=""
-    for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
-        if blkid "$dev" 2>/dev/null | grep -qi 'PARTLABEL="EFI"'; then
-            efi_partition="$dev"
-            break
-        fi
-    done
-
-    if [ -z "$efi_partition" ]; then
-        # Fallback: first vfat partition
-        efi_partition=$(blkid -t TYPE=vfat -o device 2>/dev/null | head -n1)
-    fi
-
-    if [ -n "$efi_partition" ]; then
-        mount_volume "$efi_partition" "$new_root/boot/efi" "EFI" || true
-    else
-        echo "[mountcrypt] Warning: EFI partition not found" >&2
-    fi
-
+        
     echo "[mountcrypt] Mount sequence complete"
     return $ret
 }}
