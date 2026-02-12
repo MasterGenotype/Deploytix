@@ -242,6 +242,9 @@ impl Installer {
         // greetd configuration (if desktop environment selected)
         configure::greetd::configure_greetd(&self.cmd, &self.config, INSTALL_ROOT)?;
 
+        // Construct s6 service files for greetd (if s6 init system)
+        configure::greetd::create_greetd_s6_service(&self.cmd, &self.config, INSTALL_ROOT)?;
+
         // Services
         configure::services::enable_services(&self.cmd, &self.config, INSTALL_ROOT)?;
 
