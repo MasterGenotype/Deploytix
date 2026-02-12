@@ -16,6 +16,13 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         config.system.init.base_package().to_string(),
     ]);
 
+    // For s6, pre-select providers to avoid interactive prompts
+    if config.system.init == crate::config::InitSystem::S6 {
+        // D-Bus and logind stack for s6
+        packages.push("dbus-s6".to_string());
+        packages.push("elogind-s6".to_string());
+    }
+
     // Kernel and firmware
     packages.extend([
         "linux-firmware".to_string(),
@@ -58,8 +65,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            // Add init-specific service package for non-s6 inits only
-            if config.system.init != crate::config::InitSystem::S6 {
+            if config.system.init == crate::config::InitSystem::S6 {
+                // Official s6 service exists
+                packages.push("iwd-s6".to_string());
+                // dbus-s6 already included above for s6 base stack
+            } else {
                 let service_pkg = format!("iwd-{}", config.system.init);
                 packages.push(service_pkg);
             }
@@ -67,10 +77,15 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         NetworkBackend::NetworkManager => {
             packages.extend([
                 "networkmanager".to_string(),
+                // Default to iwd backend; wpa_supplicant can be added later if desired
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            if config.system.init != crate::config::InitSystem::S6 {
+            if config.system.init == crate::config::InitSystem::S6 {
+                // Official s6 services exist for NM and iwd
+                packages.push("networkmanager-s6".to_string());
+                packages.push("iwd-s6".to_string());
+            } else {
                 let nm_service_pkg = format!("networkmanager-{}", config.system.init);
                 let iwd_service_pkg = format!("iwd-{}", config.system.init);
                 packages.push(nm_service_pkg);
@@ -100,7 +115,10 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             "pipewire-pulse".to_string(),
             "pipewire-alsa".to_string(),
         ]);
-        if config.system.init != crate::config::InitSystem::S6 {
+        if config.system.init == crate::config::InitSystem::S6 {
+            // Official s6 service exists for seatd; greetd-s6 does NOT exist yet, keep plain greetd
+            packages.push("seatd-s6".to_string());
+        } else {
             let seatd_service = format!("seatd-{}", config.system.init);
             let greetd_service = format!("greetd-{}", config.system.init);
             packages.push(seatd_service);
