@@ -450,7 +450,32 @@ run_hook() {{
     # Mount /boot
     echo "[mountcrypt] === Mounting /boot ==="
 {boot_mount}
-        
+
+    # Mount EFI partition (must come after /boot since it mounts to /boot/efi)
+    echo "[mountcrypt] === Mounting EFI ==="
+    mkdir -p "$new_root/boot/efi"
+
+    efi_partition=""
+    for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+        if blkid "$dev" | grep -qi 'PARTLABEL="EFI"'; then
+            efi_partition="$dev"
+            break
+        fi
+    done
+
+    if [ -z "$efi_partition" ]; then
+        # Fallback: first vfat partition
+        efi_partition=$(blkid -t TYPE=vfat -o device 2>/dev/null | head -n1)
+    fi
+
+    if [ -n "$efi_partition" ] && [ -b "$efi_partition" ]; then
+        mount_volume "$efi_partition" "$new_root/boot/efi" "efi" || {{
+            echo "[mountcrypt] WARNING: Failed to mount EFI partition" >&2
+        }}
+    else
+        echo "[mountcrypt] WARNING: EFI partition not found, skipping" >&2
+    fi
+
     echo "[mountcrypt] Mount sequence complete"
     return $ret
 }}
