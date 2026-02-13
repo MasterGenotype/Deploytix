@@ -276,7 +276,7 @@ impl DeploytixGui {
             let _ = tx.send(InstallMessage::Progress(0.15));
 
             // Run installer
-            let installer = Installer::new(config, dry_run);
+            let installer = Installer::new(config, dry_run).with_skip_confirm(true);
             match installer.run() {
                 Ok(()) => {
                     let _ = tx.send(InstallMessage::Progress(1.0));

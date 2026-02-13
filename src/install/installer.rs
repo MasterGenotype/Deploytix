@@ -37,6 +37,8 @@ pub struct Installer {
     luks_boot_container: Option<LuksContainer>,
     /// Keyfiles for automatic unlocking
     keyfiles: Vec<VolumeKeyfile>,
+    /// Skip interactive confirmation prompt (e.g. when GUI already confirmed)
+    skip_confirm: bool,
 }
 
 impl Installer {
@@ -48,7 +50,15 @@ impl Installer {
             luks_containers: Vec::new(),
             luks_boot_container: None,
             keyfiles: Vec::new(),
+            skip_confirm: false,
         }
+    }
+
+    /// Skip the interactive confirmation prompt.
+    /// Use this when confirmation has already been obtained (e.g. via GUI).
+    pub fn with_skip_confirm(mut self, skip: bool) -> Self {
+        self.skip_confirm = skip;
+        self
     }
 
     /// Run the full installation process
@@ -138,7 +148,7 @@ impl Installer {
             self.config.disk.device
         );
 
-        if !self.cmd.is_dry_run() && !warn_confirm(&warning)? {
+        if !self.cmd.is_dry_run() && !self.skip_confirm && !warn_confirm(&warning)? {
             return Err(crate::utils::error::DeploytixError::UserCancelled);
         }
 
