@@ -94,15 +94,17 @@ pub fn generate_crypttab(
 
 /// Generate /etc/crypttab for multi-volume encrypted system
 ///
-/// Creates entries for ROOT, USR, VAR, and HOME with keyfile paths
-/// for automatic unlocking during initramfs.
+/// Creates entries for ROOT, USR, VAR, HOME and optionally BOOT with keyfile
+/// paths for automatic unlocking during initramfs.
 pub fn generate_crypttab_multi_volume(
     cmd: &CommandRunner,
     containers: &[LuksContainer],
+    boot_container: Option<&LuksContainer>,
     keyfiles: &[VolumeKeyfile],
     install_root: &str,
 ) -> Result<()> {
-    info!("Generating /etc/crypttab for {} encrypted volumes", containers.len());
+    let total = containers.len() + if boot_container.is_some() { 1 } else { 0 };
+    info!("Generating /etc/crypttab for {} encrypted volumes", total);
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate /etc/crypttab:");
@@ -110,6 +112,11 @@ pub fn generate_crypttab_multi_volume(
             let volume_name = container.mapper_name.trim_start_matches("Crypt-");
             let kf_path = keyfile_path(volume_name);
             println!("    {} UUID=<LUKS_UUID> {} luks,discard", volume_name, kf_path);
+        }
+        if let Some(boot) = boot_container {
+            let volume_name = boot.mapper_name.trim_start_matches("Crypt-");
+            let kf_path = keyfile_path(volume_name);
+            println!("    {} UUID=<BOOT_LUKS_UUID> {} luks,discard", volume_name, kf_path);
         }
         return Ok(());
     }
@@ -121,6 +128,7 @@ pub fn generate_crypttab_multi_volume(
          # <name>    <device>              <keyfile>                              <options>\n"
     );
 
+    // Write entries for all data volumes (Root, Usr, Var, Home)
     for container in containers {
         let uuid = get_luks_uuid(&container.device)?;
 
@@ -144,10 +152,31 @@ pub fn generate_crypttab_multi_volume(
         ));
     }
 
+    // Write entry for encrypted /boot (LUKS1) if present
+    if let Some(boot) = boot_container {
+        let uuid = get_luks_uuid(&boot.device)?;
+        let volume_name = boot.mapper_name
+            .trim_start_matches("Crypt-")
+            .to_string();
+
+        let kf_path = keyfiles
+            .iter()
+            .find(|k| k.volume_name == volume_name)
+            .map(|k| k.keyfile_path.clone())
+            .unwrap_or_else(|| keyfile_path(&volume_name));
+
+        content.push_str(&format!(
+            "{name}    UUID={uuid}    {keyfile}    luks,discard\n",
+            name = volume_name,
+            uuid = uuid,
+            keyfile = kf_path,
+        ));
+    }
+
     let crypttab_path = format!("{}/etc/crypttab", install_root);
     fs::create_dir_all(format!("{}/etc", install_root))?;
     fs::write(&crypttab_path, &content)?;
 
-    info!("Crypttab written to {} with {} entries", crypttab_path, containers.len());
+    info!("Crypttab written to {} with {} entries", crypttab_path, total);
     Ok(())
 }
