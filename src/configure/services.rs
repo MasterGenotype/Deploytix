@@ -16,6 +16,9 @@ pub fn enable_services(
     let services = build_service_list(config);
     info!("Enabling {} services for {} init system: [{}]", services.len(), config.system.init, services.join(", "));
 
+    // Install required packages for the services before enabling them
+    install_service_packages(cmd, config, install_root, &services)?;
+
     for service in services {
         enable_service(cmd, &config.system.init, &service, install_root)?;
     }
@@ -48,6 +51,63 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
     }
 
     services
+}
+
+/// Map a service name to its base package name
+fn service_base_package(service: &str) -> &str {
+    match service {
+        // Service name uses CamelCase but the package is lowercase
+        "NetworkManager" => "networkmanager",
+        other => other,
+    }
+}
+
+/// Build the list of packages required for the given services and init system.
+///
+/// Each service needs its base daemon package (e.g. `seatd`) plus the
+/// init-specific service package (e.g. `seatd-s6`).
+fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String> {
+    let mut packages = Vec::new();
+    for service in services {
+        let base = service_base_package(service);
+        packages.push(base.to_string());
+        let init_pkg = format!("{}-{}", base, init);
+        packages.push(init_pkg);
+    }
+    packages
+}
+
+/// Install the packages required by the services that will be enabled.
+///
+/// Uses `pacman -S --needed` so already-installed packages are skipped.
+fn install_service_packages(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+    services: &[String],
+) -> Result<()> {
+    let packages = build_service_packages(services, &config.system.init);
+    if packages.is_empty() {
+        return Ok(());
+    }
+
+    let pkg_list = packages.join(" ");
+    info!("Installing service packages: {}", pkg_list);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would install service packages: {}", pkg_list);
+        return Ok(());
+    }
+
+    let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
+    cmd.run_in_chroot(install_root, &install_cmd)
+        .map(|_| ())
+        .map_err(|e| {
+            warn!("Failed to install service packages: {}", e);
+            e
+        })?;
+
+    Ok(())
 }
 
 /// Enable a service for the configured init system
