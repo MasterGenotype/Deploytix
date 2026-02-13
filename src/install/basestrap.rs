@@ -116,8 +116,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             "pipewire-alsa".to_string(),
         ]);
         if config.system.init == crate::config::InitSystem::S6 {
-            // Official s6 service exists for seatd; greetd-s6 does NOT exist yet, keep plain greetd
+            // Official s6 services for desktop environment
             packages.push("seatd-s6".to_string());
+            // Note: greetd-s6 does NOT exist yet, keep plain greetd
+            // alsa-utils-s6 for audio service management
+            packages.push("alsa-utils-s6".to_string());
         } else {
             let seatd_service = format!("seatd-{}", config.system.init);
             let greetd_service = format!("greetd-{}", config.system.init);
