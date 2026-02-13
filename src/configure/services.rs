@@ -7,7 +7,11 @@ use std::fs;
 use std::path::Path;
 use tracing::{info, warn};
 
-/// Enable necessary services based on configuration
+/// Enable necessary services based on configuration.
+///
+/// This installs the init-specific service packages (e.g. `seatd-s6`,
+/// `iwd-runit`) first so that the service directories exist when we try
+/// to enable them.
 pub fn enable_services(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -16,9 +20,50 @@ pub fn enable_services(
     let services = build_service_list(config);
     info!("Enabling {} services for {} init system: [{}]", services.len(), config.system.init, services.join(", "));
 
+    // Install the init-specific service packages before enabling
+    install_service_packages(cmd, &config.system.init, &services, install_root)?;
+
     for service in services {
         enable_service(cmd, &config.system.init, &service, install_root)?;
     }
+
+    Ok(())
+}
+
+/// Map a service name to its init-specific package name.
+///
+/// Artix packages follow the convention `<name>-<init>`, where `<name>` is
+/// always lowercase regardless of the service directory casing.
+fn service_package_name(service: &str, init: &InitSystem) -> String {
+    let base = service.to_lowercase(); // e.g. "NetworkManager" → "networkmanager"
+    format!("{}-{}", base, init)
+}
+
+/// Install the init-specific service packages so that the service
+/// directories are present before we try to enable them.
+fn install_service_packages(
+    cmd: &CommandRunner,
+    init: &InitSystem,
+    services: &[String],
+    install_root: &str,
+) -> Result<()> {
+    let packages: Vec<String> = services
+        .iter()
+        .map(|s| service_package_name(s, init))
+        .collect();
+
+    info!("Installing service packages: [{}]", packages.join(", "));
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would install service packages: {}", packages.join(" "));
+        return Ok(());
+    }
+
+    let pkg_args = packages.join(" ");
+    cmd.run_in_chroot(
+        install_root,
+        &format!("pacman -S --noconfirm --needed {}", pkg_args),
+    )?;
 
     Ok(())
 }
