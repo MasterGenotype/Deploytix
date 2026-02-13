@@ -180,15 +180,24 @@ fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str)
     Ok(())
 }
 
+/// Map service names to their s6 service directory names.
+///
+/// Artix s6 packages use a `-srv` suffix for service directories.
+/// For example, NetworkManager's s6 service directory is 'NetworkManager-srv'.
+fn map_s6_service_name(service: &str) -> String {
+    format!("{}-srv", service)
+}
+
 /// Enable an s6 service
 ///
 /// Service directories are provided by official `-s6` packages from the Artix
 /// repositories (e.g. `seatd-s6`, `iwd-s6`).  If the directory is missing the
 /// corresponding package was not installed and we skip with a warning.
 fn enable_s6_service(service: &str, install_root: &str) -> Result<()> {
-    let service_dir = format!("{}/etc/s6/sv/{}", install_root, service);
+    let s6_service_name = map_s6_service_name(service);
+    let service_dir = format!("{}/etc/s6/sv/{}", install_root, &s6_service_name);
     let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
-    let link_path = format!("{}/{}", enabled_dir, service);
+    let link_path = format!("{}/{}", enabled_dir, &s6_service_name);
 
     // Service directories come from official *-s6 packages; skip if missing
     if !Path::new(&service_dir).exists() {
