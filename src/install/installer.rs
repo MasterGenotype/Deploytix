@@ -26,6 +26,10 @@ use tracing::info;
 /// Installation target path
 pub const INSTALL_ROOT: &str = "/install";
 
+/// Progress callback type for reporting installation progress.
+/// Takes a value between 0.0 and 1.0, and a status message describing the current phase.
+pub type ProgressCallback = Box<dyn Fn(f32, &str) + Send>;
+
 /// Main installer struct
 pub struct Installer {
     config: DeploymentConfig,
@@ -39,6 +43,8 @@ pub struct Installer {
     keyfiles: Vec<VolumeKeyfile>,
     /// Skip interactive confirmation prompt (e.g. when GUI already confirmed)
     skip_confirm: bool,
+    /// Optional progress callback for GUI integration
+    progress_cb: Option<ProgressCallback>,
 }
 
 impl Installer {
@@ -51,6 +57,7 @@ impl Installer {
             luks_boot_container: None,
             keyfiles: Vec::new(),
             skip_confirm: false,
+            progress_cb: None,
         }
     }
 
@@ -61,6 +68,20 @@ impl Installer {
         self
     }
 
+    /// Set a progress callback for reporting installation progress.
+    /// The callback receives a progress value (0.0–1.0) and a status message.
+    pub fn with_progress_callback(mut self, cb: ProgressCallback) -> Self {
+        self.progress_cb = Some(cb);
+        self
+    }
+
+    /// Report progress via the callback, if one is set.
+    fn report_progress(&self, progress: f32, status: &str) {
+        if let Some(ref cb) = self.progress_cb {
+            cb(progress, status);
+        }
+    }
+
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
         info!(
@@ -69,26 +90,35 @@ impl Installer {
         );
 
         // Phase 1: Preparation
+        self.report_progress(0.0, "Preparing installation...");
         self.prepare()?;
 
         // Phase 2: Disk operations
+        self.report_progress(0.10, "Partitioning disk...");
         self.partition_disk()?;
 
         // Phase 2.5: LUKS setup (for CryptoSubvolume layout)
         // Multi-volume encryption: separate LUKS containers for root, usr, var, home
         if self.config.disk.layout == PartitionLayout::CryptoSubvolume {
+            self.report_progress(0.15, "Setting up encryption...");
             self.setup_multi_volume_encryption()?;
+            self.report_progress(0.22, "Formatting encrypted partitions...");
             self.format_multi_volume_partitions()?;
+            self.report_progress(0.28, "Mounting encrypted partitions...");
             self.mount_multi_volume_partitions()?;
         } else {
+            self.report_progress(0.20, "Formatting partitions...");
             self.format_partitions()?;
+            self.report_progress(0.28, "Mounting partitions...");
             self.mount_partitions()?;
         }
 
         // Phase 3: Base system
+        self.report_progress(0.30, "Installing base system (this may take a while)...");
         self.install_base_system()?;
 
         // Phase 3.5: Generate fstab (different method for encrypted)
+        self.report_progress(0.55, "Generating fstab...");
         if self.config.disk.layout == PartitionLayout::CryptoSubvolume {
             self.generate_fstab_multi_volume()?;
         } else {
@@ -97,24 +127,30 @@ impl Installer {
 
         // Phase 3.6: Crypttab and keyfiles (for multi-volume encrypted systems)
         if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::CryptoSubvolume {
+            self.report_progress(0.60, "Setting up keyfiles and crypttab...");
             self.setup_keyfiles()?;
             self.generate_crypttab_multi_volume()?;
         }
 
         // Phase 4: System configuration
+        self.report_progress(0.65, "Configuring system...");
         self.configure_system()?;
 
         // Phase 4.5: Custom hooks (for encrypted systems)
         if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::CryptoSubvolume {
+            self.report_progress(0.75, "Installing custom hooks...");
             self.install_custom_hooks()?;
         }
 
         // Phase 5: Desktop environment (if selected)
+        self.report_progress(0.80, "Installing desktop environment...");
         self.install_desktop()?;
 
         // Phase 6: Finalization
+        self.report_progress(0.90, "Finalizing installation...");
         self.finalize()?;
 
+        self.report_progress(1.0, "Installation complete");
         info!("Installation to {} finished successfully", self.config.disk.device);
         println!("\n✓ Installation completed successfully!");
         println!("  You can now reboot into your new Artix Linux system.");
