@@ -44,13 +44,6 @@ pub fn install(
     // Add s6-specific service packages
     if config.system.init == InitSystem::S6 {
         packages.extend(KDE_S6_PACKAGES);
-    } else {
-        // Add init-specific service packages for other init systems
-        let bluez_service = format!("bluez-{}", config.system.init);
-        let power_service = format!("power-profiles-daemon-{}", config.system.init);
-        // These will be added as owned strings below
-        packages.push("bluez");
-        packages.push("power-profiles-daemon");
     }
 
     if cmd.is_dry_run() {

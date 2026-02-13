@@ -117,6 +117,11 @@ pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
         files.push("/etc/cryptsetup-keys.d/cryptusr.key".to_string());
         files.push("/etc/cryptsetup-keys.d/cryptvar.key".to_string());
         files.push("/etc/cryptsetup-keys.d/crypthome.key".to_string());
+
+        // Include boot keyfile when boot encryption is enabled
+        if config.disk.boot_encryption {
+            files.push("/etc/cryptsetup-keys.d/cryptboot.key".to_string());
+        }
     }
 
     files

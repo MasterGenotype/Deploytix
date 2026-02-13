@@ -215,15 +215,6 @@ run_hook() {
         formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
         local full_mapper_name="Crypt-$formatted_mapping"
 
-        # Skip Boot partition - it's unlocked by GRUB, not by this hook
-        case "$formatted_mapping" in
-            Boot|boot|BOOT)
-                echo "[crypttab-unlock] Skipping Boot partition (unlocked by GRUB)"
-                skip_count=$((skip_count + 1))
-                continue
-                ;;
-        esac
-
         # Skip EFI partition entries (should never be encrypted, but guard against misconfiguration)
         case "$formatted_mapping" in
             Efi|efi|EFI)

@@ -480,15 +480,21 @@ impl Installer {
                 "Encryption password required for keyfile setup".to_string()
             ))?;
 
+        // Collect all containers that need keyfiles (data volumes + optional boot)
+        let mut all_containers: Vec<LuksContainer> = self.luks_containers.clone();
+        if let Some(ref boot_container) = self.luks_boot_container {
+            all_containers.push(boot_container.clone());
+        }
+
         let keyfiles = setup_keyfiles_for_volumes(
             &self.cmd,
-            &self.luks_containers,
+            &all_containers,
             password,
             INSTALL_ROOT,
         )?;
 
         self.keyfiles = keyfiles;
-        info!("Keyfiles created for {} volumes", self.luks_containers.len());
+        info!("Keyfiles created for {} volumes", all_containers.len());
         Ok(())
     }
 
@@ -514,6 +520,7 @@ impl Installer {
         generate_crypttab_multi_volume(
             &self.cmd,
             &self.luks_containers,
+            self.luks_boot_container.as_ref(),
             &self.keyfiles,
             INSTALL_ROOT,
         )
