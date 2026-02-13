@@ -21,6 +21,10 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         // D-Bus provider for s6; no elogind, use seatd for seats
         packages.push("dbus-s6".to_string());
         // no elogind-s6
+        // Core s6 service packages
+        packages.push("networkmanager-s6".to_string());
+        packages.push("seatd-s6".to_string());
+        packages.push("iwd-s6".to_string());
     }
 
     // Kernel and firmware
@@ -65,11 +69,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            if config.system.init == crate::config::InitSystem::S6 {
-                // Official s6 service exists
-                packages.push("iwd-s6".to_string());
-                // dbus-s6 already included above for s6 base stack
-            } else {
+            if config.system.init != crate::config::InitSystem::S6 {
                 let service_pkg = format!("iwd-{}", config.system.init);
                 packages.push(service_pkg);
             }
@@ -81,11 +81,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
-            if config.system.init == crate::config::InitSystem::S6 {
-                // Official s6 services exist for NM and iwd
-                packages.push("networkmanager-s6".to_string());
-                packages.push("iwd-s6".to_string());
-            } else {
+            if config.system.init != crate::config::InitSystem::S6 {
                 let nm_service_pkg = format!("networkmanager-{}", config.system.init);
                 let iwd_service_pkg = format!("iwd-{}", config.system.init);
                 packages.push(nm_service_pkg);
@@ -105,7 +101,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             "xorg-server".to_string(),
             "xorg-xinit".to_string(),
             "seatd".to_string(),
-            "greetd".to_string(),
             // Audio - ALSA base
             "alsa-utils".to_string(),
             "alsa-tools".to_string(),
@@ -117,8 +112,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         ]);
         if config.system.init == crate::config::InitSystem::S6 {
             // Official s6 service packages from Artix repos
-            packages.push("seatd-s6".to_string());
-            packages.push("greetd-s6".to_string());
             packages.push("alsa-utils-s6".to_string());
         } else {
             let seatd_service = format!("seatd-{}", config.system.init);
