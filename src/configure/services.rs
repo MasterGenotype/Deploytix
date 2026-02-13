@@ -44,9 +44,11 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // Display manager - use greetd for all desktop environments
-    // greetd is configured separately via configure::greetd
-    if config.desktop.environment != DesktopEnvironment::None {
+    // Display manager - greetd is enabled for non-s6 init systems.
+    // Artix does not provide a greetd-s6 package/service.
+    if config.desktop.environment != DesktopEnvironment::None
+        && config.system.init != InitSystem::S6
+    {
         services.push("greetd".to_string());
     }
 
@@ -71,6 +73,9 @@ fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String>
     for service in services {
         let base = service_base_package(service);
         packages.push(base.to_string());
+        if *init == InitSystem::S6 && base == "greetd" {
+            continue;
+        }
         let init_pkg = format!("{}-{}", base, init);
         packages.push(init_pkg);
     }
