@@ -275,8 +275,19 @@ impl DeploytixGui {
             let _ = tx.send(InstallMessage::Status("Running installer...".to_string()));
             let _ = tx.send(InstallMessage::Progress(0.15));
 
-            // Run installer
-            let installer = Installer::new(config, dry_run).with_skip_confirm(true);
+            // Run installer with progress callback that maps installer progress
+            // (0.0–1.0) into the GUI range (0.15–1.0)
+            let progress_tx = tx.clone();
+            let progress_cb: crate::install::ProgressCallback = Box::new(move |progress, status| {
+                // Map installer's 0.0–1.0 range into the GUI's 0.15–0.95 range
+                let gui_progress = 0.15 + progress * 0.80;
+                let _ = progress_tx.send(InstallMessage::Progress(gui_progress));
+                let _ = progress_tx.send(InstallMessage::Status(status.to_string()));
+            });
+
+            let installer = Installer::new(config, dry_run)
+                .with_skip_confirm(true)
+                .with_progress_callback(progress_cb);
             match installer.run() {
                 Ok(()) => {
                     let _ = tx.send(InstallMessage::Progress(1.0));
