@@ -456,15 +456,24 @@ run_hook() {{
     mkdir -p "$new_root/boot/efi"
 
     efi_partition=""
-    for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
-        if blkid "$dev" | grep -qi 'PARTLABEL="EFI"'; then
-            efi_partition="$dev"
-            break
-        fi
-    done
 
+    # Primary: use udev-provided partlabel symlink (most reliable in initramfs)
+    if [ -b "/dev/disk/by-partlabel/EFI" ]; then
+        efi_partition="/dev/disk/by-partlabel/EFI"
+    fi
+
+    # Fallback: blkid search by PARTLABEL
     if [ -z "$efi_partition" ]; then
-        # Fallback: first vfat partition
+        for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+            if blkid "$dev" | grep -qi 'PARTLABEL="EFI"'; then
+                efi_partition="$dev"
+                break
+            fi
+        done
+    fi
+
+    # Last resort: first vfat partition
+    if [ -z "$efi_partition" ]; then
         efi_partition=$(blkid -t TYPE=vfat -o device 2>/dev/null | head -n1)
     fi
 
@@ -485,7 +494,8 @@ run_hook() {{
 
     let install_content = r#"#!/bin/bash
 build() {
-    # No extra binaries are needed - crypttab-unlock handles device setup
+    # blkid is needed for EFI partition detection fallback
+    add_binary 'blkid'
     add_runscript
 }
 
