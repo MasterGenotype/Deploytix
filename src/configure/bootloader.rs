@@ -198,7 +198,11 @@ fn configure_grub_defaults(
         // Encrypted system
         cmdline_parts.push(format!("cryptdevice=UUID={}:{}", root_or_luks_uuid, mapper));
         cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
-        cmdline_parts.push("rootflags=subvol=@".to_string());
+        // Only add subvol=@ for layouts that use btrfs subvolumes.
+        // CryptoSubvolume uses separate LUKS partitions with plain btrfs (no subvolumes).
+        if config.disk.layout != PartitionLayout::CryptoSubvolume {
+            cmdline_parts.push("rootflags=subvol=@".to_string());
+        }
         cmdline_parts.push("rw".to_string());
     } else {
         // Non-encrypted system

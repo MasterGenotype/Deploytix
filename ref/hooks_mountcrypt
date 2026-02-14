@@ -34,23 +34,22 @@ run_hook() {
 
     mkdir -p "$new_root"
 
-    # Mount primary root subvolume (@)
-    mount -o rw,subvol=@ "$cryptroot" "$new_root" || {
-        echo "Error mounting subvolume '@'" >&2
+    # Mount root (separate LUKS partition, plain btrfs - no subvolumes)
+    mount -o rw "$cryptroot" "$new_root" || {
+        echo "Error mounting root filesystem" >&2
         return 1
     }
 
-    # Mount additional subvolumes
+    # Mount additional encrypted volumes (each is a separate LUKS partition)
     for mp in usr var home boot; do
         target="$new_root/$mp"
-        subvol="@${mp}"
         mapped_device="/dev/mapper/Crypt-$(echo "$mp" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
 
         mkdir -p "$target"
 
         if [ -b "$mapped_device" ]; then
-            mount -o rw,subvol=${subvol} "$mapped_device" "$target" || {
-                echo "Warning: Could not mount $mapped_device (subvolume $subvol) on $target" >&2
+            mount -o rw "$mapped_device" "$target" || {
+                echo "Warning: Could not mount $mapped_device on $target" >&2
             }
         else
             echo "Warning: Mapped device $mapped_device not found, skipping $target" >&2
