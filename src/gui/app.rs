@@ -91,6 +91,10 @@ pub struct DeploytixGui {
     // Swap configuration
     swap_type: SwapType,
     zram_percent: u8,
+    // LVM thin provisioning
+    lvm_vg_name: String,
+    lvm_thin_pool_name: String,
+    lvm_thin_pool_percent: u8,
 
     // System config
     init_system: InitSystem,
@@ -141,6 +145,9 @@ impl Default for DeploytixGui {
             boot_encryption: false,
             swap_type: SwapType::Partition,
             zram_percent: 50,
+            lvm_vg_name: "vg0".to_string(),
+            lvm_thin_pool_name: "thinpool".to_string(),
+            lvm_thin_pool_percent: 95,
 
             init_system: InitSystem::Runit,
             bootloader: Bootloader::Grub,
@@ -216,11 +223,11 @@ impl DeploytixGui {
                 keyfile_path: None,
                 keyfile_enabled: self.encryption,
                 use_subvolumes: self.partition_layout == PartitionLayout::Minimal,
-                // LVM thin provisioning defaults
+                // LVM thin provisioning
                 use_lvm_thin: self.partition_layout == PartitionLayout::LvmThin,
-                lvm_vg_name: "vg0".to_string(),
-                lvm_thin_pool_name: "thinpool".to_string(),
-                lvm_thin_pool_percent: 95,
+                lvm_vg_name: self.lvm_vg_name.clone(),
+                lvm_thin_pool_name: self.lvm_thin_pool_name.clone(),
+                lvm_thin_pool_percent: self.lvm_thin_pool_percent,
                 // Swap configuration
                 swap_type: self.swap_type.clone(),
                 swap_file_size_mib: 0, // Auto-calculate
@@ -481,6 +488,9 @@ impl eframe::App for DeploytixGui {
                     &mut self.boot_encryption,
                     &mut self.swap_type,
                     &mut self.zram_percent,
+                    &mut self.lvm_vg_name,
+                    &mut self.lvm_thin_pool_name,
+                    &mut self.lvm_thin_pool_percent,
                 ),
                 WizardStep::SystemConfig => panels::system_config_panel(
                     ui,
