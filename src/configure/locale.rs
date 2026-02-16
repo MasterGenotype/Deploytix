@@ -62,7 +62,10 @@ fn set_locale(cmd: &CommandRunner, locale: &str, install_root: &str) -> Result<(
     let locale_conf_path = format!("{}/etc/locale.conf", install_root);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would configure locale {} in {}", locale, install_root);
+        println!(
+            "  [dry-run] Would configure locale {} in {}",
+            locale, install_root
+        );
         return Ok(());
     }
 
@@ -95,7 +98,10 @@ fn set_keymap(cmd: &CommandRunner, keymap: &str, install_root: &str) -> Result<(
     let vconsole_path = format!("{}/etc/vconsole.conf", install_root);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would set keymap {} in {}", keymap, vconsole_path);
+        println!(
+            "  [dry-run] Would set keymap {} in {}",
+            keymap, vconsole_path
+        );
         return Ok(());
     }
 

@@ -70,14 +70,13 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
 /// Format BOOT as BTRFS
 pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
     info!("Formatting {} as BTRFS (BOOT)", partition);
-    
-    cmd.run("mkfs.btrfs", & ["-f", "-L", "BOOT", partition])
+
+    cmd.run("mkfs.btrfs", &["-f", "-L", "BOOT", partition])
         .map(|_| ())
         .map_err(|e| {
             DeploytixError::FilesystemError(format!("Failed to format BOOT Partition: {}", e))
         })
 }
-
 
 /// Format a swap partition
 pub fn format_swap(cmd: &CommandRunner, partition: &str, label: Option<&str>) -> Result<()> {
@@ -101,7 +100,12 @@ pub fn format_all_partitions(
     layout: &ComputedLayout,
     filesystem: &Filesystem,
 ) -> Result<()> {
-    info!("Formatting {} partitions on {} (default fs: {})", layout.partitions.len(), device, filesystem);
+    info!(
+        "Formatting {} partitions on {} (default fs: {})",
+        layout.partitions.len(),
+        device,
+        filesystem
+    );
 
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
@@ -112,7 +116,10 @@ pub fn format_all_partitions(
             format_swap(cmd, &part_path, Some(&part.name))?;
         } else if part.is_luks {
             // LUKS partitions are handled separately by encryption module
-            info!("Skipping {} (LUKS partition, formatted by encryption module)", part_path);
+            info!(
+                "Skipping {} (LUKS partition, formatted by encryption module)",
+                part_path
+            );
         } else if part.is_bios_boot {
             format_boot(cmd, &part_path)?;
         } else {
@@ -160,12 +167,11 @@ pub fn get_all_uuids(
 }
 
 /// Create btrfs filesystem on a device (typically a LUKS-mapped device)
-pub fn create_btrfs_filesystem(
-    cmd: &CommandRunner,
-    device: &str,
-    label: &str,
-) -> Result<()> {
-    info!("Creating btrfs filesystem on {} with label {}", device, label);
+pub fn create_btrfs_filesystem(cmd: &CommandRunner, device: &str, label: &str) -> Result<()> {
+    info!(
+        "Creating btrfs filesystem on {} with label {}",
+        device, label
+    );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mkfs.btrfs -f -L {} {}", label, device);
@@ -191,12 +197,20 @@ pub fn create_btrfs_subvolumes(
     subvolumes: &[SubvolumeDef],
     fs_mount: &str,
 ) -> Result<()> {
-    info!("Creating {} btrfs subvolumes on {} (mounted at {})", subvolumes.len(), device, fs_mount);
+    info!(
+        "Creating {} btrfs subvolumes on {} (mounted at {})",
+        subvolumes.len(),
+        device,
+        fs_mount
+    );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mount {} {}", device, fs_mount);
         for sv in subvolumes {
-            println!("  [dry-run] btrfs subvolume create {}/{}", fs_mount, sv.name);
+            println!(
+                "  [dry-run] btrfs subvolume create {}/{}",
+                fs_mount, sv.name
+            );
         }
         println!("  [dry-run] umount {}", fs_mount);
         return Ok(());
@@ -213,7 +227,10 @@ pub fn create_btrfs_subvolumes(
         let subvol_path = format!("{}/{}", fs_mount, sv.name);
         cmd.run("btrfs", &["subvolume", "create", &subvol_path])
             .map_err(|e| {
-                DeploytixError::FilesystemError(format!("Failed to create subvolume {}: {}", sv.name, e))
+                DeploytixError::FilesystemError(format!(
+                    "Failed to create subvolume {}: {}",
+                    sv.name, e
+                ))
             })?;
         info!("Created subvolume: {}", sv.name);
     }
@@ -247,7 +264,9 @@ pub fn mount_btrfs_subvolumes(
     // Sort subvolumes by mount point depth (root first)
     let mut sorted_subvolumes = subvolumes.to_vec();
     sorted_subvolumes.sort_by(|a, b| {
-        a.mount_point.matches('/').count()
+        a.mount_point
+            .matches('/')
+            .count()
             .cmp(&b.mount_point.matches('/').count())
     });
 

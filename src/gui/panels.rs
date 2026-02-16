@@ -2,6 +2,7 @@
 
 use crate::config::{
     Bootloader, DesktopEnvironment, Filesystem, InitSystem, NetworkBackend, PartitionLayout,
+    SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
 use egui::{RichText, Ui};
@@ -18,7 +19,10 @@ pub fn disk_selection_panel(
     ui.heading("Select Target Disk");
     ui.add_space(8.0);
     ui.label("Choose the disk where Artix Linux will be installed.");
-    ui.label(RichText::new("⚠ All data on the selected disk will be erased!").color(egui::Color32::YELLOW));
+    ui.label(
+        RichText::new("⚠ All data on the selected disk will be erased!")
+            .color(egui::Color32::YELLOW),
+    );
     ui.add_space(16.0);
 
     if ui.button("🔄 Refresh Disks").clicked() {
@@ -30,24 +34,28 @@ pub fn disk_selection_panel(
     ui.add_space(8.0);
 
     if devices.is_empty() {
-        ui.label("No suitable disks found. Make sure you have connected a disk and it's not mounted.");
+        ui.label(
+            "No suitable disks found. Make sure you have connected a disk and it's not mounted.",
+        );
     } else {
-        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-            for (i, dev) in devices.iter().enumerate() {
-                let is_selected = *selected_index == Some(i);
-                let text = format!(
-                    "{} - {} {} ({})",
-                    dev.path,
-                    dev.size_human(),
-                    dev.model.as_deref().unwrap_or("Unknown"),
-                    dev.device_type
-                );
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for (i, dev) in devices.iter().enumerate() {
+                    let is_selected = *selected_index == Some(i);
+                    let text = format!(
+                        "{} - {} {} ({})",
+                        dev.path,
+                        dev.size_human(),
+                        dev.model.as_deref().unwrap_or("Unknown"),
+                        dev.device_type
+                    );
 
-                if ui.selectable_label(is_selected, &text).clicked() {
-                    *selected_index = Some(i);
+                    if ui.selectable_label(is_selected, &text).clicked() {
+                        *selected_index = Some(i);
+                    }
                 }
-            }
-        });
+            });
 
         if selected_index.is_some() {
             can_proceed = true;
@@ -58,6 +66,7 @@ pub fn disk_selection_panel(
 }
 
 /// Disk configuration panel
+#[allow(clippy::too_many_arguments)]
 pub fn disk_config_panel(
     ui: &mut Ui,
     layout: &mut PartitionLayout,
@@ -65,6 +74,8 @@ pub fn disk_config_panel(
     encryption: &mut bool,
     encryption_password: &mut String,
     boot_encryption: &mut bool,
+    swap_type: &mut SwapType,
+    zram_percent: &mut u8,
 ) -> bool {
     ui.heading("Disk Configuration");
     ui.add_space(8.0);
@@ -74,8 +85,16 @@ pub fn disk_config_panel(
     egui::ComboBox::from_id_salt("layout")
         .selected_text(format!("{}", layout))
         .show_ui(ui, |ui| {
-            ui.selectable_value(layout, PartitionLayout::Standard, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)");
-            ui.selectable_value(layout, PartitionLayout::Minimal, "Minimal (EFI, Boot, Swap, Root with subvolumes)");
+            ui.selectable_value(
+                layout,
+                PartitionLayout::Standard,
+                "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)",
+            );
+            ui.selectable_value(
+                layout,
+                PartitionLayout::Minimal,
+                "Minimal (EFI, Boot, Swap, Root with subvolumes)",
+            );
         });
     ui.add_space(8.0);
 
@@ -90,6 +109,26 @@ pub fn disk_config_panel(
             ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
         });
     ui.add_space(8.0);
+
+    // Swap Configuration
+    ui.label("Swap Type:");
+    egui::ComboBox::from_id_salt("swap_type")
+        .selected_text(format!("{}", swap_type))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(swap_type, SwapType::Partition, "Swap Partition");
+            ui.selectable_value(swap_type, SwapType::FileZram, "Swap File + ZRAM");
+            ui.selectable_value(swap_type, SwapType::ZramOnly, "ZRAM Only");
+        });
+    ui.add_space(8.0);
+
+    // ZRAM percentage (shown for ZRAM options)
+    if *swap_type == SwapType::FileZram || *swap_type == SwapType::ZramOnly {
+        ui.horizontal(|ui| {
+            ui.label("ZRAM Size (% of RAM):");
+            ui.add(egui::Slider::new(zram_percent, 10..=100).suffix("%"));
+        });
+        ui.add_space(8.0);
+    }
 
     // Encryption (only for Standard layout)
     if *layout == PartitionLayout::Standard {
@@ -121,6 +160,7 @@ pub fn disk_config_panel(
 }
 
 /// System configuration panel
+#[allow(clippy::too_many_arguments)]
 pub fn system_config_panel(
     ui: &mut Ui,
     init: &mut InitSystem,
@@ -129,6 +169,8 @@ pub fn system_config_panel(
     locale: &mut String,
     keymap: &mut String,
     hostname: &mut String,
+    secureboot: &mut bool,
+    secureboot_method: &mut SecureBootMethod,
 ) -> bool {
     ui.heading("System Configuration");
     ui.add_space(8.0);
@@ -153,6 +195,36 @@ pub fn system_config_panel(
             ui.selectable_value(bootloader, Bootloader::Grub, "GRUB");
             ui.selectable_value(bootloader, Bootloader::SystemdBoot, "systemd-boot");
         });
+    ui.add_space(8.0);
+
+    // SecureBoot
+    ui.checkbox(secureboot, "Enable SecureBoot signing");
+    if *secureboot {
+        ui.add_space(4.0);
+        ui.label("SecureBoot Method:");
+        egui::ComboBox::from_id_salt("secureboot_method")
+            .selected_text(format!("{}", secureboot_method))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    secureboot_method,
+                    SecureBootMethod::Sbctl,
+                    "sbctl (automatic key management)",
+                );
+                ui.selectable_value(
+                    secureboot_method,
+                    SecureBootMethod::Shim,
+                    "Shim (MOK enrollment)",
+                );
+                ui.selectable_value(
+                    secureboot_method,
+                    SecureBootMethod::ManualKeys,
+                    "Manual Keys (provide your own)",
+                );
+            });
+    }
+    ui.add_space(8.0);
+
+    ui.separator();
     ui.add_space(8.0);
 
     // Locale settings
@@ -257,7 +329,11 @@ pub fn network_desktop_panel(
         .selected_text(format!("{}", network_backend))
         .show_ui(ui, |ui| {
             ui.selectable_value(network_backend, NetworkBackend::Iwd, "iwd (standalone)");
-            ui.selectable_value(network_backend, NetworkBackend::NetworkManager, "NetworkManager + iwd");
+            ui.selectable_value(
+                network_backend,
+                NetworkBackend::NetworkManager,
+                "NetworkManager + iwd",
+            );
         });
     ui.add_space(16.0);
 
@@ -266,7 +342,11 @@ pub fn network_desktop_panel(
     egui::ComboBox::from_id_salt("desktop")
         .selected_text(format!("{}", desktop_env))
         .show_ui(ui, |ui| {
-            ui.selectable_value(desktop_env, DesktopEnvironment::None, "None (headless/server)");
+            ui.selectable_value(
+                desktop_env,
+                DesktopEnvironment::None,
+                "None (headless/server)",
+            );
             ui.selectable_value(desktop_env, DesktopEnvironment::Kde, "KDE Plasma");
             ui.selectable_value(desktop_env, DesktopEnvironment::Gnome, "GNOME");
             ui.selectable_value(desktop_env, DesktopEnvironment::Xfce, "XFCE");
@@ -277,14 +357,17 @@ pub fn network_desktop_panel(
 }
 
 /// Summary and install panel
+#[allow(clippy::too_many_arguments)]
 pub fn summary_panel(
     ui: &mut Ui,
     device_path: &str,
     layout: &PartitionLayout,
     filesystem: &Filesystem,
     encryption: bool,
+    swap_type: &SwapType,
     init: &InitSystem,
     bootloader: &Bootloader,
+    secureboot: bool,
     hostname: &str,
     username: &str,
     network_backend: &NetworkBackend,
@@ -315,12 +398,20 @@ pub fn summary_panel(
             ui.label(if encryption { "Enabled" } else { "Disabled" });
             ui.end_row();
 
+            ui.label("Swap:");
+            ui.label(format!("{}", swap_type));
+            ui.end_row();
+
             ui.label("Init System:");
             ui.label(format!("{}", init));
             ui.end_row();
 
             ui.label("Bootloader:");
             ui.label(format!("{}", bootloader));
+            ui.end_row();
+
+            ui.label("SecureBoot:");
+            ui.label(if secureboot { "Enabled" } else { "Disabled" });
             ui.end_row();
 
             ui.label("Hostname:");
@@ -347,7 +438,11 @@ pub fn summary_panel(
     ui.checkbox(dry_run, "Dry run mode (preview only, no changes)");
     ui.add_space(8.0);
 
-    ui.label(RichText::new("⚠ WARNING: This will ERASE ALL DATA on the selected disk!").color(egui::Color32::RED).strong());
+    ui.label(
+        RichText::new("⚠ WARNING: This will ERASE ALL DATA on the selected disk!")
+            .color(egui::Color32::RED)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.checkbox(confirmed, "I understand and want to proceed");
     ui.add_space(8.0);
@@ -364,14 +459,22 @@ pub fn progress_panel(
     finished: bool,
     error: Option<&str>,
 ) {
-    ui.heading(if finished { "Installation Complete" } else { "Installing..." });
+    ui.heading(if finished {
+        "Installation Complete"
+    } else {
+        "Installing..."
+    });
     ui.add_space(8.0);
 
     if let Some(err) = error {
         ui.label(RichText::new(format!("❌ Error: {}", err)).color(egui::Color32::RED));
         ui.add_space(8.0);
     } else if finished {
-        ui.label(RichText::new("✓ Installation completed successfully!").color(egui::Color32::GREEN).strong());
+        ui.label(
+            RichText::new("✓ Installation completed successfully!")
+                .color(egui::Color32::GREEN)
+                .strong(),
+        );
         ui.add_space(4.0);
         ui.label("You can now reboot into your new Artix Linux system.");
         ui.add_space(8.0);

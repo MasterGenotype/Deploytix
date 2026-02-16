@@ -183,7 +183,12 @@ pub fn create_all_thin_volumes(
     pool_name: &str,
     volumes: &[ThinVolumeDef],
 ) -> Result<()> {
-    info!("Creating {} thin volumes in {}/{}", volumes.len(), vg_name, pool_name);
+    info!(
+        "Creating {} thin volumes in {}/{}",
+        volumes.len(),
+        vg_name,
+        pool_name
+    );
 
     for vol in volumes {
         create_thin_lv(cmd, vg_name, pool_name, &vol.name, &vol.virtual_size)?;
@@ -268,15 +273,17 @@ pub fn scan_and_activate(cmd: &CommandRunner) -> Result<()> {
         return Ok(());
     }
 
-    cmd.run("vgscan", &[]).map_err(|e| DeploytixError::CommandFailed {
-        command: "vgscan".to_string(),
-        stderr: e.to_string(),
-    })?;
+    cmd.run("vgscan", &[])
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "vgscan".to_string(),
+            stderr: e.to_string(),
+        })?;
 
-    cmd.run("vgchange", &["-ay"]).map_err(|e| DeploytixError::CommandFailed {
-        command: "vgchange -ay".to_string(),
-        stderr: e.to_string(),
-    })?;
+    cmd.run("vgchange", &["-ay"])
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "vgchange -ay".to_string(),
+            stderr: e.to_string(),
+        })?;
 
     // Wait for device nodes
     let _ = cmd.run("udevadm", &["settle"]);
@@ -312,7 +319,7 @@ pub fn get_thin_pool_usage(vg_name: &str, pool_name: &str) -> Result<(f64, f64)>
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
 
     if parts.len() >= 2 {
         let data_percent = parts[0].parse::<f64>().unwrap_or(0.0);

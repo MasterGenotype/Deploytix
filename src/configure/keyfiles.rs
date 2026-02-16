@@ -25,7 +25,10 @@ pub fn generate_keyfile(cmd: &CommandRunner, path: &str) -> Result<()> {
     info!("Generating keyfile: {}", path);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] dd if=/dev/random of={} bs={} count=1 iflag=fullblock", path, KEYFILE_SIZE);
+        println!(
+            "  [dry-run] dd if=/dev/random of={} bs={} count=1 iflag=fullblock",
+            path, KEYFILE_SIZE
+        );
         println!("  [dry-run] chmod 000 {}", path);
         return Ok(());
     }
@@ -36,13 +39,16 @@ pub fn generate_keyfile(cmd: &CommandRunner, path: &str) -> Result<()> {
     }
 
     // Generate random data using /dev/random
-    cmd.run("dd", &[
-        "if=/dev/random",
-        &format!("of={}", path),
-        &format!("bs={}", KEYFILE_SIZE),
-        "count=1",
-        "iflag=fullblock",
-    ])?;
+    cmd.run(
+        "dd",
+        &[
+            "if=/dev/random",
+            &format!("of={}", path),
+            &format!("bs={}", KEYFILE_SIZE),
+            "count=1",
+            "iflag=fullblock",
+        ],
+    )?;
 
     // Set restrictive permissions (mode 000 - only root can read via capabilities)
     fs::set_permissions(path, fs::Permissions::from_mode(0o000))?;
@@ -106,7 +112,7 @@ pub struct VolumeKeyfile {
 }
 
 /// Setup keyfiles for all encrypted volumes
-/// 
+///
 /// This creates keyfiles in the installed system's /etc/cryptsetup-keys.d/
 /// and adds them to each LUKS container for automatic unlocking.
 pub fn setup_keyfiles_for_volumes(
@@ -115,7 +121,10 @@ pub fn setup_keyfiles_for_volumes(
     password: &str,
     install_root: &str,
 ) -> Result<Vec<VolumeKeyfile>> {
-    info!("Setting up keyfiles for {} encrypted volumes", containers.len());
+    info!(
+        "Setting up keyfiles for {} encrypted volumes",
+        containers.len()
+    );
 
     let mut keyfiles = Vec::new();
 
@@ -129,7 +138,8 @@ pub fn setup_keyfiles_for_volumes(
 
     for container in containers {
         // Extract volume name from mapper name (e.g., "Crypt-Root" -> "Root")
-        let volume_name = container.mapper_name
+        let volume_name = container
+            .mapper_name
             .trim_start_matches("Crypt-")
             .to_string();
 
@@ -166,13 +176,7 @@ mod tests {
 
     #[test]
     fn test_keyfile_path() {
-        assert_eq!(
-            keyfile_path("Root"),
-            "/etc/cryptsetup-keys.d/cryptroot.key"
-        );
-        assert_eq!(
-            keyfile_path("Usr"),
-            "/etc/cryptsetup-keys.d/cryptusr.key"
-        );
+        assert_eq!(keyfile_path("Root"), "/etc/cryptsetup-keys.d/cryptroot.key");
+        assert_eq!(keyfile_path("Usr"), "/etc/cryptsetup-keys.d/cryptusr.key");
     }
 }

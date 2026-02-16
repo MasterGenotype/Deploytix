@@ -20,7 +20,12 @@ pub fn mount_partitions(
         return mount_partitions_with_subvolumes(cmd, device, layout, install_root);
     }
 
-    info!("Mounting {} partitions from {} to {}", layout.partitions.len(), device, install_root);
+    info!(
+        "Mounting {} partitions from {} to {}",
+        layout.partitions.len(),
+        device,
+        install_root
+    );
 
     // Sort partitions by mount point depth (root first, then deeper paths)
     let mut mount_order: Vec<_> = layout
@@ -79,11 +84,15 @@ fn mount_partitions_with_subvolumes(
     info!("Setting up btrfs subvolumes on {} (root partition)", device);
 
     // Find the ROOT partition
-    let root_part = layout.partitions.iter()
+    let root_part = layout
+        .partitions
+        .iter()
         .find(|p| p.name == "ROOT")
-        .ok_or_else(|| crate::utils::error::DeploytixError::ConfigError(
-            "No ROOT partition found for subvolume layout".to_string()
-        ))?;
+        .ok_or_else(|| {
+            crate::utils::error::DeploytixError::ConfigError(
+                "No ROOT partition found for subvolume layout".to_string(),
+            )
+        })?;
 
     let root_path = partition_path(device, root_part.number);
 

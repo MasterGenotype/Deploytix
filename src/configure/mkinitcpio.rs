@@ -28,17 +28,12 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
 
     // Encryption modules
     if config.disk.encryption {
-        modules.extend([
-            "dm_crypt".to_string(),
-            "dm_mod".to_string(),
-        ]);
+        modules.extend(["dm_crypt".to_string(), "dm_mod".to_string()]);
     }
 
     // LVM thin provisioning modules
     if config.disk.layout == PartitionLayout::LvmThin {
-        modules.extend([
-            "dm_thin_pool".to_string(),
-        ]);
+        modules.extend(["dm_thin_pool".to_string()]);
     }
 
     modules
@@ -90,7 +85,10 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
 
         // Resume hook for hibernation (for swap partition or swap file)
         if config.system.hibernation {
-            let filesystems_idx = hooks.iter().position(|h| h == "filesystems").unwrap_or(hooks.len());
+            let filesystems_idx = hooks
+                .iter()
+                .position(|h| h == "filesystems")
+                .unwrap_or(hooks.len());
             hooks.insert(filesystems_idx, "resume".to_string());
         }
     } else {
@@ -111,7 +109,10 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         // Resume hook for hibernation
         if config.system.hibernation {
             // Insert resume before filesystems
-            let filesystems_idx = hooks.iter().position(|h| h == "filesystems").unwrap_or(hooks.len());
+            let filesystems_idx = hooks
+                .iter()
+                .position(|h| h == "filesystems")
+                .unwrap_or(hooks.len());
             hooks.insert(filesystems_idx, "resume".to_string());
         }
     }
@@ -210,7 +211,11 @@ pub fn configure_mkinitcpio(
 ) -> Result<()> {
     let mkinitcpio_conf = generate_mkinitcpio_conf(config);
     let hooks = construct_hooks(config);
-    info!("Configuring mkinitcpio with {} hooks: [{}]", hooks.len(), hooks.join(", "));
+    info!(
+        "Configuring mkinitcpio with {} hooks: [{}]",
+        hooks.len(),
+        hooks.join(", ")
+    );
     let conf_path = format!("{}/etc/mkinitcpio.conf", install_root);
 
     if cmd.is_dry_run() {
@@ -299,7 +304,10 @@ mod tests {
         let mount_pos = hooks.iter().position(|h| h == "mountcrypt").unwrap();
         // lvm2 must come before crypttab-unlock, which must come before mountcrypt
         assert!(lvm2_pos < unlock_pos, "lvm2 must precede crypttab-unlock");
-        assert!(unlock_pos < mount_pos, "crypttab-unlock must precede mountcrypt");
+        assert!(
+            unlock_pos < mount_pos,
+            "crypttab-unlock must precede mountcrypt"
+        );
     }
 
     #[test]
@@ -325,6 +333,9 @@ mod tests {
     fn minimal_unencrypted_no_files() {
         let cfg = config_with(PartitionLayout::Minimal, false);
         let files = construct_files(&cfg);
-        assert!(files.is_empty(), "Unencrypted Minimal layout should not embed crypttab/keyfiles");
+        assert!(
+            files.is_empty(),
+            "Unencrypted Minimal layout should not embed crypttab/keyfiles"
+        );
     }
 }

@@ -22,17 +22,10 @@ const KDE_PACKAGES: &[&str] = &[
 ];
 
 /// s6-specific service packages for KDE
-const KDE_S6_PACKAGES: &[&str] = &[
-    "bluez-s6",
-    "power-profiles-daemon-s6",
-];
+const KDE_S6_PACKAGES: &[&str] = &["bluez-s6", "power-profiles-daemon-s6"];
 
 /// Install KDE Plasma desktop environment
-pub fn install(
-    cmd: &CommandRunner,
-    config: &DeploymentConfig,
-    install_root: &str,
-) -> Result<()> {
+pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing KDE Plasma desktop environment");
 
     // Get init-specific sddm package
@@ -50,7 +43,10 @@ pub fn install(
         println!("  [dry-run] Would install KDE packages: {:?}", packages);
         println!("  [dry-run] Would install sddm service: {}", sddm_service);
         if config.system.init == InitSystem::S6 {
-            println!("  [dry-run] Would install s6 service packages: {:?}", KDE_S6_PACKAGES);
+            println!(
+                "  [dry-run] Would install s6 service packages: {:?}",
+                KDE_S6_PACKAGES
+            );
         }
         return Ok(());
     }
@@ -58,14 +54,14 @@ pub fn install(
     // Install packages via pacman in chroot
     let pkg_list = packages.join(" ");
     let mut install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, sddm_service);
-    
+
     // Add init-specific service packages for non-s6 init systems
     if config.system.init != InitSystem::S6 {
         let bluez_service = format!("bluez-{}", config.system.init);
         let power_service = format!("power-profiles-daemon-{}", config.system.init);
         install_cmd = format!("{} {} {}", install_cmd, bluez_service, power_service);
     }
-    
+
     cmd.run_in_chroot(install_root, &install_cmd)?;
 
     // Configure SDDM

@@ -57,18 +57,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     ]);
 
     // Build tools
-    packages.extend([
-        "gcc".to_string(),
-        "rustup".to_string(),
-    ]);
+    packages.extend(["gcc".to_string(), "rustup".to_string()]);
 
     // Network packages based on config
     match config.network.backend {
         NetworkBackend::Iwd => {
-            packages.extend([
-                "iwd".to_string(),
-                "openresolv".to_string(),
-            ]);
+            packages.extend(["iwd".to_string(), "openresolv".to_string()]);
             if config.system.init != crate::config::InitSystem::S6 {
                 let service_pkg = format!("iwd-{}", config.system.init);
                 packages.push(service_pkg);
@@ -157,7 +151,11 @@ pub fn run_basestrap(
 ) -> Result<()> {
     let packages = build_package_list(config);
 
-    info!("Installing {} packages with basestrap to {}", packages.len(), install_root);
+    info!(
+        "Installing {} packages with basestrap to {}",
+        packages.len(),
+        install_root
+    );
 
     // Build argument list
     let mut args = vec![install_root];

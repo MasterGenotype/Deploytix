@@ -16,10 +16,17 @@ pub fn create_user(
     let password = &config.user.password;
     let groups = &config.user.groups;
 
-    info!("Creating user '{}' with groups [{}]", username, groups.join(", "));
+    info!(
+        "Creating user '{}' with groups [{}]",
+        username,
+        groups.join(", ")
+    );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would create user {} with groups {:?}", username, groups);
+        println!(
+            "  [dry-run] Would create user {} with groups {:?}",
+            username, groups
+        );
         return Ok(());
     }
 
@@ -27,10 +34,7 @@ pub fn create_user(
     let groups_str = groups.join(",");
 
     // Create user with useradd
-    let useradd_cmd = format!(
-        "useradd -m -G {} -s /bin/bash {}",
-        groups_str, username
-    );
+    let useradd_cmd = format!("useradd -m -G {} -s /bin/bash {}", groups_str, username);
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
 
     // Set password using chpasswd
@@ -83,11 +87,7 @@ fn configure_sudoers(cmd: &CommandRunner, install_root: &str) -> Result<()> {
 
 /// Set root password
 #[allow(dead_code)]
-pub fn set_root_password(
-    cmd: &CommandRunner,
-    password: &str,
-    install_root: &str,
-) -> Result<()> {
+pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str) -> Result<()> {
     info!("Setting root password");
 
     if cmd.is_dry_run() {

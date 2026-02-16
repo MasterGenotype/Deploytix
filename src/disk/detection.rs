@@ -54,9 +54,7 @@ impl BlockDevice {
 /// Read a sysfs attribute, returning None if not available
 fn read_sysfs_attr(device: &str, attr: &str) -> Option<String> {
     let path = format!("/sys/block/{}/{}", device, attr);
-    fs::read_to_string(&path)
-        .ok()
-        .map(|s| s.trim().to_string())
+    fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
 }
 
 /// Read a numeric sysfs attribute

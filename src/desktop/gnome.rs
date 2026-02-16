@@ -7,25 +7,20 @@ use std::fs;
 use tracing::info;
 
 /// GNOME packages
-const GNOME_PACKAGES: &[&str] = &[
-    "gnome",
-    "gnome-extra",
-    "gdm",
-];
+const GNOME_PACKAGES: &[&str] = &["gnome", "gnome-extra", "gdm"];
 
 /// Install GNOME desktop environment
-pub fn install(
-    cmd: &CommandRunner,
-    config: &DeploymentConfig,
-    install_root: &str,
-) -> Result<()> {
+pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing GNOME desktop environment");
 
     // Get init-specific gdm package
     let gdm_service = format!("gdm-{}", config.system.init);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would install GNOME packages: {:?}", GNOME_PACKAGES);
+        println!(
+            "  [dry-run] Would install GNOME packages: {:?}",
+            GNOME_PACKAGES
+        );
         println!("  [dry-run] Would install gdm service: {}", gdm_service);
         return Ok(());
     }

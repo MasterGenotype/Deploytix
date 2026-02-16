@@ -2,22 +2,26 @@
 
 use crate::config::{DeploymentConfig, PartitionLayout, SwapType};
 use crate::configure;
-use crate::configure::encryption::{LuksContainer, setup_multi_volume_encryption, close_multi_luks};
+use crate::configure::encryption::{
+    close_multi_luks, setup_multi_volume_encryption, LuksContainer,
+};
 use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    format_all_partitions, format_efi, format_boot, format_swap,
-    create_btrfs_filesystem,
+    create_btrfs_filesystem, format_all_partitions, format_boot, format_efi, format_swap,
 };
-use crate::disk::layouts::{compute_layout, compute_lvm_thin_layout_with_swap, print_layout_summary, ComputedLayout, get_luks_partitions};
-use crate::disk::lvm::{self, ThinVolumeDef, lv_path};
+use crate::disk::layouts::{
+    compute_layout, compute_lvm_thin_layout_with_swap, get_luks_partitions, print_layout_summary,
+    ComputedLayout,
+};
+use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
-use crate::install::{
-    generate_fstab, mount_partitions, run_basestrap, unmount_all
-};
-use crate::install::fstab::{generate_fstab_multi_volume, generate_fstab_lvm_thin, append_swap_file_entry};
 use crate::install::crypttab::generate_crypttab_multi_volume;
+use crate::install::fstab::{
+    append_swap_file_entry, generate_fstab_lvm_thin, generate_fstab_multi_volume,
+};
+use crate::install::{generate_fstab, mount_partitions, run_basestrap, unmount_all};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
@@ -115,7 +119,9 @@ impl Installer {
             self.format_lvm_volumes()?;
             self.report_progress(0.28, "Mounting LVM volumes...");
             self.mount_lvm_volumes()?;
-        } else if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::Standard {
+        } else if self.config.disk.encryption
+            && self.config.disk.layout == PartitionLayout::Standard
+        {
             // Multi-volume encryption: separate LUKS containers for root, usr, var, home
             self.report_progress(0.15, "Setting up encryption...");
             self.setup_multi_volume_encryption()?;
@@ -138,7 +144,9 @@ impl Installer {
         self.report_progress(0.55, "Generating fstab...");
         if self.config.disk.layout == PartitionLayout::LvmThin {
             self.generate_fstab_lvm_thin()?;
-        } else if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::Standard {
+        } else if self.config.disk.encryption
+            && self.config.disk.layout == PartitionLayout::Standard
+        {
             self.generate_fstab_multi_volume()?;
         } else {
             self.generate_fstab()?;
@@ -169,8 +177,10 @@ impl Installer {
         self.configure_system()?;
 
         // Phase 4.5: Custom hooks (for encrypted systems)
-        if self.config.disk.encryption && (self.config.disk.layout == PartitionLayout::Standard 
-            || self.config.disk.layout == PartitionLayout::LvmThin) {
+        if self.config.disk.encryption
+            && (self.config.disk.layout == PartitionLayout::Standard
+                || self.config.disk.layout == PartitionLayout::LvmThin)
+        {
             self.report_progress(0.75, "Installing custom hooks...");
             self.install_custom_hooks()?;
         }
@@ -190,7 +200,10 @@ impl Installer {
         self.finalize()?;
 
         self.report_progress(1.0, "Installation complete");
-        info!("Installation to {} finished successfully", self.config.disk.device);
+        info!(
+            "Installation to {} finished successfully",
+            self.config.disk.device
+        );
         println!("\n✓ Installation completed successfully!");
         println!("  You can now reboot into your new Artix Linux system.");
 
@@ -199,7 +212,10 @@ impl Installer {
 
     /// Prepare for installation
     fn prepare(&mut self) -> Result<()> {
-        info!("[Phase 1/6] Preparing installation for {}", self.config.disk.device);
+        info!(
+            "[Phase 1/6] Preparing installation for {}",
+            self.config.disk.device
+        );
 
         // Get device info and compute layout
         let device_info = get_device_info(&self.config.disk.device)?;
@@ -218,7 +234,11 @@ impl Installer {
             let use_swap_partition = self.config.disk.swap_type == SwapType::Partition;
             compute_lvm_thin_layout_with_swap(disk_mib, use_swap_partition)?
         } else {
-            compute_layout(&self.config.disk.layout, disk_mib, self.config.disk.encryption)?
+            compute_layout(
+                &self.config.disk.layout,
+                disk_mib,
+                self.config.disk.encryption,
+            )?
         };
         print_layout_summary(&layout);
         self.layout = Some(layout);
@@ -243,7 +263,10 @@ impl Installer {
 
     /// Partition the disk
     fn partition_disk(&self) -> Result<()> {
-        info!("[Phase 2/6] Partitioning {} with {} layout", self.config.disk.device, self.config.disk.layout);
+        info!(
+            "[Phase 2/6] Partitioning {} with {} layout",
+            self.config.disk.device, self.config.disk.layout
+        );
 
         let layout = self.layout.as_ref().unwrap();
         apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
@@ -253,7 +276,10 @@ impl Installer {
 
     /// Format partitions
     fn format_partitions(&self) -> Result<()> {
-        info!("[Phase 2/6] Formatting partitions on {} as {}", self.config.disk.device, self.config.disk.filesystem);
+        info!(
+            "[Phase 2/6] Formatting partitions on {} as {}",
+            self.config.disk.device, self.config.disk.filesystem
+        );
 
         let layout = self.layout.as_ref().unwrap();
         format_all_partitions(
@@ -309,8 +335,10 @@ impl Installer {
         configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &self.config, INSTALL_ROOT)?;
 
         // Bootloader (use layout-aware version for encrypted systems)
-        if self.config.disk.encryption && (self.config.disk.layout == PartitionLayout::Standard
-            || self.config.disk.layout == PartitionLayout::LvmThin) {
+        if self.config.disk.encryption
+            && (self.config.disk.layout == PartitionLayout::Standard
+                || self.config.disk.layout == PartitionLayout::LvmThin)
+        {
             let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader_with_layout(
                 &self.cmd,
@@ -400,7 +428,10 @@ impl Installer {
 
     /// Setup multi-volume LUKS encryption (root, usr, var, home)
     fn setup_multi_volume_encryption(&mut self) -> Result<()> {
-        info!("[Phase 2/6] Setting up multi-volume LUKS2 encryption on {}", self.config.disk.device);
+        info!(
+            "[Phase 2/6] Setting up multi-volume LUKS2 encryption on {}",
+            self.config.disk.device
+        );
 
         let layout = self.layout.as_ref().unwrap();
 
@@ -432,7 +463,9 @@ impl Installer {
                 .partitions
                 .iter()
                 .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
 
             let boot_container = configure::encryption::setup_boot_encryption(
                 &self.cmd,
@@ -444,7 +477,10 @@ impl Installer {
             self.luks_boot_container = Some(boot_container);
         }
 
-        info!("Multi-volume encryption setup complete: {} containers", self.luks_containers.len());
+        info!(
+            "Multi-volume encryption setup complete: {} containers",
+            self.luks_containers.len()
+        );
         Ok(())
     }
 
@@ -475,17 +511,17 @@ impl Installer {
                 .partitions
                 .iter()
                 .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
             let boot_device = partition_path(&self.config.disk.device, boot_part.number);
             format_boot(&self.cmd, &boot_device)?;
         }
 
         // Format EFI partition as FAT32
-        let efi_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_efi)
-            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         format_efi(&self.cmd, &efi_device)?;
 
@@ -495,22 +531,29 @@ impl Installer {
 
     /// Mount multi-volume encrypted partitions for installation
     fn mount_multi_volume_partitions(&self) -> Result<()> {
-        info!("[Phase 2/6] Mounting multi-volume encrypted partitions to {}", INSTALL_ROOT);
+        info!(
+            "[Phase 2/6] Mounting multi-volume encrypted partitions to {}",
+            INSTALL_ROOT
+        );
 
         let layout = self.layout.as_ref().unwrap();
 
         // Mount in order: root first, then usr, var, home
         // Find root container
-        let root_container = self.luks_containers
+        let root_container = self
+            .luks_containers
             .iter()
             .find(|c| c.mapper_name == "Crypt-Root")
-            .ok_or_else(|| DeploytixError::ConfigError("No Crypt-Root container found".to_string()))?;
+            .ok_or_else(|| {
+                DeploytixError::ConfigError("No Crypt-Root container found".to_string())
+            })?;
 
         // Mount root
         if !self.cmd.is_dry_run() {
             fs::create_dir_all(INSTALL_ROOT)?;
         }
-        self.cmd.run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
+        self.cmd
+            .run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
         info!("Mounted {} to {}", root_container.mapped_path, INSTALL_ROOT);
 
         // Mount other encrypted volumes
@@ -519,7 +562,8 @@ impl Installer {
                 continue; // Already mounted
             }
 
-            let mount_name = container.mapper_name
+            let mount_name = container
+                .mapper_name
                 .trim_start_matches("Crypt-")
                 .to_lowercase();
             let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
@@ -527,7 +571,8 @@ impl Installer {
             if !self.cmd.is_dry_run() {
                 fs::create_dir_all(&mount_point)?;
             }
-            self.cmd.run("mount", &[&container.mapped_path, &mount_point])?;
+            self.cmd
+                .run("mount", &[&container.mapped_path, &mount_point])?;
             info!("Mounted {} to {}", container.mapped_path, mount_point);
         }
 
@@ -539,7 +584,9 @@ impl Installer {
                 .partitions
                 .iter()
                 .find(|p| p.is_boot_fs)
-                .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
             partition_path(&self.config.disk.device, boot_part.number)
         };
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
@@ -551,11 +598,9 @@ impl Installer {
         info!("Mounted {} to {}", boot_source, boot_mount);
 
         // Mount EFI partition
-        let efi_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_efi)
-            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
 
@@ -572,13 +617,16 @@ impl Installer {
     fn setup_keyfiles(&mut self) -> Result<()> {
         info!("[Phase 3/6] Setting up keyfiles for automatic unlocking");
 
-        let password = self.config
+        let password = self
+            .config
             .disk
             .encryption_password
             .as_ref()
-            .ok_or_else(|| DeploytixError::ValidationError(
-                "Encryption password required for keyfile setup".to_string()
-            ))?;
+            .ok_or_else(|| {
+                DeploytixError::ValidationError(
+                    "Encryption password required for keyfile setup".to_string(),
+                )
+            })?;
 
         // Collect all containers that need keyfiles (data volumes + optional boot)
         let mut all_containers: Vec<LuksContainer> = self.luks_containers.clone();
@@ -586,12 +634,8 @@ impl Installer {
             all_containers.push(boot_container.clone());
         }
 
-        let keyfiles = setup_keyfiles_for_volumes(
-            &self.cmd,
-            &all_containers,
-            password,
-            INSTALL_ROOT,
-        )?;
+        let keyfiles =
+            setup_keyfiles_for_volumes(&self.cmd, &all_containers, password, INSTALL_ROOT)?;
 
         self.keyfiles = keyfiles;
         info!("Keyfiles created for {} volumes", all_containers.len());
@@ -630,19 +674,17 @@ impl Installer {
     fn install_custom_hooks(&self) -> Result<()> {
         let layout = self.layout.as_ref().unwrap();
 
-        configure::hooks::install_custom_hooks(
-            &self.cmd,
-            &self.config,
-            layout,
-            INSTALL_ROOT,
-        )
+        configure::hooks::install_custom_hooks(&self.cmd, &self.config, layout, INSTALL_ROOT)
     }
 
     // ==================== LVM THIN PROVISIONING METHODS ====================
 
     /// Setup LVM thin provisioning with LUKS encryption
     fn setup_lvm_thin(&mut self) -> Result<()> {
-        info!("[Phase 2/6] Setting up LVM thin provisioning on {}", self.config.disk.device);
+        info!(
+            "[Phase 2/6] Setting up LVM thin provisioning on {}",
+            self.config.disk.device
+        );
 
         let layout = self.layout.as_ref().unwrap();
         let vg_name = &self.config.disk.lvm_vg_name;
@@ -654,20 +696,27 @@ impl Installer {
         let lvm_part = layout
             .partitions
             .iter()
-            .find(|p| p.mount_point.as_deref() == Some("/") || p.name.to_lowercase().contains("lvm"))
-            .ok_or_else(|| DeploytixError::ConfigError("No LVM PV partition found in layout".to_string()))?;
+            .find(|p| {
+                p.mount_point.as_deref() == Some("/") || p.name.to_lowercase().contains("lvm")
+            })
+            .ok_or_else(|| {
+                DeploytixError::ConfigError("No LVM PV partition found in layout".to_string())
+            })?;
 
         let lvm_device = partition_path(&self.config.disk.device, lvm_part.number);
 
         // Setup LUKS encryption on LVM PV partition
         if self.config.disk.encryption {
-            let password = self.config
+            let password = self
+                .config
                 .disk
                 .encryption_password
                 .as_ref()
-                .ok_or_else(|| DeploytixError::ValidationError(
-                    "Encryption password required for LVM thin layout".to_string()
-                ))?;
+                .ok_or_else(|| {
+                    DeploytixError::ValidationError(
+                        "Encryption password required for LVM thin layout".to_string(),
+                    )
+                })?;
 
             let container = configure::encryption::setup_single_luks(
                 &self.cmd,
@@ -699,7 +748,10 @@ impl Installer {
 
         self.lvm_thin_volumes = thin_volumes;
 
-        info!("LVM thin provisioning setup complete: VG={}, pool={}", vg_name, pool_name);
+        info!(
+            "LVM thin provisioning setup complete: VG={}, pool={}",
+            vg_name, pool_name
+        );
         Ok(())
     }
 
@@ -730,16 +782,16 @@ impl Installer {
             .partitions
             .iter()
             .find(|p| p.is_boot_fs)
-            .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+            .ok_or_else(|| {
+                DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+            })?;
         let boot_device = partition_path(&self.config.disk.device, boot_part.number);
         format_boot(&self.cmd, &boot_device)?;
 
         // Format EFI partition as FAT32
-        let efi_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_efi)
-            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         format_efi(&self.cmd, &efi_device)?;
 
@@ -788,7 +840,9 @@ impl Installer {
             .partitions
             .iter()
             .find(|p| p.is_boot_fs)
-            .ok_or_else(|| DeploytixError::ConfigError("No Boot partition found in layout".to_string()))?;
+            .ok_or_else(|| {
+                DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+            })?;
         let boot_device = partition_path(&self.config.disk.device, boot_part.number);
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
@@ -799,11 +853,9 @@ impl Installer {
         info!("Mounted {} to {}", boot_device, boot_mount);
 
         // Mount EFI partition
-        let efi_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_efi)
-            .ok_or_else(|| DeploytixError::ConfigError("No EFI partition found in layout".to_string()))?;
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
         let efi_device = partition_path(&self.config.disk.device, efi_part.number);
         let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
 
@@ -846,13 +898,12 @@ impl Installer {
 
             // Get LUKS UUID
             let luks_uuid = configure::encryption::get_luks_uuid(&container.device)?;
-            
+
             let content = format!(
                 "# /etc/crypttab: LUKS container for LVM thin provisioning\n\
                  # <target name>  <source device>  <key file>  <options>\n\
                  {}  UUID={}  none  luks\n",
-                container.mapper_name,
-                luks_uuid
+                container.mapper_name, luks_uuid
             );
 
             if !self.cmd.is_dry_run() {
@@ -867,14 +918,13 @@ impl Installer {
 
     /// Configure swap (ZRAM and/or swap file)
     fn configure_swap(&self) -> Result<()> {
-        info!("[Phase 3/6] Configuring swap: {:?}", self.config.disk.swap_type);
+        info!(
+            "[Phase 3/6] Configuring swap: {:?}",
+            self.config.disk.swap_type
+        );
 
         // Use the unified configure_swap function
-        configure::swap::configure_swap(
-            &self.cmd,
-            &self.config,
-            INSTALL_ROOT,
-        )
+        configure::swap::configure_swap(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     // ==================== SECUREBOOT METHODS ====================
@@ -883,18 +933,10 @@ impl Installer {
     fn setup_secureboot(&self) -> Result<()> {
         info!("[Phase 4/6] Setting up SecureBoot");
 
-        configure::secureboot::setup_secureboot(
-            &self.cmd,
-            &self.config,
-            INSTALL_ROOT,
-        )?;
+        configure::secureboot::setup_secureboot(&self.cmd, &self.config, INSTALL_ROOT)?;
 
         // Sign boot files
-        configure::secureboot::sign_boot_files(
-            &self.cmd,
-            &self.config,
-            INSTALL_ROOT,
-        )?;
+        configure::secureboot::sign_boot_files(&self.cmd, &self.config, INSTALL_ROOT)?;
 
         // Print enrollment instructions for user
         configure::secureboot::print_enrollment_instructions(&self.config);

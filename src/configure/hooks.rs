@@ -24,7 +24,11 @@ pub fn install_custom_hooks(
 ) -> Result<()> {
     let hooks = generate_hooks(config, layout)?;
     let hook_names: Vec<&str> = hooks.iter().map(|h| h.name.as_str()).collect();
-    info!("Installing {} custom mkinitcpio hooks: [{}]", hooks.len(), hook_names.join(", "));
+    info!(
+        "Installing {} custom mkinitcpio hooks: [{}]",
+        hooks.len(),
+        hook_names.join(", ")
+    );
 
     if cmd.is_dry_run() {
         for hook in &hooks {
@@ -315,7 +319,8 @@ build() {
 
     add_runscript
 }
-"#.to_string();
+"#
+    .to_string();
 
     GeneratedHook {
         name: "crypttab-unlock".to_string(),
@@ -577,7 +582,10 @@ mod tests {
     fn no_hooks_generated_for_minimal() {
         let cfg = config_with(PartitionLayout::Minimal, false);
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
-        assert!(hooks.is_empty(), "Minimal layout should not use custom hooks");
+        assert!(
+            hooks.is_empty(),
+            "Minimal layout should not use custom hooks"
+        );
     }
 
     #[test]
@@ -600,7 +608,11 @@ mod tests {
         // The only occurrences of "run_hook" should be inside function definitions
         // or comments, not as a standalone invocation at the end of the script.
         let trailing = hook.hook_content.lines().last().unwrap_or("");
-        assert_ne!(trailing.trim(), "run_hook", "run_hook must not be called explicitly at script end");
+        assert_ne!(
+            trailing.trim(),
+            "run_hook",
+            "run_hook must not be called explicitly at script end"
+        );
     }
 
     #[test]

@@ -12,7 +12,9 @@ pub fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String> {
         input = input.default(d.to_string());
     }
 
-    input.interact_text().map_err(|_| DeploytixError::UserCancelled)
+    input
+        .interact_text()
+        .map_err(|_| DeploytixError::UserCancelled)
 }
 
 /// Prompt for password (hidden input)
@@ -24,7 +26,9 @@ pub fn prompt_password(prompt: &str, confirm: bool) -> Result<String> {
         password = password.with_confirmation("Confirm password", "Passwords do not match");
     }
 
-    password.interact().map_err(|_| DeploytixError::UserCancelled)
+    password
+        .interact()
+        .map_err(|_| DeploytixError::UserCancelled)
 }
 
 /// Prompt for yes/no confirmation

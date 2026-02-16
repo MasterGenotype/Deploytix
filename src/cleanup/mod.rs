@@ -24,7 +24,10 @@ impl Cleaner {
 
     /// Perform cleanup operations
     pub fn cleanup(&self, device: Option<&str>, wipe: bool) -> Result<()> {
-        info!("Starting cleanup (unmount, close LUKS{})", if wipe { ", wipe" } else { "" });
+        info!(
+            "Starting cleanup (unmount, close LUKS{})",
+            if wipe { ", wipe" } else { "" }
+        );
 
         // Unmount all filesystems
         self.unmount_all()?;
@@ -144,7 +147,10 @@ impl Cleaner {
             return Err(DeploytixError::UserCancelled);
         }
 
-        info!("Wiping partition table and filesystem signatures on {}", device);
+        info!(
+            "Wiping partition table and filesystem signatures on {}",
+            device
+        );
 
         if self.cmd.is_dry_run() {
             println!("  [dry-run] Would wipe partition table on {}", device);

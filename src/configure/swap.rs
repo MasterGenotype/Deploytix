@@ -33,7 +33,10 @@ pub fn setup_zram(
     );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would create ZRAM service with {}% RAM, {} compression", percent, algorithm);
+        println!(
+            "  [dry-run] Would create ZRAM service with {}% RAM, {} compression",
+            percent, algorithm
+        );
         return Ok(());
     }
 
@@ -82,7 +85,7 @@ exec pause
 
     let run_path = format!("{}/run", sv_dir);
     fs::write(&run_path, run_script)?;
-    
+
     // Make executable
     let mut perms = fs::metadata(&run_path)?.permissions();
     perms.set_mode(0o755);
@@ -259,7 +262,10 @@ pub fn create_swap_file(
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mkdir -p {}", swap_dir);
-        println!("  [dry-run] Create {} MiB swap file at {}", size_mib, swap_file);
+        println!(
+            "  [dry-run] Create {} MiB swap file at {}",
+            size_mib, swap_file
+        );
         return Ok(());
     }
 
@@ -281,12 +287,11 @@ pub fn create_swap_file(
     fs::set_permissions(&swap_file, perms)?;
 
     // Format as swap
-    cmd.run("mkswap", &[&swap_file]).map_err(|e| {
-        DeploytixError::CommandFailed {
+    cmd.run("mkswap", &[&swap_file])
+        .map_err(|e| DeploytixError::CommandFailed {
             command: "mkswap".to_string(),
             stderr: e.to_string(),
-        }
-    })?;
+        })?;
 
     info!("Swap file created successfully");
     Ok(())
@@ -296,9 +301,7 @@ pub fn create_swap_file(
 fn check_is_btrfs(path: &str) -> bool {
     use std::process::Command;
 
-    let output = Command::new("stat")
-        .args(["-f", "-c", "%T", path])
-        .output();
+    let output = Command::new("stat").args(["-f", "-c", "%T", path]).output();
 
     match output {
         Ok(out) => {
@@ -319,7 +322,13 @@ fn create_btrfs_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Res
     // Try the modern mkswapfile command first (kernel 6.1+)
     let result = cmd.run(
         "btrfs",
-        &["filesystem", "mkswapfile", "--size", &format!("{}m", size_mib), path],
+        &[
+            "filesystem",
+            "mkswapfile",
+            "--size",
+            &format!("{}m", size_mib),
+            path,
+        ],
     );
 
     if result.is_ok() {
@@ -333,22 +342,18 @@ fn create_btrfs_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Res
     std::fs::File::create(path)?;
 
     // Disable COW
-    cmd.run("chattr", &["+C", path]).map_err(|e| {
-        DeploytixError::CommandFailed {
+    cmd.run("chattr", &["+C", path])
+        .map_err(|e| DeploytixError::CommandFailed {
             command: "chattr +C".to_string(),
             stderr: e.to_string(),
-        }
-    })?;
+        })?;
 
     // Allocate space
-    cmd.run(
-        "fallocate",
-        &["-l", &format!("{}M", size_mib), path],
-    )
-    .map_err(|e| DeploytixError::CommandFailed {
-        command: "fallocate".to_string(),
-        stderr: e.to_string(),
-    })?;
+    cmd.run("fallocate", &["-l", &format!("{}M", size_mib), path])
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "fallocate".to_string(),
+            stderr: e.to_string(),
+        })?;
 
     Ok(())
 }
@@ -357,14 +362,11 @@ fn create_btrfs_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Res
 fn create_regular_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Result<()> {
     info!("Creating regular swap file at {}", path);
 
-    cmd.run(
-        "fallocate",
-        &["-l", &format!("{}M", size_mib), path],
-    )
-    .map_err(|e| DeploytixError::CommandFailed {
-        command: "fallocate".to_string(),
-        stderr: e.to_string(),
-    })?;
+    cmd.run("fallocate", &["-l", &format!("{}M", size_mib), path])
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "fallocate".to_string(),
+            stderr: e.to_string(),
+        })?;
 
     Ok(())
 }
@@ -451,17 +453,23 @@ pub fn configure_swap(
             // Setup both ZRAM and swap file
             setup_zram(cmd, config, install_root)?;
             create_swap_file(cmd, config, install_root)?;
-            
+
             // If hibernation is enabled, get the swap file offset for resume
             if config.system.hibernation {
                 let swap_file = format!("{}{}", install_root, SWAP_FILE_PATH);
                 match get_swap_file_offset(&swap_file) {
                     Ok(offset) => {
                         info!("Swap file offset for hibernation: {}", offset);
-                        info!("Add 'resume_offset={}' to kernel parameters for hibernation", offset);
+                        info!(
+                            "Add 'resume_offset={}' to kernel parameters for hibernation",
+                            offset
+                        );
                     }
                     Err(e) => {
-                        info!("Could not determine swap file offset: {} (hibernation may not work)", e);
+                        info!(
+                            "Could not determine swap file offset: {} (hibernation may not work)",
+                            e
+                        );
                     }
                 }
             }
