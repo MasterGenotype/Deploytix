@@ -1,17 +1,20 @@
 # Deploytix
-WIP
-A portable Rust CLI application for automated deployment of Artix Linux to removable media and disks.
+
+A portable Rust CLI and GUI application for automated deployment of Artix Linux (and generally Arch-based distributions) to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional multi-volume LUKS2 encryption.
 
 ## Features
 
-- **Fully Portable**: Single static binary with embedded resources, no external dependencies
-- **Dynamic Partitioning**: Auto-adjusts partition sizes relative to disk capacity
-- **Multiple Init Systems**: Support for runit, OpenRC, s6, and dinit
+- **Fully Portable**: Single static binary built with musl — no external runtime dependencies
+- **CLI & GUI**: Interactive CLI wizard or egui-based graphical step-by-step installer
+- **Configuration-Driven**: TOML-based configs for reproducible, unattended installations
+- **Proportional Partitioning**: Automatically sizes partitions using a weighted proportion relative to total disk capacity — larger disks get proportionally larger partitions for each mount point
+- **Multiple Init Systems**: runit, OpenRC, s6, dinit
 - **Filesystem Choice**: ext4, btrfs, xfs, f2fs
 - **Desktop Environments**: KDE Plasma, GNOME, XFCE, or headless/server
-- **Network Configuration**: iwd, NetworkManager, or ConnMan with optional dnscrypt-proxy
-- **mkinitcpio Hook Constructor**: Automatically generates correct hooks based on configuration
-- **LUKS Encryption**: Optional full-disk encryption support (WIP)
+- **Network Backends**: iwd, NetworkManager, or ConnMan with optional dnscrypt-proxy
+- **LUKS2 Encryption**: Multi-volume encrypted partitions with keyfile-based automatic unlocking
+- **Bootloaders**: GRUB or systemd-boot
+- **mkinitcpio Hook Constructor**: Automatically generates correct initramfs hooks based on configuration
 - **Dry-Run Mode**: Preview all operations without making changes
 
 ## Installation
@@ -22,87 +25,79 @@ A portable Rust CLI application for automated deployment of Artix Linux to remov
 # Install Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Clone and build
-git clone https://github.com/superphenotype/deploytix
-cd deploytix
+# Clone and build (CLI only)
+git clone https://github.com/MasterGenotype/Deploytix
+cd Deploytix
 cargo build --release
 
-# Binary will be at target/release/deploytix
+# Binary: target/release/deploytix
+```
+
+### With GUI Support
+
+```bash
+cargo build --release --features gui
+
+# Binaries: target/release/deploytix and target/release/deploytix-gui
 ```
 
 ### Static Binary (Portable)
 
 ```bash
-# Add musl target
 rustup target add x86_64-unknown-linux-musl
 
-# Build static binary
-cargo portable
-# Or: cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+# Or shorthand: cargo portable
 
-# Binary will be at target/x86_64-unknown-linux-musl/release/deploytix
+# Binary: target/x86_64-unknown-linux-musl/release/deploytix
 ```
 
 ## Usage
 
-### GUI Installation (Recommended)
+### GUI Installer
 
 ```bash
-# Build with GUI support
-cargo build --release --features gui
-
-# Run GUI as root
 sudo ./target/release/deploytix-gui
 ```
 
-The GUI provides a step-by-step wizard for:
-- Selecting target disk
-- Configuring partitions, filesystem, and encryption
-- Setting up system options (init, bootloader, locale)
-- Creating user account
-- Choosing network backend and desktop environment
-- Reviewing configuration before installation
+The GUI provides a 7-step wizard: Disk → Partitions → System → User → Network → Review → Install.
 
-### CLI Interactive Installation
+### CLI Interactive Installer
 
 ```bash
-# Run as root
 sudo ./deploytix
 ```
 
 ### With Configuration File
 
 ```bash
-# Generate sample config
+# Generate a sample config
 ./deploytix generate-config -o my-config.toml
 
-# Edit configuration
+# Edit to taste
 nano my-config.toml
 
-# Run installation with config
+# Run installation
 sudo ./deploytix install -c my-config.toml
 ```
 
-### List Available Disks
+### Other Commands
 
 ```bash
+# List available disks
 ./deploytix list-disks
-```
 
-### Dry-Run Mode
-
-```bash
+# Dry-run (preview only)
 sudo ./deploytix -n install
-```
 
-### Cleanup
-
-```bash
-# Unmount partitions
+# Cleanup: unmount partitions
 sudo ./deploytix cleanup
 
-# Unmount and wipe partition table
+# Cleanup: unmount and wipe partition table
 sudo ./deploytix cleanup -w
+
+# Cleanup: target a specific device
+sudo ./deploytix cleanup --device /dev/sda --wipe
 ```
 
 ## Configuration
@@ -112,13 +107,13 @@ Example `deploytix.toml`:
 ```toml
 [disk]
 device = "/dev/sda"
-layout = "standard"  # standard, minimal
+layout = "standard"       # standard, minimal, crypto_subvolume
 filesystem = "btrfs"
 encryption = false
 
 [system]
-init = "runit"
-bootloader = "grub"
+init = "runit"            # runit, openrc, s6, dinit
+bootloader = "grub"       # grub, systemd-boot
 timezone = "America/New_York"
 locale = "en_US.UTF-8"
 keymap = "us"
@@ -130,52 +125,99 @@ password = "changeme"
 groups = ["wheel", "video", "audio", "network", "log"]
 
 [network]
-backend = "iwd"
+backend = "iwd"           # iwd, networkmanager, connman
 dns = "dnscrypt-proxy"
 
 [desktop]
-environment = "kde"  # kde, gnome, xfce, none
+environment = "kde"       # kde, gnome, xfce, none
 ```
 
 ## Partition Layouts
 
+After allocating fixed-size partitions (EFI, Boot, Swap), the remaining disk space is distributed across data partitions using proportional weight differentials. Each partition receives a share of the remaining capacity based on its assigned weight, so the layout scales naturally from small drives to large ones — a 128 GiB disk and a 2 TiB disk both get sensible partition sizes without manual tuning.
+
 ### Standard (7-partition)
+
 | Partition | Size | Mount |
 |-----------|------|-------|
 | EFI | 512 MiB | /boot/efi |
 | Boot | 2 GiB | /boot |
-| Swap | 2×RAM (4-20 GiB) | - |
+| Swap | 2×RAM (4–20 GiB) | — |
 | Root | 6.4% of remaining | / |
 | Usr | 26.8% of remaining | /usr |
 | Var | 5.4% of remaining | /var |
 | Home | Remainder | /home |
 
 ### Minimal (3-partition)
+
 | Partition | Size | Mount |
 |-----------|------|-------|
 | EFI | 512 MiB | /boot/efi |
-| Swap | 2×RAM (4-20 GiB) | - |
+| Swap | 2×RAM (4–20 GiB) | — |
 | Root | Remainder | / |
+
+### CryptoSubvolume (multi-volume LUKS2)
+
+| Partition | Size | Encryption | Mount |
+|-----------|------|------------|-------|
+| EFI | 512 MiB | None | /boot/efi |
+| Boot | 2 GiB | None | /boot |
+| Swap | 2×RAM (4–20 GiB) | LUKS2 | — |
+| Root | 6.4% of remaining | LUKS2 | / |
+| Usr | 26.8% of remaining | LUKS2 | /usr |
+| Var | 5.4% of remaining | LUKS2 | /var |
+| Home | Remainder | LUKS2 | /home |
+
+Each encrypted partition uses a separate LUKS2 container. Root is unlocked with a passphrase; remaining volumes unlock automatically via keyfiles stored in the initramfs.
+
+## Architecture
+
+```
+src/
+├── main.rs              # CLI entry point (clap)
+├── gui_main.rs          # GUI entry point (egui)
+├── config/              # TOML config parsing, interactive wizard
+├── disk/                # Disk detection, partition layout computation, formatting
+├── install/             # basestrap, chroot, fstab/crypttab generation
+├── configure/           # Bootloader, encryption, users, locale, services, hooks
+├── desktop/             # Desktop environment package lists and setup
+├── cleanup/             # Unmount and optional wipe
+├── gui/                 # egui wizard panels and app state
+└── utils/               # Command runner (with dry-run), error types, prompts
+```
+
+All system commands execute through a `CommandRunner` abstraction that respects dry-run mode, allowing safe previews of every operation.
 
 ## Requirements
 
-**On the host system (running the installer):**
+**Host system (running the installer):**
+
 - `basestrap` (from artools)
 - `pacman`
-- `sfdisk` or `fdisk`
+- `sfdisk`
 - `mkfs.*` utilities
-- `grub` (for GRUB bootloader)
+- `grub-install` / `grub-mkconfig` (if using GRUB)
+- `cryptsetup` (if using encryption)
+- Root privileges
 
 **Minimum disk size:**
-- Standard layout: ~75 GiB
+
+- Standard / CryptoSubvolume layout: ~75 GiB
 - Minimal layout: ~25 GiB
+
+## Development
+
+```bash
+# Build
+cargo build
+
+# Lint
+cargo clippy -- -D warnings
+
+# Format check
+cargo fmt -- --check
+```
 
 ## License
 
 GPL-3.0-or-later
-
-## Contributing
-
-Contributions welcome! Please open an issue or pull request.
-
-Co-Authored-By: Warp <agent@warp.dev>
