@@ -124,9 +124,6 @@ const VAR_MIN_MIB: u64 = 8192;   // 8 GiB
 const SWAP_MIN_MIB: u64 = 4096;  // 4 GiB
 const SWAP_MAX_MIB: u64 = 20480; // 20 GiB
 
-/// BIOS Boot partition size (650 MiB for GRUB)
-const BIOS_BOOT_MIB: u64 = 650;
-
 /// Alignment in MiB
 const ALIGN_MIB: u64 = 4;
 
@@ -155,7 +152,8 @@ fn calculate_swap_mib(ram_mib: u64) -> u64 {
 /// Compute the standard 7-partition layout
 ///
 /// Layout: EFI, Boot, Swap, Root, Usr, Var, Home
-fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
+/// When encryption is enabled, Root/Usr/Var/Home partitions are marked as LUKS containers.
+fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
     let swap_mib = calculate_swap_mib(ram_mib);
 
@@ -292,7 +290,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: false,
+            is_luks: encryption,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -305,7 +303,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/usr".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: false,
+            is_luks: encryption,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -318,7 +316,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/var".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: false,
+            is_luks: encryption,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -331,7 +329,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             mount_point: Some("/home".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: false,
+            is_luks: encryption,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -345,15 +343,16 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
     })
 }
 
-/// Compute the minimal 3-partition layout with btrfs subvolumes
+/// Compute the minimal 4-partition layout with btrfs subvolumes
 ///
-/// Layout: EFI, Swap, Root (with @, @home, @var, @log, @snapshots subvolumes)
+/// Layout: EFI, Boot, Swap, Root (with @, @home, @var, @log, @snapshots subvolumes)
+/// This layout supports both UEFI and Legacy BIOS boot.
 fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
     let swap_mib = calculate_swap_mib(ram_mib);
 
     // Minimum total required
-    let min_total_mib = EFI_MIB + swap_mib + ROOT_MIN_MIB;
+    let min_total_mib = EFI_MIB + BOOT_MIB + swap_mib + ROOT_MIN_MIB;
     if disk_mib < min_total_mib {
         return Err(DeploytixError::DiskTooSmall {
             size_mib: disk_mib,
@@ -377,6 +376,19 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
         },
         PartitionDef {
             number: 2,
+            name: "BOOT".to_string(),
+            size_mib: BOOT_MIB,
+            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+            mount_point: Some("/boot".to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: true,
+            attributes: Some("LegacyBIOSBootable".to_string()),
+        },
+        PartitionDef {
+            number: 3,
             name: "SWAP".to_string(),
             size_mib: swap_mib,
             type_guid: partition_types::LINUX_SWAP.to_string(),
@@ -389,7 +401,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             attributes: None,
         },
         PartitionDef {
-            number: 3,
+            number: 4,
             name: "ROOT".to_string(),
             size_mib: 0, // Remainder
             type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
@@ -412,24 +424,26 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     })
 }
 
-/// Compute the CryptoSubvolume layout (multi-volume encrypted partitions)
-/// Partition 1: EFI (512 MiB) - FAT32
-/// Partition 2: BOOT (650 MiB) - BTRFS (optionally LUKS1)
-/// Partition 3: SWAP (2x RAM, capped) - swap
-/// Partition 4: ROOT (dynamic) - LUKS2 -> BTRFS
-/// Partition 5: USR (dynamic) - LUKS2 -> BTRFS
-/// Partition 6: VAR (dynamic) - LUKS2 -> BTRFS
-/// Partition 7: HOME (remainder) - LUKS2 -> BTRFS
-fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
+/// Get all LUKS partition definitions from layout
+pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
+    layout.partitions.iter().filter(|p| p.is_luks).collect()
+}
+
+/// Compute the LVM thin provisioning layout
+///
+/// Layout: EFI, Boot, optional Swap (if use_swap_partition), LVM PV (LUKS container)
+/// The LVM PV contains a thin pool with thin volumes for root, usr, var, home.
+fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
-    let swap_mib = calculate_swap_mib(ram_mib);
+    let swap_mib = if use_swap_partition {
+        calculate_swap_mib(ram_mib)
+    } else {
+        0
+    };
 
-    // Reserved space (fixed partitions)
-    let reserved_mib = EFI_MIB + BIOS_BOOT_MIB + swap_mib;
-    let remain_mib = disk_mib.saturating_sub(reserved_mib);
-
-    // Minimum total required
-    let min_total_mib = reserved_mib + ROOT_MIN_MIB + USR_MIN_MIB + VAR_MIN_MIB + 1;
+    // Minimum: 512 MiB EFI + 2048 MiB Boot + optional Swap + at least 50 GiB for LVM
+    let min_lvm_mib: u64 = 51200; // 50 GiB minimum for thin pool
+    let min_total_mib = EFI_MIB + BOOT_MIB + swap_mib + min_lvm_mib;
     if disk_mib < min_total_mib {
         return Err(DeploytixError::DiskTooSmall {
             size_mib: disk_mib,
@@ -437,28 +451,7 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
         });
     }
 
-    // Calculate sizes based on ratios
-    let mut root_mib = ((remain_mib as f64) * ROOT_RATIO) as u64;
-    let mut usr_mib = ((remain_mib as f64) * USR_RATIO) as u64;
-    let mut var_mib = ((remain_mib as f64) * VAR_RATIO) as u64;
-
-    // Apply minimums
-    if root_mib < ROOT_MIN_MIB {
-        root_mib = ROOT_MIN_MIB;
-    }
-    if usr_mib < USR_MIN_MIB {
-        usr_mib = USR_MIN_MIB;
-    }
-    if var_mib < VAR_MIN_MIB {
-        var_mib = VAR_MIN_MIB;
-    }
-
-    // Align down
-    root_mib = floor_align(root_mib, ALIGN_MIB);
-    usr_mib = floor_align(usr_mib, ALIGN_MIB);
-    var_mib = floor_align(var_mib, ALIGN_MIB);
-
-    let partitions = vec![
+    let mut partitions = vec![
         // Partition 1: EFI System Partition
         PartitionDef {
             number: 1,
@@ -473,11 +466,11 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_boot_fs: false,
             attributes: None,
         },
-        // Partition 2: BOOT (for GRUB, optionally LUKS1 encrypted)
+        // Partition 2: Boot (can be LUKS1 encrypted)
         PartitionDef {
             number: 2,
             name: "BOOT".to_string(),
-            size_mib: BIOS_BOOT_MIB,
+            size_mib: BOOT_MIB,
             type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
             mount_point: Some("/boot".to_string()),
             is_swap: false,
@@ -487,9 +480,14 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_boot_fs: true,
             attributes: Some("LegacyBIOSBootable".to_string()),
         },
-        // Partition 3: SWAP
-        PartitionDef {
-            number: 3,
+    ];
+
+    let mut next_part_num = 3;
+
+    // Optional swap partition
+    if use_swap_partition {
+        partitions.push(PartitionDef {
+            number: next_part_num,
             name: "SWAP".to_string(),
             size_mib: swap_mib,
             type_guid: partition_types::LINUX_SWAP.to_string(),
@@ -500,93 +498,58 @@ fn compute_crypto_subvolume_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
-        },
-        // Partition 4: ROOT (LUKS2 encrypted)
-        PartitionDef {
-            number: 4,
-            name: "ROOT".to_string(),
-            size_mib: root_mib,
-            type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
-            mount_point: Some("/".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: true,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        // Partition 5: USR (LUKS2 encrypted)
-        PartitionDef {
-            number: 5,
-            name: "USR".to_string(),
-            size_mib: usr_mib,
-            type_guid: partition_types::LINUX_USR_X86_64.to_string(),
-            mount_point: Some("/usr".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: true,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        // Partition 6: VAR (LUKS2 encrypted)
-        PartitionDef {
-            number: 6,
-            name: "VAR".to_string(),
-            size_mib: var_mib,
-            type_guid: partition_types::LINUX_VAR.to_string(),
-            mount_point: Some("/var".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: true,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        // Partition 7: HOME (LUKS2 encrypted, remainder)
-        PartitionDef {
-            number: 7,
-            name: "HOME".to_string(),
-            size_mib: 0, // Remainder
-            type_guid: partition_types::LINUX_HOME.to_string(),
-            mount_point: Some("/home".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: true,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-    ];
+        });
+        next_part_num += 1;
+    }
+
+    // LVM PV partition (LUKS container, remainder of disk)
+    partitions.push(PartitionDef {
+        number: next_part_num,
+        name: "LVM".to_string(),
+        size_mib: 0, // Remainder
+        type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+        mount_point: None, // Mounted via LVM
+        is_swap: false,
+        is_efi: false,
+        is_luks: true, // Will be LUKS encrypted
+        is_bios_boot: false,
+        is_boot_fs: false,
+        attributes: None,
+    });
 
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        subvolumes: None, // No subvolumes - separate encrypted partitions
+        subvolumes: None, // LVM thin uses LVs, not btrfs subvolumes
     })
 }
 
-/// Get all LUKS partition definitions from layout
-pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
-    layout.partitions.iter().filter(|p| p.is_luks).collect()
-}
-
 /// Compute partition layout for a disk
-pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64) -> Result<ComputedLayout> {
+/// 
+/// For Standard layout, pass `encryption` flag to enable LUKS on data partitions.
+pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64, encryption: bool) -> Result<ComputedLayout> {
     match layout {
-        PartitionLayout::Standard => compute_standard_layout(disk_mib),
+        PartitionLayout::Standard => compute_standard_layout(disk_mib, encryption),
         PartitionLayout::Minimal => compute_minimal_layout(disk_mib),
-        PartitionLayout::CryptoSubvolume => compute_crypto_subvolume_layout(disk_mib),
+        PartitionLayout::LvmThin => compute_lvm_thin_layout(disk_mib, true), // Default to swap partition
         PartitionLayout::Custom => Err(DeploytixError::ConfigError(
             "Custom layouts not yet implemented".to_string(),
         )),
     }
 }
 
+/// Compute LVM thin layout with swap type consideration
+pub fn compute_lvm_thin_layout_with_swap(
+    disk_mib: u64,
+    use_swap_partition: bool,
+) -> Result<ComputedLayout> {
+    compute_lvm_thin_layout(disk_mib, use_swap_partition)
+}
+
 /// Check if layout has a separate /usr partition
 #[allow(dead_code)]
 pub fn has_usr_partition(layout: &PartitionLayout) -> bool {
-    matches!(layout, PartitionLayout::Standard | PartitionLayout::CryptoSubvolume)
+    matches!(layout, PartitionLayout::Standard)
 }
 
 /// Print layout summary

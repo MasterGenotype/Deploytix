@@ -27,7 +27,7 @@ pub struct DiskConfig {
     /// Filesystem type
     #[serde(default)]
     pub filesystem: Filesystem,
-    /// Enable LUKS encryption
+    /// Enable LUKS encryption on data partitions (Root, Usr, Var, Home for Standard layout)
     #[serde(default)]
     pub encryption: bool,
     /// Encryption password (if encryption enabled)
@@ -45,9 +45,40 @@ pub struct DiskConfig {
     /// Path to keyfile (None = password prompt)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyfile_path: Option<String>,
-    /// Enable keyfile-based automatic unlocking (default: true for CryptoSubvolume)
+    /// Enable keyfile-based automatic unlocking (default: true when encryption enabled)
     #[serde(default = "default_true")]
     pub keyfile_enabled: bool,
+    /// Use btrfs subvolumes within partitions (Standard layout only)
+    #[serde(default)]
+    pub use_subvolumes: bool,
+    
+    // LVM Thin Provisioning options
+    /// Use LVM thin provisioning (for LvmThin layout)
+    #[serde(default)]
+    pub use_lvm_thin: bool,
+    /// Volume group name (default: "vg0")
+    #[serde(default = "default_vg_name")]
+    pub lvm_vg_name: String,
+    /// Thin pool name (default: "thinpool")
+    #[serde(default = "default_thin_pool_name")]
+    pub lvm_thin_pool_name: String,
+    /// Thin pool size as percentage of VG (default: 95%)
+    #[serde(default = "default_thin_pool_percent")]
+    pub lvm_thin_pool_percent: u8,
+    
+    // Swap configuration
+    /// Swap configuration type
+    #[serde(default)]
+    pub swap_type: SwapType,
+    /// Swap file size in MiB (only for FileZram, 0 = auto-calculate based on RAM)
+    #[serde(default)]
+    pub swap_file_size_mib: u64,
+    /// ZRAM size as percentage of RAM (default: 50%)
+    #[serde(default = "default_zram_percent")]
+    pub zram_percent: u8,
+    /// ZRAM compression algorithm (default: "zstd")
+    #[serde(default = "default_zram_algorithm")]
+    pub zram_algorithm: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +104,17 @@ pub struct SystemConfig {
     /// Enable hibernation support
     #[serde(default)]
     pub hibernation: bool,
+    
+    // SecureBoot options
+    /// Enable SecureBoot signing
+    #[serde(default)]
+    pub secureboot: bool,
+    /// SecureBoot key management method
+    #[serde(default)]
+    pub secureboot_method: SecureBootMethod,
+    /// Path to existing keys directory (for ManualKeys method)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secureboot_keys_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,14 +154,15 @@ pub struct DesktopConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PartitionLayout {
     /// Standard 7-partition layout (EFI, Boot, Swap, Root, Usr, Var, Home)
+    /// Supports optional encryption (LUKS2 on Root/Usr/Var/Home) and/or btrfs subvolumes.
     #[default]
     Standard,
-    /// Minimal layout (EFI, Swap, Root)
+    /// Minimal 4-partition layout (EFI, Boot, Swap, Root with btrfs subvolumes)
+    /// Supports both UEFI and Legacy BIOS boot.
     Minimal,
-    /// Multi-volume encrypted layout (EFI, Boot, Swap, LUKS-Root, LUKS-Usr, LUKS-Var, LUKS-Home)
-    /// Each of Root, Usr, Var, Home is a separate LUKS2 encrypted partition with keyfile-based
-    /// automatic unlocking during initramfs.
-    CryptoSubvolume,
+    /// LVM Thin Provisioning layout (EFI, Boot, optional Swap, LUKS+LVM PV)
+    /// Thin LVs for root, usr, var, home with space-efficient overprovisioning.
+    LvmThin,
     /// Custom layout (advanced)
     Custom,
 }
@@ -128,9 +171,55 @@ impl std::fmt::Display for PartitionLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Standard => write!(f, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)"),
-            Self::Minimal => write!(f, "Minimal (EFI, Swap, Root)"),
-            Self::CryptoSubvolume => write!(f, "Encrypted Multi-Volume (separate LUKS for Root, Usr, Var, Home)"),
+            Self::Minimal => write!(f, "Minimal (EFI, Boot, Swap, Root with subvolumes)"),
+            Self::LvmThin => write!(f, "LVM Thin (EFI, Boot, LUKS+LVM with thin provisioning)"),
             Self::Custom => write!(f, "Custom"),
+        }
+    }
+}
+
+/// Swap configuration type
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SwapType {
+    /// Traditional swap partition
+    #[default]
+    Partition,
+    /// Swap file + ZRAM (no swap partition)
+    FileZram,
+    /// ZRAM only (no persistent swap)
+    ZramOnly,
+}
+
+impl std::fmt::Display for SwapType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Partition => write!(f, "Swap Partition"),
+            Self::FileZram => write!(f, "Swap File + ZRAM"),
+            Self::ZramOnly => write!(f, "ZRAM Only"),
+        }
+    }
+}
+
+/// SecureBoot key management method
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SecureBootMethod {
+    /// Use sbctl for key management (easiest)
+    #[default]
+    Sbctl,
+    /// User provides PK, KEK, db keys
+    ManualKeys,
+    /// Use shim-signed with MOK enrollment
+    Shim,
+}
+
+impl std::fmt::Display for SecureBootMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sbctl => write!(f, "sbctl (automatic key management)"),
+            Self::ManualKeys => write!(f, "Manual Keys (provide your own)"),
+            Self::Shim => write!(f, "Shim (MOK enrollment)"),
         }
     }
 }
@@ -291,6 +380,26 @@ fn default_luks_boot_mapper_name() -> String {
     "Crypt-Boot".to_string()
 }
 
+fn default_vg_name() -> String {
+    "vg0".to_string()
+}
+
+fn default_thin_pool_name() -> String {
+    "thinpool".to_string()
+}
+
+fn default_thin_pool_percent() -> u8 {
+    95
+}
+
+fn default_zram_percent() -> u8 {
+    50
+}
+
+fn default_zram_algorithm() -> String {
+    "zstd".to_string()
+}
+
 fn default_groups() -> Vec<String> {
     vec![
         "wheel".to_string(),
@@ -346,14 +455,14 @@ impl DeploymentConfig {
         let layouts = [
             PartitionLayout::Standard,
             PartitionLayout::Minimal,
-            PartitionLayout::CryptoSubvolume,
+            PartitionLayout::LvmThin,
         ];
         let layout_idx = prompt_select("Partition layout", &layouts, 0)?;
         let layout = layouts[layout_idx].clone();
 
-        // Filesystem (auto-select btrfs for CryptoSubvolume)
-        let filesystem = if layout == PartitionLayout::CryptoSubvolume {
-            println!("  Filesystem: btrfs (required for CryptoSubvolume layout)");
+        // Filesystem (LvmThin requires btrfs)
+        let filesystem = if layout == PartitionLayout::LvmThin {
+            println!("  LvmThin layout uses btrfs filesystem.");
             Filesystem::Btrfs
         } else {
             let filesystems = [Filesystem::Btrfs, Filesystem::Ext4, Filesystem::Xfs, Filesystem::F2fs];
@@ -361,15 +470,25 @@ impl DeploymentConfig {
             filesystems[fs_idx].clone()
         };
 
-        // Encryption (auto-enable for CryptoSubvolume)
-        let encryption = if layout == PartitionLayout::CryptoSubvolume {
-            println!("  Encryption: enabled (required for CryptoSubvolume layout)");
+        // Encryption option (required for LvmThin, optional for Standard)
+        let encryption = if layout == PartitionLayout::LvmThin {
+            println!("  LvmThin layout uses LUKS encryption.");
             true
+        } else if layout == PartitionLayout::Standard {
+            prompt_confirm("Enable LUKS encryption on data partitions?", false)?
         } else {
-            prompt_confirm("Enable LUKS encryption?", false)?
+            false // Minimal layout doesn't support encryption currently
         };
+
+        // Subvolumes option (for Standard layout with btrfs)
+        let use_subvolumes = if layout == PartitionLayout::Standard && filesystem == Filesystem::Btrfs {
+            prompt_confirm("Use btrfs subvolumes within partitions?", false)?
+        } else {
+            layout == PartitionLayout::Minimal // Minimal always uses subvolumes
+        };
+
         // Boot encryption (LUKS1 on separate /boot partition)
-        let boot_encryption = if encryption && layout == PartitionLayout::CryptoSubvolume {
+        let boot_encryption = if encryption && layout == PartitionLayout::Standard {
             prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
         } else {
             false
@@ -417,6 +536,24 @@ impl DeploymentConfig {
         let de_idx = prompt_select("Desktop environment", &desktops, 0)?;
         let environment = desktops[de_idx].clone();
 
+        // Swap type selection
+        let swap_types = [SwapType::Partition, SwapType::FileZram, SwapType::ZramOnly];
+        let swap_idx = prompt_select("Swap configuration", &swap_types, 0)?;
+        let swap_type = swap_types[swap_idx].clone();
+
+        // LVM thin provisioning (for LvmThin layout)
+        let use_lvm_thin = layout == PartitionLayout::LvmThin;
+
+        // SecureBoot option
+        let secureboot = prompt_confirm("Enable SecureBoot signing?", false)?;
+        let secureboot_method = if secureboot {
+            let methods = [SecureBootMethod::Sbctl, SecureBootMethod::ManualKeys, SecureBootMethod::Shim];
+            let method_idx = prompt_select("SecureBoot method", &methods, 0)?;
+            methods[method_idx].clone()
+        } else {
+            SecureBootMethod::default()
+        };
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -428,7 +565,16 @@ impl DeploymentConfig {
                 boot_encryption,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
-                keyfile_enabled: layout == PartitionLayout::CryptoSubvolume,
+                keyfile_enabled: encryption, // Enable keyfiles when encryption is enabled
+                use_subvolumes,
+                use_lvm_thin,
+                lvm_vg_name: default_vg_name(),
+                lvm_thin_pool_name: default_thin_pool_name(),
+                lvm_thin_pool_percent: default_thin_pool_percent(),
+                swap_type,
+                swap_file_size_mib: 0, // Auto-calculate
+                zram_percent: default_zram_percent(),
+                zram_algorithm: default_zram_algorithm(),
             },
             system: SystemConfig {
                 init,
@@ -438,6 +584,9 @@ impl DeploymentConfig {
                 keymap,
                 hostname,
                 hibernation: false,
+                secureboot,
+                secureboot_method,
+                secureboot_keys_path: None,
             },
             user: UserConfig {
                 name: username,
@@ -467,6 +616,15 @@ impl DeploymentConfig {
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
                 keyfile_enabled: false,
+                use_subvolumes: false,
+                use_lvm_thin: false,
+                lvm_vg_name: default_vg_name(),
+                lvm_thin_pool_name: default_thin_pool_name(),
+                lvm_thin_pool_percent: default_thin_pool_percent(),
+                swap_type: SwapType::Partition,
+                swap_file_size_mib: 0,
+                zram_percent: default_zram_percent(),
+                zram_algorithm: default_zram_algorithm(),
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -476,6 +634,9 @@ impl DeploymentConfig {
                 keymap: "us".to_string(),
                 hostname: "artix".to_string(),
                 hibernation: false,
+                secureboot: false,
+                secureboot_method: SecureBootMethod::Sbctl,
+                secureboot_keys_path: None,
             },
             user: UserConfig {
                 name: "user".to_string(),
@@ -532,30 +693,62 @@ impl DeploymentConfig {
             ));
         }
 
-        // CryptoSubvolume layout requires encryption and btrfs
-        if self.disk.layout == PartitionLayout::CryptoSubvolume {
-            if !self.disk.encryption {
-                return Err(DeploytixError::ValidationError(
-                    "CryptoSubvolume layout requires encryption to be enabled".to_string(),
-                ));
-            }
-            if self.disk.filesystem != Filesystem::Btrfs {
-                return Err(DeploytixError::ValidationError(
-                    "CryptoSubvolume layout requires btrfs filesystem".to_string(),
-                ));
-            }
+        // Subvolumes require btrfs filesystem
+        if self.disk.use_subvolumes && self.disk.filesystem != Filesystem::Btrfs {
+            return Err(DeploytixError::ValidationError(
+                "Subvolumes require btrfs filesystem".to_string(),
+            ));
         }
 
-        // Boot encryption requires CryptoSubvolume layout with encryption enabled
+        // Encryption supported on Standard and LvmThin layouts
+        if self.disk.encryption && self.disk.layout != PartitionLayout::Standard && self.disk.layout != PartitionLayout::LvmThin {
+            return Err(DeploytixError::ValidationError(
+                "Encryption is only supported on Standard and LvmThin layouts".to_string(),
+            ));
+        }
+
+        // Boot encryption requires Standard layout with encryption enabled
         if self.disk.boot_encryption {
-            if self.disk.layout != PartitionLayout::CryptoSubvolume {
+            if self.disk.layout != PartitionLayout::Standard {
                 return Err(DeploytixError::ValidationError(
-                    "Boot encryption requires CryptoSubvolume layout".to_string(),
+                    "Boot encryption requires Standard layout".to_string(),
                 ));
             }
             if !self.disk.encryption {
                 return Err(DeploytixError::ValidationError(
                     "Boot encryption requires disk encryption to be enabled".to_string(),
+                ));
+            }
+        }
+
+        // LvmThin layout requires encryption
+        if self.disk.layout == PartitionLayout::LvmThin && !self.disk.encryption {
+            return Err(DeploytixError::ValidationError(
+                "LvmThin layout requires encryption to be enabled".to_string(),
+            ));
+        }
+
+        // LvmThin layout requires btrfs filesystem
+        if self.disk.layout == PartitionLayout::LvmThin && self.disk.filesystem != Filesystem::Btrfs {
+            return Err(DeploytixError::ValidationError(
+                "LvmThin layout requires btrfs filesystem".to_string(),
+            ));
+        }
+
+        // Swap file requires btrfs or ext4 filesystem
+        if self.disk.swap_type == SwapType::FileZram {
+            if self.disk.filesystem != Filesystem::Btrfs && self.disk.filesystem != Filesystem::Ext4 {
+                return Err(DeploytixError::ValidationError(
+                    "Swap file requires btrfs or ext4 filesystem".to_string(),
+                ));
+            }
+        }
+
+        // SecureBoot with ManualKeys requires keys path
+        if self.system.secureboot && self.system.secureboot_method == SecureBootMethod::ManualKeys {
+            if self.system.secureboot_keys_path.is_none() {
+                return Err(DeploytixError::ValidationError(
+                    "SecureBoot with ManualKeys method requires secureboot_keys_path".to_string(),
                 ));
             }
         }

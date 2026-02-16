@@ -282,6 +282,45 @@ pub fn get_luks_uuid(device: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Setup LUKS2 encryption for a single partition
+///
+/// Creates and opens a LUKS2 container on the specified device.
+/// Used for LVM thin provisioning layout where a single LUKS container holds the LVM PV.
+pub fn setup_single_luks(
+    cmd: &CommandRunner,
+    device: &str,
+    password: &str,
+    mapper_name: &str,
+) -> Result<LuksContainer> {
+    let mapped_path = format!("/dev/mapper/{}", mapper_name);
+
+    info!("Setting up LUKS2 encryption on {} (mapper: {})", device, mapper_name);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", device);
+        println!("  [dry-run] cryptsetup open {} {}", device, mapper_name);
+        return Ok(LuksContainer {
+            device: device.to_string(),
+            mapper_name: mapper_name.to_string(),
+            mapped_path,
+        });
+    }
+
+    // Format LUKS container
+    luks_format(device, password)?;
+
+    // Open LUKS container
+    luks_open(device, mapper_name, password)?;
+
+    info!("LUKS2 encryption setup complete: {} -> {}", device, mapped_path);
+
+    Ok(LuksContainer {
+        device: device.to_string(),
+        mapper_name: mapper_name.to_string(),
+        mapped_path,
+    })
+}
+
 /// Setup LUKS2 encryption for multiple partitions (multi-volume encryption)
 ///
 /// Creates and opens LUKS containers for ROOT, USR, VAR, and HOME partitions.

@@ -75,33 +75,28 @@ pub fn disk_config_panel(
         .selected_text(format!("{}", layout))
         .show_ui(ui, |ui| {
             ui.selectable_value(layout, PartitionLayout::Standard, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)");
-            ui.selectable_value(layout, PartitionLayout::Minimal, "Minimal (EFI, Swap, Root)");
-            ui.selectable_value(layout, PartitionLayout::CryptoSubvolume, "Encrypted Multi-Volume (separate LUKS volumes)");
+            ui.selectable_value(layout, PartitionLayout::Minimal, "Minimal (EFI, Boot, Swap, Root with subvolumes)");
         });
     ui.add_space(8.0);
 
-    // Auto-configure for CryptoSubvolume
-    if *layout == PartitionLayout::CryptoSubvolume {
-        *filesystem = Filesystem::Btrfs;
-        *encryption = true;
-        ui.label(RichText::new("ℹ CryptoSubvolume requires btrfs and encryption").italics());
+    // Filesystem
+    ui.label("Filesystem:");
+    egui::ComboBox::from_id_salt("filesystem")
+        .selected_text(format!("{}", filesystem))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
+            ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
+            ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
+            ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
+        });
+    ui.add_space(8.0);
+
+    // Encryption (only for Standard layout)
+    if *layout == PartitionLayout::Standard {
+        ui.checkbox(encryption, "Enable LUKS encryption on data partitions");
         ui.add_space(8.0);
     } else {
-        // Filesystem
-        ui.label("Filesystem:");
-        egui::ComboBox::from_id_salt("filesystem")
-            .selected_text(format!("{}", filesystem))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
-                ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
-                ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
-                ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
-            });
-        ui.add_space(8.0);
-
-        // Encryption
-        ui.checkbox(encryption, "Enable LUKS encryption");
-        ui.add_space(8.0);
+        *encryption = false;
     }
 
     // Encryption password
@@ -110,10 +105,8 @@ pub fn disk_config_panel(
         ui.add(egui::TextEdit::singleline(encryption_password).password(true));
         ui.add_space(8.0);
 
-        if *layout == PartitionLayout::CryptoSubvolume {
-            ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
-            ui.add_space(8.0);
-        }
+        ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
+        ui.add_space(8.0);
     } else {
         *boot_encryption = false;
     }

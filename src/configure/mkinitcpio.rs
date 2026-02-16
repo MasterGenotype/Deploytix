@@ -34,6 +34,13 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
         ]);
     }
 
+    // LVM thin provisioning modules
+    if config.disk.layout == PartitionLayout::LvmThin {
+        modules.extend([
+            "dm_thin_pool".to_string(),
+        ]);
+    }
+
     modules
 }
 
@@ -54,24 +61,39 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         "consolefont".to_string(),
     ]);
 
-    // lvm2 hook provides device-mapper support required by encryption hooks
-    if config.disk.encryption {
+    // lvm2 hook provides device-mapper support required by encryption and LVM
+    if config.disk.encryption || config.disk.layout == PartitionLayout::LvmThin {
         hooks.push("lvm2".to_string());
     }
 
-    // For CryptoSubvolume layout, use custom hooks
-    if config.disk.layout == PartitionLayout::CryptoSubvolume && config.disk.encryption {
+    // For encrypted Standard layout, use custom hooks
+    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
         // Custom hooks handle encryption and mounting
         hooks.push("crypttab-unlock".to_string());
         hooks.push("mountcrypt".to_string());
         // Note: filesystems hook is NOT needed when using mountcrypt
         // as mountcrypt handles all mounting
-    } else {
-        // Standard encryption hook for other layouts
+    } else if config.disk.layout == PartitionLayout::LvmThin {
+        // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
         if config.disk.encryption {
             hooks.push("encrypt".to_string());
         }
+        // lvm2 hook is already added above
 
+        // Filesystem-specific hooks
+        if config.disk.filesystem == Filesystem::Btrfs {
+            hooks.push("btrfs".to_string());
+        }
+
+        hooks.push("filesystems".to_string());
+        hooks.push("fsck".to_string());
+
+        // Resume hook for hibernation (for swap partition or swap file)
+        if config.system.hibernation {
+            let filesystems_idx = hooks.iter().position(|h| h == "filesystems").unwrap_or(hooks.len());
+            hooks.insert(filesystems_idx, "resume".to_string());
+        }
+    } else {
         // Filesystem-specific hooks
         if config.disk.filesystem == Filesystem::Btrfs {
             hooks.push("btrfs".to_string());
@@ -81,7 +103,7 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("filesystems".to_string());
         hooks.push("fsck".to_string());
 
-        // Separate /usr partition hook
+        // Separate /usr partition hook (Standard layout has separate partitions)
         if config.disk.layout == PartitionLayout::Standard {
             hooks.push("usr".to_string());
         }
@@ -108,7 +130,7 @@ pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
 
     // Include /etc/crypttab in the initramfs so the crypttab-unlock hook can
     // parse it at early boot and open LUKS containers.
-    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
+    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
         files.push("/etc/crypttab".to_string());
 
         // Include keyfiles for automatic unlocking during initramfs
@@ -124,6 +146,11 @@ pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
+    // For LvmThin layout with encryption, include LUKS keyfile
+    if config.disk.encryption && config.disk.layout == PartitionLayout::LvmThin {
+        files.push("/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
+    }
+
     files
 }
 
@@ -136,7 +163,7 @@ pub fn construct_files_with_keyfiles(
     let mut files = Vec::new();
 
     // Include /etc/crypttab in the initramfs
-    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
+    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
         files.push("/etc/crypttab".to_string());
 
         // Include all provided keyfiles
@@ -233,8 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn crypto_subvolume_uses_custom_hooks() {
-        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+    fn standard_encrypted_uses_custom_hooks() {
+        let cfg = config_with(PartitionLayout::Standard, true);
         let hooks = construct_hooks(&cfg);
         assert!(hooks.contains(&"crypttab-unlock".to_string()));
         assert!(hooks.contains(&"mountcrypt".to_string()));
@@ -244,26 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_uses_encrypt_hook() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn minimal_unencrypted_has_filesystems_hook() {
+        let cfg = config_with(PartitionLayout::Minimal, false);
         let hooks = construct_hooks(&cfg);
-        assert!(hooks.contains(&"encrypt".to_string()));
-        assert!(hooks.contains(&"filesystems".to_string()));
-        assert!(hooks.contains(&"usr".to_string()));
-        // Must NOT include custom hooks
-        assert!(!hooks.contains(&"crypttab-unlock".to_string()));
-        assert!(!hooks.contains(&"mountcrypt".to_string()));
-    }
-
-    #[test]
-    fn minimal_encrypted_uses_encrypt_hook() {
-        let cfg = config_with(PartitionLayout::Minimal, true);
-        let hooks = construct_hooks(&cfg);
-        assert!(hooks.contains(&"encrypt".to_string()));
         assert!(hooks.contains(&"filesystems".to_string()));
         assert!(!hooks.contains(&"crypttab-unlock".to_string()));
         assert!(!hooks.contains(&"mountcrypt".to_string()));
-        assert!(!hooks.contains(&"usr".to_string()));
+        assert!(!hooks.contains(&"usr".to_string())); // Minimal doesn't have separate /usr
     }
 
     #[test]
@@ -277,8 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn crypto_subvolume_hook_ordering() {
-        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+    fn standard_encrypted_hook_ordering() {
+        let cfg = config_with(PartitionLayout::Standard, true);
         let hooks = construct_hooks(&cfg);
         let lvm2_pos = hooks.iter().position(|h| h == "lvm2").unwrap();
         let unlock_pos = hooks.iter().position(|h| h == "crypttab-unlock").unwrap();
@@ -289,8 +303,8 @@ mod tests {
     }
 
     #[test]
-    fn crypto_subvolume_files_include_crypttab_and_keyfiles() {
-        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+    fn standard_encrypted_files_include_crypttab_and_keyfiles() {
+        let cfg = config_with(PartitionLayout::Standard, true);
         let files = construct_files(&cfg);
         assert!(files.contains(&"/etc/crypttab".to_string()));
         assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptroot.key".to_string()));
@@ -300,17 +314,17 @@ mod tests {
     }
 
     #[test]
-    fn crypto_subvolume_boot_encryption_includes_boot_keyfile() {
-        let mut cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+    fn standard_encrypted_boot_encryption_includes_boot_keyfile() {
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.boot_encryption = true;
         let files = construct_files(&cfg);
         assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()));
     }
 
     #[test]
-    fn standard_encrypted_no_files() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn minimal_unencrypted_no_files() {
+        let cfg = config_with(PartitionLayout::Minimal, false);
         let files = construct_files(&cfg);
-        assert!(files.is_empty(), "Standard layout should not embed crypttab/keyfiles");
+        assert!(files.is_empty(), "Unencrypted Minimal layout should not embed crypttab/keyfiles");
     }
 }

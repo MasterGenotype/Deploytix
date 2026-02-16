@@ -128,6 +128,24 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("lvm2".to_string());
     }
 
+    // thin-provisioning-tools for LVM thin provisioning
+    if config.disk.layout == crate::config::PartitionLayout::LvmThin {
+        packages.push("thin-provisioning-tools".to_string());
+    }
+
+    // SecureBoot tools (if enabled)
+    if config.system.secureboot {
+        match config.system.secureboot_method {
+            crate::config::SecureBootMethod::Sbctl => {
+                packages.push("sbctl".to_string());
+            }
+            crate::config::SecureBootMethod::ManualKeys | crate::config::SecureBootMethod::Shim => {
+                packages.push("sbsigntools".to_string());
+                packages.push("efitools".to_string());
+            }
+        }
+    }
+
     packages
 }
 

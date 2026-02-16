@@ -2,7 +2,8 @@
 
 use crate::config::{
     Bootloader, DeploymentConfig, DesktopConfig, DesktopEnvironment, DiskConfig, Filesystem,
-    InitSystem, NetworkBackend, NetworkConfig, PartitionLayout, SystemConfig, UserConfig,
+    InitSystem, NetworkBackend, NetworkConfig, PartitionLayout, SecureBootMethod, SwapType,
+    SystemConfig, UserConfig,
 };
 use crate::disk::detection::{list_block_devices, BlockDevice};
 use crate::install::Installer;
@@ -87,6 +88,9 @@ pub struct DeploytixGui {
     encryption: bool,
     encryption_password: String,
     boot_encryption: bool,
+    // Swap configuration
+    swap_type: SwapType,
+    zram_percent: u8,
 
     // System config
     init_system: InitSystem,
@@ -95,6 +99,9 @@ pub struct DeploytixGui {
     locale: String,
     keymap: String,
     hostname: String,
+    // SecureBoot
+    secureboot: bool,
+    secureboot_method: SecureBootMethod,
 
     // User config
     username: String,
@@ -132,6 +139,8 @@ impl Default for DeploytixGui {
             encryption: false,
             encryption_password: String::new(),
             boot_encryption: false,
+            swap_type: SwapType::Partition,
+            zram_percent: 50,
 
             init_system: InitSystem::Runit,
             bootloader: Bootloader::Grub,
@@ -139,6 +148,8 @@ impl Default for DeploytixGui {
             locale: "en_US.UTF-8".to_string(),
             keymap: "us".to_string(),
             hostname: "artix".to_string(),
+            secureboot: false,
+            secureboot_method: SecureBootMethod::Sbctl,
 
             username: String::new(),
             user_password: String::new(),
@@ -202,7 +213,18 @@ impl DeploytixGui {
                 boot_encryption: self.boot_encryption,
                 luks_boot_mapper_name: "Crypt-Boot".to_string(),
                 keyfile_path: None,
-                keyfile_enabled: self.partition_layout == PartitionLayout::CryptoSubvolume,
+                keyfile_enabled: self.encryption,
+                use_subvolumes: self.partition_layout == PartitionLayout::Minimal,
+                // LVM thin provisioning defaults
+                use_lvm_thin: self.partition_layout == PartitionLayout::LvmThin,
+                lvm_vg_name: "vg0".to_string(),
+                lvm_thin_pool_name: "thinpool".to_string(),
+                lvm_thin_pool_percent: 95,
+                // Swap configuration
+                swap_type: self.swap_type.clone(),
+                swap_file_size_mib: 0, // Auto-calculate
+                zram_percent: self.zram_percent,
+                zram_algorithm: "zstd".to_string(),
             },
             system: SystemConfig {
                 init: self.init_system.clone(),
@@ -212,6 +234,10 @@ impl DeploytixGui {
                 keymap: self.keymap.clone(),
                 hostname: self.hostname.clone(),
                 hibernation: false,
+                // SecureBoot
+                secureboot: self.secureboot,
+                secureboot_method: self.secureboot_method.clone(),
+                secureboot_keys_path: None,
             },
             user: UserConfig {
                 name: self.username.clone(),
@@ -451,6 +477,8 @@ impl eframe::App for DeploytixGui {
                         &mut self.encryption,
                         &mut self.encryption_password,
                         &mut self.boot_encryption,
+                        &mut self.swap_type,
+                        &mut self.zram_percent,
                     )
                 }
                 WizardStep::SystemConfig => {
@@ -462,6 +490,8 @@ impl eframe::App for DeploytixGui {
                         &mut self.locale,
                         &mut self.keymap,
                         &mut self.hostname,
+                        &mut self.secureboot,
+                        &mut self.secureboot_method,
                     )
                 }
                 WizardStep::UserConfig => {
@@ -493,8 +523,10 @@ impl eframe::App for DeploytixGui {
                         &self.partition_layout,
                         &self.filesystem,
                         self.encryption,
+                        &self.swap_type,
                         &self.init_system,
                         &self.bootloader,
+                        self.secureboot,
                         &self.hostname,
                         &self.username,
                         &self.network_backend,

@@ -47,13 +47,20 @@ fn install_grub(
     info!("Installing GRUB bootloader to {} (x86_64-efi)", device);
 
     // Get root partition - find it dynamically based on layout
+    // For encrypted Standard layout, should use install_grub_with_layout
+    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+        return Err(crate::utils::error::DeploytixError::ConfigError(
+            "Encrypted Standard layout requires install_bootloader_with_layout".to_string()
+        ));
+    }
+
     let root_partition_num = match config.disk.layout {
         PartitionLayout::Standard => 4,  // Root is partition 4 in standard layout
-        PartitionLayout::Minimal => 3,   // Root is partition 3 in minimal layout
-        PartitionLayout::CryptoSubvolume => {
-            // For encrypted systems, should use install_grub_with_layout
+        PartitionLayout::Minimal => 4,   // Root is partition 4 in minimal layout (EFI, Boot, Swap, Root)
+        PartitionLayout::LvmThin => {
+            // LvmThin should use install_bootloader_with_layout
             return Err(crate::utils::error::DeploytixError::ConfigError(
-                "CryptoSubvolume layout requires install_bootloader_with_layout".to_string()
+                "LvmThin layout requires install_bootloader_with_layout".to_string()
             ));
         }
         PartitionLayout::Custom => 4,    // Assume standard for custom
@@ -101,14 +108,19 @@ fn install_grub_with_layout(
         };
 
         // Configure GRUB defaults for encrypted system
-        // Check if layout uses subvolumes (Minimal does, Standard/CryptoSubvolume don't)
+        // Check if layout uses subvolumes (Minimal does, encrypted Standard doesn't)
         configure_grub_defaults(cmd, config, &luks_uuid, Some(&config.disk.luks_mapper_name), layout.uses_subvolumes(), install_root)?;
     } else {
         // Fall back to non-encrypted
         return install_grub(cmd, config, device, install_root);
     }
 
-    run_grub_install(cmd, device, install_root)?;
+    // Use SecureBoot-aware install if SecureBoot is enabled
+    if config.system.secureboot {
+        run_grub_install_with_secureboot(cmd, config, device, install_root)?;
+    } else {
+        run_grub_install(cmd, device, install_root)?;
+    }
 
     info!("GRUB installation complete");
     Ok(())
@@ -139,6 +151,25 @@ fn run_grub_install(
 
     // Create EFI boot entry using efibootmgr (required for bootable system)
     create_efi_boot_entry(cmd, device, 1, "Artix Linux")?;
+
+    Ok(())
+}
+
+/// Run grub-install with SecureBoot signing
+pub fn run_grub_install_with_secureboot(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    device: &str,
+    install_root: &str,
+) -> Result<()> {
+    // First, run standard GRUB install
+    run_grub_install(cmd, device, install_root)?;
+
+    // Then sign the EFI binaries if SecureBoot is enabled
+    if config.system.secureboot {
+        info!("Signing GRUB for SecureBoot");
+        crate::configure::secureboot::sign_boot_files(cmd, config, install_root)?;
+    }
 
     Ok(())
 }
@@ -204,24 +235,12 @@ fn configure_grub_defaults(
     let mut cmdline_parts = vec!["quiet".to_string()];
 
     if let Some(mapper) = mapper_name {
-        // Encrypted system
-        if config.disk.layout == PartitionLayout::CryptoSubvolume {
-            // CryptoSubvolume uses custom hooks (crypttab-unlock + mountcrypt)
-            // NOT the standard encrypt hook, so we don't use cryptdevice= parameter.
-            // The mountcrypt hook's mount_handler handles all mounting.
-            // Set root= to the mapper device so mkinitcpio knows what to pass to mount_handler.
-            cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
-            cmdline_parts.push("rw".to_string());
-        } else {
-            // Standard/Minimal layouts use the encrypt hook with cryptdevice=
-            cmdline_parts.push(format!("cryptdevice=UUID={}:{}", root_or_luks_uuid, mapper));
-            cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
-            // Only add rootflags=subvol=@ if layout uses btrfs subvolumes
-            if uses_subvolumes {
-                cmdline_parts.push("rootflags=subvol=@".to_string());
-            }
-            cmdline_parts.push("rw".to_string());
-        }
+        // Encrypted system uses custom hooks (crypttab-unlock + mountcrypt)
+        // NOT the standard encrypt hook, so we don't use cryptdevice= parameter.
+        // The mountcrypt hook's mount_handler handles all mounting.
+        // Set root= to the mapper device so mkinitcpio knows what to pass to mount_handler.
+        cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
+        cmdline_parts.push("rw".to_string());
     } else {
         // Non-encrypted system
         cmdline_parts.push(format!("root=UUID={}", root_or_luks_uuid));
@@ -278,12 +297,20 @@ fn install_systemd_boot(
     // This is included for completeness but may not work on pure Artix
 
     // Get root partition dynamically based on layout
+    // Encrypted systems should use GRUB instead
+    if config.disk.encryption {
+        return Err(crate::utils::error::DeploytixError::ConfigError(
+            "systemd-boot is not supported with encrypted layouts (use GRUB)".to_string()
+        ));
+    }
+
     let root_partition_num = match config.disk.layout {
         PartitionLayout::Standard => 4,
-        PartitionLayout::Minimal => 3,
-        PartitionLayout::CryptoSubvolume => {
+        PartitionLayout::Minimal => 4,  // Root is partition 4 (EFI, Boot, Swap, Root)
+        PartitionLayout::LvmThin => {
+            // LvmThin requires encryption which uses GRUB, so this shouldn't be reached
             return Err(crate::utils::error::DeploytixError::ConfigError(
-                "systemd-boot is not supported with CryptoSubvolume layout (use GRUB)".to_string()
+                "systemd-boot is not supported with LvmThin layout (use GRUB)".to_string()
             ));
         }
         PartitionLayout::Custom => 4,
