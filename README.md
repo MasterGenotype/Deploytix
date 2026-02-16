@@ -1,13 +1,13 @@
 # Deploytix
 
-A portable Rust CLI and GUI application for automated deployment of Artix Linux to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional multi-volume LUKS2 encryption.
+A portable Rust CLI and GUI application for automated deployment of Artix Linux (and generally Arch-based distributions) to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional multi-volume LUKS2 encryption.
 
 ## Features
 
 - **Fully Portable**: Single static binary built with musl — no external runtime dependencies
 - **CLI & GUI**: Interactive CLI wizard or egui-based graphical step-by-step installer
 - **Configuration-Driven**: TOML-based configs for reproducible, unattended installations
-- **Dynamic Partitioning**: Auto-adjusts partition sizes relative to disk capacity and RAM
+- **Proportional Partitioning**: Automatically sizes partitions using a weighted proportion relative to total disk capacity — larger disks get proportionally larger partitions for each mount point
 - **Multiple Init Systems**: runit, OpenRC, s6, dinit
 - **Filesystem Choice**: ext4, btrfs, xfs, f2fs
 - **Desktop Environments**: KDE Plasma, GNOME, XFCE, or headless/server
@@ -133,6 +133,8 @@ environment = "kde"       # kde, gnome, xfce, none
 ```
 
 ## Partition Layouts
+
+After allocating fixed-size partitions (EFI, Boot, Swap), the remaining disk space is distributed across data partitions using proportional weight differentials. Each partition receives a share of the remaining capacity based on its assigned weight, so the layout scales naturally from small drives to large ones — a 128 GiB disk and a 2 TiB disk both get sensible partition sizes without manual tuning.
 
 ### Standard (7-partition)
 
