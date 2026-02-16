@@ -66,10 +66,18 @@ fn generate_hooks(
 ) -> Result<Vec<GeneratedHook>> {
     let mut hooks = Vec::new();
 
-    // Custom hooks are only needed for CryptoSubvolume layout which uses
-    // separate LUKS containers for Root, Usr, Var, Home.  Other layouts
-    // rely on the standard `encrypt` hook for a single LUKS volume.
-    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
+    // Custom hooks are needed for layouts with multiple LUKS-encrypted
+    // partitions (Root, Usr, Var, Home).  The upstream `encrypt` hook can
+    // only unlock a single volume, so Standard and CryptoSubvolume both
+    // require crypttab-unlock + mountcrypt.  Minimal (single root) uses
+    // the upstream hook instead.
+    let needs_custom_hooks = config.disk.encryption
+        && matches!(
+            config.disk.layout,
+            PartitionLayout::Standard | PartitionLayout::CryptoSubvolume
+        );
+
+    if needs_custom_hooks {
         hooks.push(generate_crypttab_unlock_hook());
         hooks.push(generate_mountcrypt_hook(config, layout));
     }
@@ -550,17 +558,26 @@ mod tests {
     }
 
     #[test]
-    fn no_hooks_generated_for_standard_encrypted() {
+    fn hooks_generated_for_standard_encrypted() {
         let cfg = config_with(PartitionLayout::Standard, true);
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
-        assert!(hooks.is_empty(), "Standard layout should use the upstream encrypt hook, not custom hooks");
+        assert_eq!(hooks.len(), 2, "Standard+encryption needs custom hooks for multi-volume LUKS");
+        assert_eq!(hooks[0].name, "crypttab-unlock");
+        assert_eq!(hooks[1].name, "mountcrypt");
     }
 
     #[test]
     fn no_hooks_generated_for_minimal_encrypted() {
         let cfg = config_with(PartitionLayout::Minimal, true);
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
-        assert!(hooks.is_empty(), "Minimal layout should use the upstream encrypt hook, not custom hooks");
+        assert!(hooks.is_empty(), "Minimal layout should use the upstream encrypt hook (single volume)");
+    }
+
+    #[test]
+    fn no_hooks_generated_for_standard_unencrypted() {
+        let cfg = config_with(PartitionLayout::Standard, false);
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert!(hooks.is_empty(), "Unencrypted Standard needs no custom hooks");
     }
 
     #[test]
@@ -599,6 +616,17 @@ mod tests {
     fn mountcrypt_hook_mounts_all_crypto_subvolume_partitions() {
         let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
         let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Root"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Usr"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Var"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Home"));
+    }
+
+    #[test]
+    fn mountcrypt_hook_mounts_all_standard_partitions() {
+        let cfg = config_with(PartitionLayout::Standard, true);
+        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        // Standard has the same data partitions as CryptoSubvolume
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Root"));
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Usr"));
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Var"));
