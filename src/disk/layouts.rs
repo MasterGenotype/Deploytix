@@ -546,7 +546,7 @@ pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64) -> Result<Compute
 /// Check if layout has a separate /usr partition
 #[allow(dead_code)]
 pub fn has_usr_partition(layout: &PartitionLayout) -> bool {
-    matches!(layout, PartitionLayout::Standard)
+    matches!(layout, PartitionLayout::Standard | PartitionLayout::CryptoSubvolume)
 }
 
 /// Print layout summary

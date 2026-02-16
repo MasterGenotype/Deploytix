@@ -216,3 +216,101 @@ pub fn regenerate_initramfs(cmd: &CommandRunner, install_root: &str) -> Result<(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DeploymentConfig;
+
+    fn config_with(layout: PartitionLayout, encryption: bool) -> DeploymentConfig {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.layout = layout;
+        cfg.disk.encryption = encryption;
+        if encryption {
+            cfg.disk.encryption_password = Some("test".to_string());
+        }
+        cfg
+    }
+
+    #[test]
+    fn crypto_subvolume_uses_custom_hooks() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        let hooks = construct_hooks(&cfg);
+        assert!(hooks.contains(&"crypttab-unlock".to_string()));
+        assert!(hooks.contains(&"mountcrypt".to_string()));
+        // Must NOT include the standard encrypt or filesystems hooks
+        assert!(!hooks.contains(&"encrypt".to_string()));
+        assert!(!hooks.contains(&"filesystems".to_string()));
+    }
+
+    #[test]
+    fn standard_encrypted_uses_encrypt_hook() {
+        let cfg = config_with(PartitionLayout::Standard, true);
+        let hooks = construct_hooks(&cfg);
+        assert!(hooks.contains(&"encrypt".to_string()));
+        assert!(hooks.contains(&"filesystems".to_string()));
+        assert!(hooks.contains(&"usr".to_string()));
+        // Must NOT include custom hooks
+        assert!(!hooks.contains(&"crypttab-unlock".to_string()));
+        assert!(!hooks.contains(&"mountcrypt".to_string()));
+    }
+
+    #[test]
+    fn minimal_encrypted_uses_encrypt_hook() {
+        let cfg = config_with(PartitionLayout::Minimal, true);
+        let hooks = construct_hooks(&cfg);
+        assert!(hooks.contains(&"encrypt".to_string()));
+        assert!(hooks.contains(&"filesystems".to_string()));
+        assert!(!hooks.contains(&"crypttab-unlock".to_string()));
+        assert!(!hooks.contains(&"mountcrypt".to_string()));
+        assert!(!hooks.contains(&"usr".to_string()));
+    }
+
+    #[test]
+    fn unencrypted_standard_has_no_encrypt_hooks() {
+        let cfg = config_with(PartitionLayout::Standard, false);
+        let hooks = construct_hooks(&cfg);
+        assert!(!hooks.contains(&"encrypt".to_string()));
+        assert!(!hooks.contains(&"crypttab-unlock".to_string()));
+        assert!(!hooks.contains(&"lvm2".to_string()));
+        assert!(hooks.contains(&"filesystems".to_string()));
+    }
+
+    #[test]
+    fn crypto_subvolume_hook_ordering() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        let hooks = construct_hooks(&cfg);
+        let lvm2_pos = hooks.iter().position(|h| h == "lvm2").unwrap();
+        let unlock_pos = hooks.iter().position(|h| h == "crypttab-unlock").unwrap();
+        let mount_pos = hooks.iter().position(|h| h == "mountcrypt").unwrap();
+        // lvm2 must come before crypttab-unlock, which must come before mountcrypt
+        assert!(lvm2_pos < unlock_pos, "lvm2 must precede crypttab-unlock");
+        assert!(unlock_pos < mount_pos, "crypttab-unlock must precede mountcrypt");
+    }
+
+    #[test]
+    fn crypto_subvolume_files_include_crypttab_and_keyfiles() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        let files = construct_files(&cfg);
+        assert!(files.contains(&"/etc/crypttab".to_string()));
+        assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptroot.key".to_string()));
+        assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptusr.key".to_string()));
+        assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptvar.key".to_string()));
+        assert!(files.contains(&"/etc/cryptsetup-keys.d/crypthome.key".to_string()));
+    }
+
+    #[test]
+    fn crypto_subvolume_boot_encryption_includes_boot_keyfile() {
+        let mut cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        cfg.disk.boot_encryption = true;
+        let files = construct_files(&cfg);
+        assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()));
+    }
+
+    #[test]
+    fn standard_encrypted_no_files() {
+        let cfg = config_with(PartitionLayout::Standard, true);
+        let files = construct_files(&cfg);
+        assert!(files.is_empty(), "Standard layout should not embed crypttab/keyfiles");
+    }
+}

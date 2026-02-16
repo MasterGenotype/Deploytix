@@ -1,6 +1,6 @@
 //! Custom mkinitcpio hook generation
 
-use crate::config::DeploymentConfig;
+use crate::config::{DeploymentConfig, PartitionLayout};
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -66,7 +66,10 @@ fn generate_hooks(
 ) -> Result<Vec<GeneratedHook>> {
     let mut hooks = Vec::new();
 
-    if config.disk.encryption {
+    // Custom hooks are only needed for CryptoSubvolume layout which uses
+    // separate LUKS containers for Root, Usr, Var, Home.  Other layouts
+    // rely on the standard `encrypt` hook for a single LUKS volume.
+    if config.disk.encryption && config.disk.layout == PartitionLayout::CryptoSubvolume {
         hooks.push(generate_crypttab_unlock_hook());
         hooks.push(generate_mountcrypt_hook(config, layout));
     }
@@ -150,6 +153,11 @@ unlock_device() {
     if [ -n "$keyfile" ] && [ "$keyfile" != "none" ]; then
         cmd="$cmd --key-file $keyfile"
     fi
+
+    # Translate crypttab options to cryptsetup flags
+    case "$options" in
+        *discard*) cmd="$cmd --allow-discards" ;;
+    esac
 
     # Run the cryptsetup command
     echo "[crypttab-unlock] Running: $cmd"
@@ -269,7 +277,6 @@ run_hook() {
     return $ret
 }
 
-run_hook
 "#.to_string();
 
     let install_content = r#"#!/bin/bash
@@ -508,5 +515,123 @@ help() {
         name: "mountcrypt".to_string(),
         hook_content,
         install_content,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DeploymentConfig;
+
+    /// Helper: build a config with the given layout and encryption flag
+    fn config_with(layout: crate::config::PartitionLayout, encryption: bool) -> DeploymentConfig {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.layout = layout;
+        cfg.disk.encryption = encryption;
+        if encryption {
+            cfg.disk.encryption_password = Some("test".to_string());
+        }
+        cfg
+    }
+
+    fn dummy_layout() -> crate::disk::layouts::ComputedLayout {
+        crate::disk::layouts::ComputedLayout {
+            partitions: vec![],
+            total_mib: 0,
+            subvolumes: None,
+        }
+    }
+
+    #[test]
+    fn no_hooks_generated_without_encryption() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, false);
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn no_hooks_generated_for_standard_encrypted() {
+        let cfg = config_with(PartitionLayout::Standard, true);
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert!(hooks.is_empty(), "Standard layout should use the upstream encrypt hook, not custom hooks");
+    }
+
+    #[test]
+    fn no_hooks_generated_for_minimal_encrypted() {
+        let cfg = config_with(PartitionLayout::Minimal, true);
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert!(hooks.is_empty(), "Minimal layout should use the upstream encrypt hook, not custom hooks");
+    }
+
+    #[test]
+    fn hooks_generated_for_crypto_subvolume_encrypted() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].name, "crypttab-unlock");
+        assert_eq!(hooks[1].name, "mountcrypt");
+    }
+
+    #[test]
+    fn crypttab_unlock_hook_does_not_call_run_hook() {
+        let hook = generate_crypttab_unlock_hook();
+        // The hook must define run_hook() but must NOT call it at the top level.
+        // mkinitcpio's init sources the script and calls run_hook itself.
+        assert!(hook.hook_content.contains("run_hook()"));
+        // Ensure there is no bare `run_hook` invocation outside the function definition.
+        // Split on the closing brace of run_hook() body and check the remainder.
+        // The only occurrences of "run_hook" should be inside function definitions
+        // or comments, not as a standalone invocation at the end of the script.
+        let trailing = hook.hook_content.lines().last().unwrap_or("");
+        assert_ne!(trailing.trim(), "run_hook", "run_hook must not be called explicitly at script end");
+    }
+
+    #[test]
+    fn crypttab_unlock_hook_translates_discard_option() {
+        let hook = generate_crypttab_unlock_hook();
+        assert!(
+            hook.hook_content.contains("--allow-discards"),
+            "crypttab-unlock must translate the discard option to --allow-discards"
+        );
+    }
+
+    #[test]
+    fn mountcrypt_hook_mounts_all_crypto_subvolume_partitions() {
+        let cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Root"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Usr"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Var"));
+        assert!(hook.hook_content.contains("/dev/mapper/Crypt-Home"));
+    }
+
+    #[test]
+    fn mountcrypt_hook_encrypted_boot() {
+        let mut cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        cfg.disk.boot_encryption = true;
+        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        assert!(
+            hook.hook_content.contains("/dev/mapper/Crypt-Boot"),
+            "With boot_encryption, mountcrypt must mount encrypted /boot"
+        );
+        assert!(
+            !hook.hook_content.contains("LABEL=BOOT"),
+            "With boot_encryption, mountcrypt must not auto-detect unencrypted boot"
+        );
+    }
+
+    #[test]
+    fn mountcrypt_hook_unencrypted_boot() {
+        let mut cfg = config_with(PartitionLayout::CryptoSubvolume, true);
+        cfg.disk.boot_encryption = false;
+        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        assert!(
+            hook.hook_content.contains("LABEL=BOOT"),
+            "Without boot_encryption, mountcrypt must auto-detect unencrypted boot"
+        );
+        assert!(
+            !hook.hook_content.contains("/dev/mapper/Crypt-Boot"),
+            "Without boot_encryption, mountcrypt must not reference Crypt-Boot"
+        );
     }
 }
