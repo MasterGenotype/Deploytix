@@ -162,7 +162,7 @@ pub fn generate_mkinitcpio_conf(config: &DeploymentConfig) -> String {
 MODULES=({})
 BINARIES=({})
 FILES=({})
-HOOKS="{}"
+HOOKS=({})
 
 # Compression
 COMPRESSION="zstd"

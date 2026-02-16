@@ -302,7 +302,8 @@ build() {
     map add_udev_rule \
         '10-dm.rules' \
         '13-dm-disk.rules' \
-        '95-dm-notify.rules'
+        '95-dm-notify.rules' \
+        '/usr/lib/initcpio/udev/11-dm-initramfs.rules'
 
     # cryptsetup calls pthread_create(), which dlopen()s libgcc_s.so.1
     add_binary '/usr/lib/libgcc_s.so.1'
@@ -462,6 +463,10 @@ run_hook() {{
     echo "[mountcrypt] === Mounting EFI ==="
     mkdir -p "$new_root/boot/efi"
 
+    # Wait for udev to finish processing device events so that
+    # /dev/disk/by-partlabel/ symlinks are available for EFI detection
+    udevadm settle 2>/dev/null || true
+
     efi_partition=""
 
     # Primary: use udev-provided partlabel symlink (most reliable in initramfs)
@@ -503,6 +508,8 @@ run_hook() {{
 build() {
     # blkid is needed for EFI partition detection fallback
     add_binary 'blkid'
+    # udevadm is needed to settle udev events before EFI partition detection
+    add_binary 'udevadm'
     add_runscript
 }
 
