@@ -63,7 +63,10 @@ fn configure_networkmanager(cmd: &CommandRunner, install_root: &str) -> Result<(
     let nm_conf_path = format!("{}/iwd.conf", nm_conf_dir);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would configure NetworkManager at {}", nm_conf_path);
+        println!(
+            "  [dry-run] Would configure NetworkManager at {}",
+            nm_conf_path
+        );
         return Ok(());
     }
 

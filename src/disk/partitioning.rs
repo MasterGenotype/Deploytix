@@ -13,9 +13,7 @@ use uuid::Uuid;
 pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
     let device_info = get_device_info(device).ok();
     let sector_size = 512u64; // Default, could be read from sysfs
-    let total_sectors = device_info
-        .map(|d| d.size_bytes / sector_size)
-        .unwrap_or(0);
+    let total_sectors = device_info.map(|d| d.size_bytes / sector_size).unwrap_or(0);
 
     let first_lba = 2048u64;
     let last_lba = total_sectors.saturating_sub(34);
@@ -72,12 +70,12 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
 }
 
 /// Apply partition layout to a disk using sfdisk
-pub fn apply_partitions(
-    cmd: &CommandRunner,
-    device: &str,
-    layout: &ComputedLayout,
-) -> Result<()> {
-    info!("Applying {} partition layout to {}", layout.partitions.len(), device);
+pub fn apply_partitions(cmd: &CommandRunner, device: &str, layout: &ComputedLayout) -> Result<()> {
+    info!(
+        "Applying {} partition layout to {}",
+        layout.partitions.len(),
+        device
+    );
 
     // Generate sfdisk script
     let script = generate_sfdisk_script(device, layout);
@@ -121,14 +119,21 @@ pub fn apply_partitions(
     }
 
     // Notify kernel of partition changes
-    info!("Notifying kernel of partition table changes on {}...", device);
+    info!(
+        "Notifying kernel of partition table changes on {}...",
+        device
+    );
     let _ = cmd.run("partprobe", &[device]);
     let _ = cmd.run("udevadm", &["settle"]);
 
     // Clean up
     let _ = fs::remove_file(script_path);
 
-    info!("Partitioning of {} complete ({} partitions created)", device, layout.partitions.len());
+    info!(
+        "Partitioning of {} complete ({} partitions created)",
+        device,
+        layout.partitions.len()
+    );
     Ok(())
 }
 

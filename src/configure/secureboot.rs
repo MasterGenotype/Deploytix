@@ -26,18 +26,19 @@ pub fn setup_secureboot(
         return Ok(());
     }
 
-    info!("Setting up SecureBoot with method: {:?}", config.system.secureboot_method);
+    info!(
+        "Setting up SecureBoot with method: {:?}",
+        config.system.secureboot_method
+    );
 
     match config.system.secureboot_method {
         SecureBootMethod::Sbctl => setup_sbctl(cmd, install_root)?,
         SecureBootMethod::ManualKeys => {
-            let keys_path = config
-                .system
-                .secureboot_keys_path
-                .as_ref()
-                .ok_or_else(|| DeploytixError::ValidationError(
-                    "SecureBoot keys path required for ManualKeys method".to_string()
-                ))?;
+            let keys_path = config.system.secureboot_keys_path.as_ref().ok_or_else(|| {
+                DeploytixError::ValidationError(
+                    "SecureBoot keys path required for ManualKeys method".to_string(),
+                )
+            })?;
             setup_manual_keys(cmd, keys_path, install_root)?;
         }
         SecureBootMethod::Shim => setup_shim(cmd, install_root)?,
@@ -71,7 +72,7 @@ fn setup_sbctl(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     // Note: This only works if the system is booted in setup mode
     // User may need to do this manually from UEFI settings
     let enroll_result = cmd.run_in_chroot(install_root, "sbctl enroll-keys --microsoft");
-    
+
     if enroll_result.is_err() {
         info!("Note: Key enrollment may need to be done manually from UEFI setup");
         info!("After first boot, run: sbctl enroll-keys --microsoft");
@@ -85,24 +86,28 @@ fn setup_manual_keys(cmd: &CommandRunner, keys_path: &str, install_root: &str) -
     info!("Setting up SecureBoot with manual keys from {}", keys_path);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would copy keys from {} to {}", keys_path, install_root);
+        println!(
+            "  [dry-run] Would copy keys from {} to {}",
+            keys_path, install_root
+        );
         return Ok(());
     }
 
     // Expected key files
     let expected_files = [
-        "PK.key", "PK.crt",    // Platform Key
-        "KEK.key", "KEK.crt",  // Key Exchange Key
-        "db.key", "db.crt",    // Signature Database
+        "PK.key", "PK.crt", // Platform Key
+        "KEK.key", "KEK.crt", // Key Exchange Key
+        "db.key", "db.crt", // Signature Database
     ];
 
     // Verify keys exist
     for file in &expected_files {
         let path = format!("{}/{}", keys_path, file);
         if !std::path::Path::new(&path).exists() {
-            return Err(DeploytixError::ValidationError(
-                format!("Missing SecureBoot key file: {}", path)
-            ));
+            return Err(DeploytixError::ValidationError(format!(
+                "Missing SecureBoot key file: {}",
+                path
+            )));
         }
     }
 
@@ -115,7 +120,7 @@ fn setup_manual_keys(cmd: &CommandRunner, keys_path: &str, install_root: &str) -
         let src = format!("{}/{}", keys_path, file);
         let dst = format!("{}/{}", target_dir, file);
         fs::copy(&src, &dst)?;
-        
+
         // Secure permissions for key files
         if file.ends_with(".key") {
             let mut perms = fs::metadata(&dst)?.permissions();
@@ -144,10 +149,8 @@ fn setup_shim(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     // Generate MOK key pair
     cmd.run_in_chroot(
         install_root,
-        &format!(
-            "openssl req -new -x509 -newkey rsa:2048 -keyout /etc/secureboot/MOK/MOK.key \
-             -out /etc/secureboot/MOK/MOK.crt -nodes -days 36500 -subj '/CN=Deploytix MOK/'"
-        ),
+        "openssl req -new -x509 -newkey rsa:2048 -keyout /etc/secureboot/MOK/MOK.key \
+         -out /etc/secureboot/MOK/MOK.crt -nodes -days 36500 -subj '/CN=Deploytix MOK/'",
     )
     .map_err(|e| DeploytixError::CommandFailed {
         command: "openssl (MOK generation)".to_string(),
@@ -199,26 +202,20 @@ pub fn sign_efi_binary(
     match config.system.secureboot_method {
         SecureBootMethod::Sbctl => {
             // sbctl tracks and signs files
-            cmd.run_in_chroot(
-                install_root,
-                &format!("sbctl sign -s {}", binary_path),
-            )
-            .map_err(|e| DeploytixError::CommandFailed {
-                command: format!("sbctl sign {}", binary_path),
-                stderr: e.to_string(),
-            })?;
+            cmd.run_in_chroot(install_root, &format!("sbctl sign -s {}", binary_path))
+                .map_err(|e| DeploytixError::CommandFailed {
+                    command: format!("sbctl sign {}", binary_path),
+                    stderr: e.to_string(),
+                })?;
         }
         SecureBootMethod::ManualKeys | SecureBootMethod::Shim => {
             // Use sbsign directly
             let (key, cert) = get_signing_key_paths(config, install_root);
-            
+
             cmd.run(
                 "sbsign",
                 &[
-                    "--key", &key,
-                    "--cert", &cert,
-                    "--output", &full_path,
-                    &full_path,
+                    "--key", &key, "--cert", &cert, "--output", &full_path, &full_path,
                 ],
             )
             .map_err(|e| DeploytixError::CommandFailed {
@@ -243,18 +240,14 @@ fn get_signing_key_paths(config: &DeploymentConfig, install_root: &str) -> (Stri
                 format!("{}/db/db.pem", keys_dir),
             )
         }
-        SecureBootMethod::ManualKeys => {
-            (
-                format!("{}/etc/secureboot/keys/db.key", install_root),
-                format!("{}/etc/secureboot/keys/db.crt", install_root),
-            )
-        }
-        SecureBootMethod::Shim => {
-            (
-                format!("{}/etc/secureboot/MOK/MOK.key", install_root),
-                format!("{}/etc/secureboot/MOK/MOK.crt", install_root),
-            )
-        }
+        SecureBootMethod::ManualKeys => (
+            format!("{}/etc/secureboot/keys/db.key", install_root),
+            format!("{}/etc/secureboot/keys/db.crt", install_root),
+        ),
+        SecureBootMethod::Shim => (
+            format!("{}/etc/secureboot/MOK/MOK.key", install_root),
+            format!("{}/etc/secureboot/MOK/MOK.crt", install_root),
+        ),
     }
 }
 
@@ -272,8 +265,8 @@ pub fn sign_boot_files(
 
     // Files to sign
     let files_to_sign = [
-        "/boot/efi/EFI/BOOT/BOOTX64.EFI",  // GRUB EFI binary
-        "/boot/vmlinuz-linux-zen",          // Kernel
+        "/boot/efi/EFI/BOOT/BOOTX64.EFI", // GRUB EFI binary
+        "/boot/vmlinuz-linux-zen",        // Kernel
     ];
 
     for file in &files_to_sign {
@@ -391,7 +384,7 @@ echo "SecureBoot signing complete"
 
     let script_path = format!("{}/sign-kernel", script_dir);
     fs::write(&script_path, script)?;
-    
+
     let mut perms = fs::metadata(&script_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms)?;
@@ -441,13 +434,12 @@ pub fn print_enrollment_instructions(config: &DeploymentConfig) {
 pub fn verify_secureboot_status() -> Result<bool> {
     use std::process::Command;
 
-    let output = Command::new("sbctl")
-        .arg("status")
-        .output()
-        .map_err(|e| DeploytixError::CommandFailed {
+    let output = Command::new("sbctl").arg("status").output().map_err(|e| {
+        DeploytixError::CommandFailed {
             command: "sbctl status".to_string(),
             stderr: e.to_string(),
-        })?;
+        }
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.contains("Secure Boot: enabled"))

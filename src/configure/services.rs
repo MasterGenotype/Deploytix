@@ -14,7 +14,12 @@ pub fn enable_services(
     install_root: &str,
 ) -> Result<()> {
     let services = build_service_list(config);
-    info!("Enabling {} services for {} init system: [{}]", services.len(), config.system.init, services.join(", "));
+    info!(
+        "Enabling {} services for {} init system: [{}]",
+        services.len(),
+        config.system.init,
+        services.join(", ")
+    );
 
     // Install required packages for the services before enabling them
     install_service_packages(cmd, config, install_root, &services)?;
@@ -149,7 +154,10 @@ fn enable_runit_service(service: &str, install_root: &str) -> Result<()> {
 
     // Check if service exists in installed system
     if !Path::new(&service_dir_check).exists() {
-        warn!("Service {} not found at {}, skipping", service, service_dir_check);
+        warn!(
+            "Service {} not found at {}, skipping",
+            service, service_dir_check
+        );
         return Ok(());
     }
 
@@ -170,7 +178,10 @@ fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str)
     let service_path = format!("{}/etc/init.d/{}", install_root, service);
 
     if !Path::new(&service_path).exists() {
-        warn!("Service {} not found at {}, skipping", service, service_path);
+        warn!(
+            "Service {} not found at {}, skipping",
+            service, service_path
+        );
         return Ok(());
     }
 
@@ -201,7 +212,10 @@ fn enable_s6_service(service: &str, install_root: &str) -> Result<()> {
 
     // Service directories come from official *-s6 packages; skip if missing
     if !Path::new(&service_dir).exists() {
-        warn!("Service {} not found at {} (is the corresponding -s6 package installed?), skipping", service, service_dir);
+        warn!(
+            "Service {} not found at {} (is the corresponding -s6 package installed?), skipping",
+            service, service_dir
+        );
         return Ok(());
     }
 
@@ -223,7 +237,10 @@ fn enable_dinit_service(service: &str, install_root: &str) -> Result<()> {
     let link_path = format!("{}/{}", enabled_dir, service);
 
     if !Path::new(&service_file_check).exists() {
-        warn!("Service {} not found at {}, skipping", service, service_file_check);
+        warn!(
+            "Service {} not found at {}, skipping",
+            service, service_file_check
+        );
         return Ok(());
     }
 

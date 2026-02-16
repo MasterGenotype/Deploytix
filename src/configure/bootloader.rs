@@ -2,8 +2,8 @@
 
 use crate::config::{Bootloader, DeploymentConfig, PartitionLayout};
 use crate::configure::encryption::get_luks_uuid;
-use crate::disk::formatting::get_partition_uuid;
 use crate::disk::detection::partition_path;
+use crate::disk::formatting::get_partition_uuid;
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -50,20 +50,20 @@ fn install_grub(
     // For encrypted Standard layout, should use install_grub_with_layout
     if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
         return Err(crate::utils::error::DeploytixError::ConfigError(
-            "Encrypted Standard layout requires install_bootloader_with_layout".to_string()
+            "Encrypted Standard layout requires install_bootloader_with_layout".to_string(),
         ));
     }
 
     let root_partition_num = match config.disk.layout {
-        PartitionLayout::Standard => 4,  // Root is partition 4 in standard layout
-        PartitionLayout::Minimal => 4,   // Root is partition 4 in minimal layout (EFI, Boot, Swap, Root)
+        PartitionLayout::Standard => 4, // Root is partition 4 in standard layout
+        PartitionLayout::Minimal => 4, // Root is partition 4 in minimal layout (EFI, Boot, Swap, Root)
         PartitionLayout::LvmThin => {
             // LvmThin should use install_bootloader_with_layout
             return Err(crate::utils::error::DeploytixError::ConfigError(
-                "LvmThin layout requires install_bootloader_with_layout".to_string()
+                "LvmThin layout requires install_bootloader_with_layout".to_string(),
             ));
         }
-        PartitionLayout::Custom => 4,    // Assume standard for custom
+        PartitionLayout::Custom => 4, // Assume standard for custom
     };
 
     let root_part = partition_path(device, root_partition_num);
@@ -93,7 +93,10 @@ fn install_grub_with_layout(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    info!("Installing GRUB bootloader to {} (x86_64-efi, encrypted)", device);
+    info!(
+        "Installing GRUB bootloader to {} (x86_64-efi, encrypted)",
+        device
+    );
 
     // Find LUKS partition from layout
     let luks_part = layout.partitions.iter().find(|p| p.is_luks);
@@ -109,7 +112,14 @@ fn install_grub_with_layout(
 
         // Configure GRUB defaults for encrypted system
         // Check if layout uses subvolumes (Minimal does, encrypted Standard doesn't)
-        configure_grub_defaults(cmd, config, &luks_uuid, Some(&config.disk.luks_mapper_name), layout.uses_subvolumes(), install_root)?;
+        configure_grub_defaults(
+            cmd,
+            config,
+            &luks_uuid,
+            Some(&config.disk.luks_mapper_name),
+            layout.uses_subvolumes(),
+            install_root,
+        )?;
     } else {
         // Fall back to non-encrypted
         return install_grub(cmd, config, device, install_root);
@@ -127,11 +137,7 @@ fn install_grub_with_layout(
 }
 
 /// Run grub-install, grub-mkconfig, and create EFI boot entry
-fn run_grub_install(
-    cmd: &CommandRunner,
-    device: &str,
-    install_root: &str,
-) -> Result<()> {
+fn run_grub_install(cmd: &CommandRunner, device: &str, install_root: &str) -> Result<()> {
     if cmd.is_dry_run() {
         println!("  [dry-run] grub-install --target=x86_64-efi --boot-directory=/boot --efi-directory=/boot/efi --removable {}", device);
         println!("  [dry-run] grub-mkconfig -o /boot/grub/grub.cfg");
@@ -184,7 +190,10 @@ pub fn create_efi_boot_entry(
     efi_partition: u32,
     label: &str,
 ) -> Result<()> {
-    info!("Creating EFI boot entry for {} on {} partition {}", label, device, efi_partition);
+    info!(
+        "Creating EFI boot entry for {} on {} partition {}",
+        label, device, efi_partition
+    );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] efibootmgr --create --disk {} --part {} --loader /EFI/BOOT/BOOTX64.EFI --label '{}'",
@@ -194,13 +203,20 @@ pub fn create_efi_boot_entry(
 
     // Create boot entry pointing to GRUB's EFI binary
     // --removable flag in grub-install places it at /EFI/BOOT/BOOTX64.EFI
-    cmd.run("efibootmgr", &[
-        "--create",
-        "--disk", device,
-        "--part", &efi_partition.to_string(),
-        "--loader", "/EFI/BOOT/BOOTX64.EFI",
-        "--label", label,
-    ])?;
+    cmd.run(
+        "efibootmgr",
+        &[
+            "--create",
+            "--disk",
+            device,
+            "--part",
+            &efi_partition.to_string(),
+            "--loader",
+            "/EFI/BOOT/BOOTX64.EFI",
+            "--label",
+            label,
+        ],
+    )?;
 
     info!("EFI boot entry '{}' created successfully", label);
     Ok(())
@@ -300,17 +316,17 @@ fn install_systemd_boot(
     // Encrypted systems should use GRUB instead
     if config.disk.encryption {
         return Err(crate::utils::error::DeploytixError::ConfigError(
-            "systemd-boot is not supported with encrypted layouts (use GRUB)".to_string()
+            "systemd-boot is not supported with encrypted layouts (use GRUB)".to_string(),
         ));
     }
 
     let root_partition_num = match config.disk.layout {
         PartitionLayout::Standard => 4,
-        PartitionLayout::Minimal => 4,  // Root is partition 4 (EFI, Boot, Swap, Root)
+        PartitionLayout::Minimal => 4, // Root is partition 4 (EFI, Boot, Swap, Root)
         PartitionLayout::LvmThin => {
             // LvmThin requires encryption which uses GRUB, so this shouldn't be reached
             return Err(crate::utils::error::DeploytixError::ConfigError(
-                "systemd-boot is not supported with LvmThin layout (use GRUB)".to_string()
+                "systemd-boot is not supported with LvmThin layout (use GRUB)".to_string(),
             ));
         }
         PartitionLayout::Custom => 4,
@@ -325,7 +341,10 @@ fn install_systemd_boot(
 
     if cmd.is_dry_run() {
         println!("  [dry-run] bootctl install");
-        println!("  [dry-run] Would create loader.conf and artix.conf with UUID={}", root_uuid);
+        println!(
+            "  [dry-run] Would create loader.conf and artix.conf with UUID={}",
+            root_uuid
+        );
         return Ok(());
     }
 

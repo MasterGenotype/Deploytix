@@ -51,7 +51,7 @@ pub struct DiskConfig {
     /// Use btrfs subvolumes within partitions (Standard layout only)
     #[serde(default)]
     pub use_subvolumes: bool,
-    
+
     // LVM Thin Provisioning options
     /// Use LVM thin provisioning (for LvmThin layout)
     #[serde(default)]
@@ -65,7 +65,7 @@ pub struct DiskConfig {
     /// Thin pool size as percentage of VG (default: 95%)
     #[serde(default = "default_thin_pool_percent")]
     pub lvm_thin_pool_percent: u8,
-    
+
     // Swap configuration
     /// Swap configuration type
     #[serde(default)]
@@ -104,7 +104,7 @@ pub struct SystemConfig {
     /// Enable hibernation support
     #[serde(default)]
     pub hibernation: bool,
-    
+
     // SecureBoot options
     /// Enable SecureBoot signing
     #[serde(default)]
@@ -465,7 +465,12 @@ impl DeploymentConfig {
             println!("  LvmThin layout uses btrfs filesystem.");
             Filesystem::Btrfs
         } else {
-            let filesystems = [Filesystem::Btrfs, Filesystem::Ext4, Filesystem::Xfs, Filesystem::F2fs];
+            let filesystems = [
+                Filesystem::Btrfs,
+                Filesystem::Ext4,
+                Filesystem::Xfs,
+                Filesystem::F2fs,
+            ];
             let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
             filesystems[fs_idx].clone()
         };
@@ -481,11 +486,12 @@ impl DeploymentConfig {
         };
 
         // Subvolumes option (for Standard layout with btrfs)
-        let use_subvolumes = if layout == PartitionLayout::Standard && filesystem == Filesystem::Btrfs {
-            prompt_confirm("Use btrfs subvolumes within partitions?", false)?
-        } else {
-            layout == PartitionLayout::Minimal // Minimal always uses subvolumes
-        };
+        let use_subvolumes =
+            if layout == PartitionLayout::Standard && filesystem == Filesystem::Btrfs {
+                prompt_confirm("Use btrfs subvolumes within partitions?", false)?
+            } else {
+                layout == PartitionLayout::Minimal // Minimal always uses subvolumes
+            };
 
         // Boot encryption (LUKS1 on separate /boot partition)
         let boot_encryption = if encryption && layout == PartitionLayout::Standard {
@@ -501,7 +507,12 @@ impl DeploymentConfig {
         };
 
         // Init system
-        let init_systems = [InitSystem::Runit, InitSystem::OpenRC, InitSystem::S6, InitSystem::Dinit];
+        let init_systems = [
+            InitSystem::Runit,
+            InitSystem::OpenRC,
+            InitSystem::S6,
+            InitSystem::Dinit,
+        ];
         let init_idx = prompt_select("Init system", &init_systems, 0)?;
         let init = init_systems[init_idx].clone();
 
@@ -547,7 +558,11 @@ impl DeploymentConfig {
         // SecureBoot option
         let secureboot = prompt_confirm("Enable SecureBoot signing?", false)?;
         let secureboot_method = if secureboot {
-            let methods = [SecureBootMethod::Sbctl, SecureBootMethod::ManualKeys, SecureBootMethod::Shim];
+            let methods = [
+                SecureBootMethod::Sbctl,
+                SecureBootMethod::ManualKeys,
+                SecureBootMethod::Shim,
+            ];
             let method_idx = prompt_select("SecureBoot method", &methods, 0)?;
             methods[method_idx].clone()
         } else {
@@ -701,7 +716,10 @@ impl DeploymentConfig {
         }
 
         // Encryption supported on Standard and LvmThin layouts
-        if self.disk.encryption && self.disk.layout != PartitionLayout::Standard && self.disk.layout != PartitionLayout::LvmThin {
+        if self.disk.encryption
+            && self.disk.layout != PartitionLayout::Standard
+            && self.disk.layout != PartitionLayout::LvmThin
+        {
             return Err(DeploytixError::ValidationError(
                 "Encryption is only supported on Standard and LvmThin layouts".to_string(),
             ));
@@ -729,28 +747,31 @@ impl DeploymentConfig {
         }
 
         // LvmThin layout requires btrfs filesystem
-        if self.disk.layout == PartitionLayout::LvmThin && self.disk.filesystem != Filesystem::Btrfs {
+        if self.disk.layout == PartitionLayout::LvmThin && self.disk.filesystem != Filesystem::Btrfs
+        {
             return Err(DeploytixError::ValidationError(
                 "LvmThin layout requires btrfs filesystem".to_string(),
             ));
         }
 
         // Swap file requires btrfs or ext4 filesystem
-        if self.disk.swap_type == SwapType::FileZram {
-            if self.disk.filesystem != Filesystem::Btrfs && self.disk.filesystem != Filesystem::Ext4 {
-                return Err(DeploytixError::ValidationError(
-                    "Swap file requires btrfs or ext4 filesystem".to_string(),
-                ));
-            }
+        if self.disk.swap_type == SwapType::FileZram
+            && self.disk.filesystem != Filesystem::Btrfs
+            && self.disk.filesystem != Filesystem::Ext4
+        {
+            return Err(DeploytixError::ValidationError(
+                "Swap file requires btrfs or ext4 filesystem".to_string(),
+            ));
         }
 
         // SecureBoot with ManualKeys requires keys path
-        if self.system.secureboot && self.system.secureboot_method == SecureBootMethod::ManualKeys {
-            if self.system.secureboot_keys_path.is_none() {
-                return Err(DeploytixError::ValidationError(
-                    "SecureBoot with ManualKeys method requires secureboot_keys_path".to_string(),
-                ));
-            }
+        if self.system.secureboot
+            && self.system.secureboot_method == SecureBootMethod::ManualKeys
+            && self.system.secureboot_keys_path.is_none()
+        {
+            return Err(DeploytixError::ValidationError(
+                "SecureBoot with ManualKeys method requires secureboot_keys_path".to_string(),
+            ));
         }
 
         Ok(())

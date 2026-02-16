@@ -117,11 +117,11 @@ const VAR_RATIO: f64 = 0.05368;
 
 /// Minimum sizes
 const ROOT_MIN_MIB: u64 = 20480; // 20 GiB
-const USR_MIN_MIB: u64 = 20480;  // 20 GiB
-const VAR_MIN_MIB: u64 = 8192;   // 8 GiB
+const USR_MIN_MIB: u64 = 20480; // 20 GiB
+const VAR_MIN_MIB: u64 = 8192; // 8 GiB
 
 /// Swap limits
-const SWAP_MIN_MIB: u64 = 4096;  // 4 GiB
+const SWAP_MIN_MIB: u64 = 4096; // 4 GiB
 const SWAP_MAX_MIB: u64 = 20480; // 20 GiB
 
 /// Alignment in MiB
@@ -202,8 +202,8 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
 
     // If home is too small, reduce other partitions deterministically
     if home_mib == 0 || home_mib > disk_mib {
-        let mut deficit = (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib)
-            .saturating_sub(disk_mib);
+        let mut deficit =
+            (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib).saturating_sub(disk_mib);
 
         // Reduce USR first
         let reducible = usr_mib.saturating_sub(USR_MIN_MIB);
@@ -525,9 +525,13 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
 }
 
 /// Compute partition layout for a disk
-/// 
+///
 /// For Standard layout, pass `encryption` flag to enable LUKS on data partitions.
-pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64, encryption: bool) -> Result<ComputedLayout> {
+pub fn compute_layout(
+    layout: &PartitionLayout,
+    disk_mib: u64,
+    encryption: bool,
+) -> Result<ComputedLayout> {
     match layout {
         PartitionLayout::Standard => compute_standard_layout(disk_mib, encryption),
         PartitionLayout::Minimal => compute_minimal_layout(disk_mib),

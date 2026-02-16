@@ -18,13 +18,19 @@ pub fn configure_greetd(
         return Ok(());
     }
 
-    info!("Configuring greetd for user '{}' with session '{}'",
-        config.user.name, get_session_command(&config.desktop.environment));
+    info!(
+        "Configuring greetd for user '{}' with session '{}'",
+        config.user.name,
+        get_session_command(&config.desktop.environment)
+    );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would configure /etc/greetd/config.toml");
         println!("    user: {}", config.user.name);
-        println!("    session: {}", get_session_command(&config.desktop.environment));
+        println!(
+            "    session: {}",
+            get_session_command(&config.desktop.environment)
+        );
         return Ok(());
     }
 
@@ -49,7 +55,10 @@ user = "{user}"
     fs::create_dir_all(&greetd_dir)?;
     fs::write(format!("{}/config.toml", greetd_dir), config_content)?;
 
-    info!("greetd config written to /etc/greetd/config.toml for user '{}'", username);
+    info!(
+        "greetd config written to /etc/greetd/config.toml for user '{}'",
+        username
+    );
     Ok(())
 }
 

@@ -185,7 +185,8 @@ impl DeploytixGui {
             }
             Err(e) => {
                 self.devices = Vec::new();
-                self.install_logs.push(format!("Error listing disks: {}", e));
+                self.install_logs
+                    .push(format!("Error listing disks: {}", e));
             }
         }
         self.refreshing_disks = false;
@@ -304,12 +305,13 @@ impl DeploytixGui {
             // Run installer with progress callback that maps installer progress
             // (0.0–1.0) into the GUI range (0.15–1.0)
             let progress_tx = tx.clone();
-            let progress_cb: crate::install::ProgressCallback = Box::new(move |progress, status| {
-                // Map installer's 0.0–1.0 range into the GUI's 0.15–0.95 range
-                let gui_progress = 0.15 + progress * 0.80;
-                let _ = progress_tx.send(InstallMessage::Progress(gui_progress));
-                let _ = progress_tx.send(InstallMessage::Status(status.to_string()));
-            });
+            let progress_cb: crate::install::ProgressCallback =
+                Box::new(move |progress, status| {
+                    // Map installer's 0.0–1.0 range into the GUI's 0.15–0.95 range
+                    let gui_progress = 0.15 + progress * 0.80;
+                    let _ = progress_tx.send(InstallMessage::Progress(gui_progress));
+                    let _ = progress_tx.send(InstallMessage::Status(status.to_string()));
+                });
 
             let installer = Installer::new(config, dry_run)
                 .with_skip_confirm(true)
@@ -393,7 +395,9 @@ impl eframe::App for DeploytixGui {
                     let is_past = (*s as usize) < (self.step as usize);
 
                     let text = if is_current {
-                        egui::RichText::new(s.label()).strong().color(egui::Color32::WHITE)
+                        egui::RichText::new(s.label())
+                            .strong()
+                            .color(egui::Color32::WHITE)
                     } else if is_past {
                         egui::RichText::new(s.label()).color(egui::Color32::GREEN)
                     } else {
@@ -431,16 +435,17 @@ impl eframe::App for DeploytixGui {
 
                     match self.step {
                         WizardStep::Installing => {
-                            if self.install_finished {
-                                if ui.button("Close").clicked() {
-                                    std::process::exit(0);
-                                }
+                            if self.install_finished && ui.button("Close").clicked() {
+                                std::process::exit(0);
                             }
                         }
                         WizardStep::Summary => {
                             // Enable when user has confirmed the warning OR is running dry-run
                             let enabled = self.confirmed || self.dry_run;
-                            if ui.add_enabled(enabled, egui::Button::new("Install →")).clicked() {
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("Install →"))
+                                .clicked()
+                            {
                                 if let Some(next) = self.step.next() {
                                     self.step = next;
                                     self.start_installation();
@@ -461,55 +466,45 @@ impl eframe::App for DeploytixGui {
             ui.add_space(16.0);
 
             let panel_can_proceed = match self.step {
-                WizardStep::DiskSelection => {
-                    panels::disk_selection_panel(
-                        ui,
-                        &self.devices,
-                        &mut self.selected_device_index,
-                        &mut self.refreshing_disks,
-                    )
-                }
-                WizardStep::DiskConfig => {
-                    panels::disk_config_panel(
-                        ui,
-                        &mut self.partition_layout,
-                        &mut self.filesystem,
-                        &mut self.encryption,
-                        &mut self.encryption_password,
-                        &mut self.boot_encryption,
-                        &mut self.swap_type,
-                        &mut self.zram_percent,
-                    )
-                }
-                WizardStep::SystemConfig => {
-                    panels::system_config_panel(
-                        ui,
-                        &mut self.init_system,
-                        &mut self.bootloader,
-                        &mut self.timezone,
-                        &mut self.locale,
-                        &mut self.keymap,
-                        &mut self.hostname,
-                        &mut self.secureboot,
-                        &mut self.secureboot_method,
-                    )
-                }
-                WizardStep::UserConfig => {
-                    panels::user_config_panel(
-                        ui,
-                        &mut self.username,
-                        &mut self.user_password,
-                        &mut self.user_password_confirm,
-                        &mut self.sudoer,
-                    )
-                }
-                WizardStep::NetworkDesktop => {
-                    panels::network_desktop_panel(
-                        ui,
-                        &mut self.network_backend,
-                        &mut self.desktop_env,
-                    )
-                }
+                WizardStep::DiskSelection => panels::disk_selection_panel(
+                    ui,
+                    &self.devices,
+                    &mut self.selected_device_index,
+                    &mut self.refreshing_disks,
+                ),
+                WizardStep::DiskConfig => panels::disk_config_panel(
+                    ui,
+                    &mut self.partition_layout,
+                    &mut self.filesystem,
+                    &mut self.encryption,
+                    &mut self.encryption_password,
+                    &mut self.boot_encryption,
+                    &mut self.swap_type,
+                    &mut self.zram_percent,
+                ),
+                WizardStep::SystemConfig => panels::system_config_panel(
+                    ui,
+                    &mut self.init_system,
+                    &mut self.bootloader,
+                    &mut self.timezone,
+                    &mut self.locale,
+                    &mut self.keymap,
+                    &mut self.hostname,
+                    &mut self.secureboot,
+                    &mut self.secureboot_method,
+                ),
+                WizardStep::UserConfig => panels::user_config_panel(
+                    ui,
+                    &mut self.username,
+                    &mut self.user_password,
+                    &mut self.user_password_confirm,
+                    &mut self.sudoer,
+                ),
+                WizardStep::NetworkDesktop => panels::network_desktop_panel(
+                    ui,
+                    &mut self.network_backend,
+                    &mut self.desktop_env,
+                ),
                 WizardStep::Summary => {
                     let device_path = self
                         .selected_device_index
@@ -554,7 +549,10 @@ impl eframe::App for DeploytixGui {
             if !matches!(self.step, WizardStep::Summary | WizardStep::Installing) {
                 ui.add_space(16.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.add_enabled(can_proceed, egui::Button::new("Next →")).clicked() {
+                    if ui
+                        .add_enabled(can_proceed, egui::Button::new("Next →"))
+                        .clicked()
+                    {
                         if let Some(next) = self.step.next() {
                             self.step = next;
                         }

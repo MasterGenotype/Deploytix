@@ -43,23 +43,28 @@ pub fn setup_encryption(
         ));
     }
 
-    let password = config
-        .disk
-        .encryption_password
-        .as_ref()
-        .ok_or_else(|| DeploytixError::ValidationError(
-            "Encryption password required".to_string()
-        ))?;
+    let password = config.disk.encryption_password.as_ref().ok_or_else(|| {
+        DeploytixError::ValidationError("Encryption password required".to_string())
+    })?;
 
     let luks_device = partition_path(device, luks_partition);
     let mapper_name = config.disk.luks_mapper_name.clone();
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-    info!("Setting up LUKS2 encryption on {} (mapper: {})", luks_device, mapper_name);
+    info!(
+        "Setting up LUKS2 encryption on {} (mapper: {})",
+        luks_device, mapper_name
+    );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", luks_device);
-        println!("  [dry-run] cryptsetup open {} {}", luks_device, mapper_name);
+        println!(
+            "  [dry-run] cryptsetup luksFormat --type luks2 {}",
+            luks_device
+        );
+        println!(
+            "  [dry-run] cryptsetup open {} {}",
+            luks_device, mapper_name
+        );
         return Ok(LuksContainer {
             device: luks_device,
             mapper_name,
@@ -73,7 +78,10 @@ pub fn setup_encryption(
     // Open LUKS container
     luks_open(&luks_device, &mapper_name, password)?;
 
-    info!("LUKS encryption setup complete: {} -> {}", luks_device, mapped_path);
+    info!(
+        "LUKS encryption setup complete: {} -> {}",
+        luks_device, mapped_path
+    );
 
     Ok(LuksContainer {
         device: luks_device,
@@ -84,17 +92,25 @@ pub fn setup_encryption(
 
 /// Format a device as LUKS2
 fn luks_format(device: &str, password: &str) -> Result<()> {
-    info!("Formatting {} as LUKS2 container (aes-xts-plain64, argon2id)", device);
+    info!(
+        "Formatting {} as LUKS2 container (aes-xts-plain64, argon2id)",
+        device
+    );
 
     // Use stdin to pass password securely (fixes command injection vulnerability)
     let mut child = Command::new("cryptsetup")
         .args([
             "luksFormat",
-            "--type", "luks2",
-            "--cipher", "aes-xts-plain64",
-            "--key-size", "512",
-            "--hash", "sha512",
-            "--pbkdf", "argon2id",
+            "--type",
+            "luks2",
+            "--cipher",
+            "aes-xts-plain64",
+            "--key-size",
+            "512",
+            "--hash",
+            "sha512",
+            "--pbkdf",
+            "argon2id",
             "--batch-mode",
             device,
         ])
@@ -170,23 +186,28 @@ pub fn setup_boot_encryption(
         ));
     }
 
-    let password = config
-        .disk
-        .encryption_password
-        .as_ref()
-        .ok_or_else(|| DeploytixError::ValidationError(
-            "Encryption password required".to_string()
-        ))?;
+    let password = config.disk.encryption_password.as_ref().ok_or_else(|| {
+        DeploytixError::ValidationError("Encryption password required".to_string())
+    })?;
 
     let boot_device = partition_path(device, boot_partition);
     let mapper_name = config.disk.luks_boot_mapper_name.clone();
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-    info!("Setting up LUKS1 encryption on {} for /boot (mapper: {})", boot_device, mapper_name);
+    info!(
+        "Setting up LUKS1 encryption on {} for /boot (mapper: {})",
+        boot_device, mapper_name
+    );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] cryptsetup luksFormat --type luks1 {}", boot_device);
-        println!("  [dry-run] cryptsetup open {} {}", boot_device, mapper_name);
+        println!(
+            "  [dry-run] cryptsetup luksFormat --type luks1 {}",
+            boot_device
+        );
+        println!(
+            "  [dry-run] cryptsetup open {} {}",
+            boot_device, mapper_name
+        );
         return Ok(LuksContainer {
             device: boot_device,
             mapper_name,
@@ -200,7 +221,10 @@ pub fn setup_boot_encryption(
     // Open LUKS container
     luks_open(&boot_device, &mapper_name, password)?;
 
-    info!("LUKS1 boot encryption setup complete: {} -> {}", boot_device, mapped_path);
+    info!(
+        "LUKS1 boot encryption setup complete: {} -> {}",
+        boot_device, mapped_path
+    );
 
     Ok(LuksContainer {
         device: boot_device,
@@ -214,15 +238,22 @@ pub fn setup_boot_encryption(
 /// Uses pbkdf2 instead of argon2id because GRUB's cryptodisk module only
 /// supports pbkdf2 for LUKS1 containers.
 fn luks_format_v1(device: &str, password: &str) -> Result<()> {
-    info!("Formatting {} as LUKS1 container (aes-xts-plain64, pbkdf2)", device);
+    info!(
+        "Formatting {} as LUKS1 container (aes-xts-plain64, pbkdf2)",
+        device
+    );
 
     let mut child = Command::new("cryptsetup")
         .args([
             "luksFormat",
-            "--type", "luks1",
-            "--cipher", "aes-xts-plain64",
-            "--key-size", "512",
-            "--hash", "sha512",
+            "--type",
+            "luks1",
+            "--cipher",
+            "aes-xts-plain64",
+            "--key-size",
+            "512",
+            "--hash",
+            "sha512",
             "--batch-mode",
             device,
         ])
@@ -294,7 +325,10 @@ pub fn setup_single_luks(
 ) -> Result<LuksContainer> {
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-    info!("Setting up LUKS2 encryption on {} (mapper: {})", device, mapper_name);
+    info!(
+        "Setting up LUKS2 encryption on {} (mapper: {})",
+        device, mapper_name
+    );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", device);
@@ -312,7 +346,10 @@ pub fn setup_single_luks(
     // Open LUKS container
     luks_open(device, mapper_name, password)?;
 
-    info!("LUKS2 encryption setup complete: {} -> {}", device, mapped_path);
+    info!(
+        "LUKS2 encryption setup complete: {} -> {}",
+        device, mapped_path
+    );
 
     Ok(LuksContainer {
         device: device.to_string(),
@@ -337,13 +374,9 @@ pub fn setup_multi_volume_encryption(
         ));
     }
 
-    let password = config
-        .disk
-        .encryption_password
-        .as_ref()
-        .ok_or_else(|| DeploytixError::ValidationError(
-            "Encryption password required".to_string()
-        ))?;
+    let password = config.disk.encryption_password.as_ref().ok_or_else(|| {
+        DeploytixError::ValidationError("Encryption password required".to_string())
+    })?;
 
     let mut containers = Vec::new();
 
@@ -354,11 +387,20 @@ pub fn setup_multi_volume_encryption(
         let mapper_name = format!("Crypt-{}", title_case_name);
         let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-        info!("Setting up LUKS2 encryption on {} (mapper: {})", luks_device, mapper_name);
+        info!(
+            "Setting up LUKS2 encryption on {} (mapper: {})",
+            luks_device, mapper_name
+        );
 
         if cmd.is_dry_run() {
-            println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", luks_device);
-            println!("  [dry-run] cryptsetup open {} {}", luks_device, mapper_name);
+            println!(
+                "  [dry-run] cryptsetup luksFormat --type luks2 {}",
+                luks_device
+            );
+            println!(
+                "  [dry-run] cryptsetup open {} {}",
+                luks_device, mapper_name
+            );
         } else {
             // Format LUKS container
             luks_format(&luks_device, password)?;
@@ -367,7 +409,10 @@ pub fn setup_multi_volume_encryption(
             luks_open(&luks_device, &mapper_name, password)?;
         }
 
-        info!("LUKS encryption setup complete: {} -> {}", luks_device, mapped_path);
+        info!(
+            "LUKS encryption setup complete: {} -> {}",
+            luks_device, mapped_path
+        );
 
         containers.push(LuksContainer {
             device: luks_device,
@@ -376,7 +421,10 @@ pub fn setup_multi_volume_encryption(
         });
     }
 
-    info!("Multi-volume encryption setup complete: {} containers created", containers.len());
+    info!(
+        "Multi-volume encryption setup complete: {} containers created",
+        containers.len()
+    );
     Ok(containers)
 }
 
