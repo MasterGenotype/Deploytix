@@ -91,3 +91,5 @@ run_hook() {
         echo "Warning: EFI partition not found, skipping EFI mount" >&2
     fi
 }
+
+run_hook

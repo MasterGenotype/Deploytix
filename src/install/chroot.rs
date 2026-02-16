@@ -1,18 +1,25 @@
 //! Chroot and mount operations
 
 use crate::disk::detection::partition_path;
+use crate::disk::formatting::{create_btrfs_subvolumes, mount_btrfs_subvolumes};
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use tracing::info;
 
 /// Mount all partitions according to the layout
+/// Handles both regular partitions and btrfs subvolume layouts
 pub fn mount_partitions(
     cmd: &CommandRunner,
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
+    // Check if this layout uses btrfs subvolumes
+    if layout.uses_subvolumes() {
+        return mount_partitions_with_subvolumes(cmd, device, layout, install_root);
+    }
+
     info!("Mounting {} partitions from {} to {}", layout.partitions.len(), device, install_root);
 
     // Sort partitions by mount point depth (root first, then deeper paths)
@@ -54,6 +61,60 @@ pub fn mount_partitions(
             let part_path = partition_path(device, part.number);
             info!("Enabling swap on {}", part_path);
             cmd.run("swapon", &[&part_path])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Mount partitions for layouts using btrfs subvolumes
+/// Creates subvolumes on the ROOT partition and mounts them
+fn mount_partitions_with_subvolumes(
+    cmd: &CommandRunner,
+    device: &str,
+    layout: &ComputedLayout,
+    install_root: &str,
+) -> Result<()> {
+    let subvolumes = layout.subvolumes.as_ref().unwrap();
+    info!("Setting up btrfs subvolumes on {} (root partition)", device);
+
+    // Find the ROOT partition
+    let root_part = layout.partitions.iter()
+        .find(|p| p.name == "ROOT")
+        .ok_or_else(|| crate::utils::error::DeploytixError::ConfigError(
+            "No ROOT partition found for subvolume layout".to_string()
+        ))?;
+
+    let root_path = partition_path(device, root_part.number);
+
+    // Create subvolumes on the ROOT partition
+    // This temporarily mounts the raw btrfs, creates subvolumes, then unmounts
+    let temp_mount = "/tmp/deploytix_btrfs_setup";
+    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount)?;
+
+    // Now mount the subvolumes to their final locations
+    mount_btrfs_subvolumes(cmd, &root_path, subvolumes, install_root)?;
+
+    // Mount other non-subvolume partitions (EFI, etc.)
+    for part in &layout.partitions {
+        if part.name == "ROOT" {
+            continue; // Already handled via subvolumes
+        }
+
+        if part.is_swap {
+            let part_path = partition_path(device, part.number);
+            info!("Enabling swap on {}", part_path);
+            cmd.run("swapon", &[&part_path])?;
+        } else if let Some(ref mount_point) = part.mount_point {
+            let part_path = partition_path(device, part.number);
+            let full_mount = format!("{}{}", install_root, mount_point);
+
+            if !cmd.is_dry_run() {
+                std::fs::create_dir_all(&full_mount)?;
+            }
+
+            info!("Mounting {} to {}", part_path, full_mount);
+            cmd.run("mount", &[&part_path, &full_mount])?;
         }
     }
 

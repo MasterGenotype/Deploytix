@@ -19,8 +19,7 @@ pub mod partition_types {
     pub const LINUX_FILESYSTEM: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 }
 
-/// Btrfs subvolume definition (legacy - kept for future subvolume support)
-#[allow(dead_code)]
+/// Btrfs subvolume definition
 #[derive(Debug, Clone)]
 pub struct SubvolumeDef {
     /// Subvolume name (e.g., "@", "@home")
@@ -29,6 +28,39 @@ pub struct SubvolumeDef {
     pub mount_point: String,
     /// Mount options
     pub mount_options: String,
+}
+
+/// Create standard btrfs subvolume definitions
+/// Following the common convention: @=root, @home, @var, @log, @snapshots
+pub fn standard_subvolumes() -> Vec<SubvolumeDef> {
+    let default_opts = "defaults,noatime,compress=zstd".to_string();
+    vec![
+        SubvolumeDef {
+            name: "@".to_string(),
+            mount_point: "/".to_string(),
+            mount_options: default_opts.clone(),
+        },
+        SubvolumeDef {
+            name: "@home".to_string(),
+            mount_point: "/home".to_string(),
+            mount_options: default_opts.clone(),
+        },
+        SubvolumeDef {
+            name: "@var".to_string(),
+            mount_point: "/var".to_string(),
+            mount_options: default_opts.clone(),
+        },
+        SubvolumeDef {
+            name: "@log".to_string(),
+            mount_point: "/var/log".to_string(),
+            mount_options: default_opts.clone(),
+        },
+        SubvolumeDef {
+            name: "@snapshots".to_string(),
+            mount_point: "/.snapshots".to_string(),
+            mount_options: default_opts,
+        },
+    ]
 }
 
 /// A single partition definition
@@ -63,9 +95,15 @@ pub struct PartitionDef {
 pub struct ComputedLayout {
     pub partitions: Vec<PartitionDef>,
     pub total_mib: u64,
-    /// Btrfs subvolumes (legacy - kept for future subvolume support)
-    #[allow(dead_code)]
+    /// Btrfs subvolumes (None for layouts with separate partitions)
     pub subvolumes: Option<Vec<SubvolumeDef>>,
+}
+
+impl ComputedLayout {
+    /// Check if this layout uses btrfs subvolumes
+    pub fn uses_subvolumes(&self) -> bool {
+        self.subvolumes.is_some() && !self.subvolumes.as_ref().unwrap().is_empty()
+    }
 }
 
 /// Sizing constants from Disk-Populater.sh
@@ -307,9 +345,9 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
     })
 }
 
-/// Compute the minimal 3-partition layout
+/// Compute the minimal 3-partition layout with btrfs subvolumes
 ///
-/// Layout: EFI, Swap, Root
+/// Layout: EFI, Swap, Root (with @, @home, @var, @log, @snapshots subvolumes)
 fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
     let swap_mib = calculate_swap_mib(ram_mib);
@@ -355,7 +393,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             name: "ROOT".to_string(),
             size_mib: 0, // Remainder
             type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
-            mount_point: Some("/".to_string()),
+            // Note: mount_point is None because we mount subvolumes, not the raw partition
+            mount_point: None,
             is_swap: false,
             is_efi: false,
             is_luks: false,
@@ -368,7 +407,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        subvolumes: None,
+        // Use standard btrfs subvolumes for the Minimal layout
+        subvolumes: Some(standard_subvolumes()),
     })
 }
 

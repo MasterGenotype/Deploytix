@@ -179,13 +179,12 @@ pub fn create_btrfs_filesystem(
         })
 }
 
-/// Create btrfs subvolumes on a device (legacy - kept for non-multi-volume layouts)
+/// Create btrfs subvolumes on a device
 ///
 /// Follows the canonical BTRFS subvolume setup order:
 /// 1. Mount the raw BTRFS filesystem to the filesystem mountpoint
 /// 2. Create each subvolume inside the mountpoint (prefixed with @)
 /// 3. Unmount from the filesystem mountpoint
-#[allow(dead_code)]
 pub fn create_btrfs_subvolumes(
     cmd: &CommandRunner,
     device: &str,
@@ -226,8 +225,7 @@ pub fn create_btrfs_subvolumes(
     Ok(())
 }
 
-/// Mount btrfs subvolumes for installation (legacy - kept for non-multi-volume layouts)
-#[allow(dead_code)]
+/// Mount btrfs subvolumes for installation
 pub fn mount_btrfs_subvolumes(
     cmd: &CommandRunner,
     device: &str,

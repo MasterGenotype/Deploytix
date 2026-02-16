@@ -418,9 +418,31 @@ mount_volume() {{
     fi
 }}
 
+# run_hook is called during the hooks phase
+# We set the mount_handler variable to point to our custom mount function
 run_hook() {{
-    local new_root="/new_root"
+    echo "[mountcrypt] Setting mount_handler to mountcrypt_handler"
+    # Override the default mount handler with our custom one
+    mount_handler=mountcrypt_handler
+}}
+
+# Our custom mount handler - called by mkinitcpio's init via $mount_handler variable
+# Receives the mount point as $1 (typically /new_root)
+mountcrypt_handler() {{
+    local new_root="$1"
     local ret=0
+
+    echo "[mountcrypt] mount_handler called with target: $new_root"
+
+    # CRITICAL: Check if root is already mounted to prevent double-mount
+    # This can happen if mkinitcpio's init has fallback mount logic
+    if mountpoint -q "$new_root" 2>/dev/null; then
+        echo "[mountcrypt] WARNING: $new_root is already a mountpoint!"
+        echo "[mountcrypt] Current mounts on $new_root:"
+        grep "$new_root" /proc/mounts 2>/dev/null || true
+        echo "[mountcrypt] Skipping mount_handler to prevent double-mount"
+        return 0
+    fi
 
     echo "[mountcrypt] Starting multi-volume mount sequence..."
 
@@ -503,6 +525,8 @@ run_hook() {{
 build() {
     # blkid is needed for EFI partition detection fallback
     add_binary 'blkid'
+    # mountpoint is used to check if root is already mounted
+    add_binary 'mountpoint'
     add_runscript
 }
 

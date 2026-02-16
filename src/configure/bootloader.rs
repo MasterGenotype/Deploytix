@@ -66,8 +66,11 @@ fn install_grub(
         get_partition_uuid(&root_part)?
     };
 
-    // Configure GRUB defaults
-    configure_grub_defaults(cmd, config, &root_uuid, None, install_root)?;
+    // Configure GRUB defaults (no subvolumes for non-layout-aware path)
+    // Note: This path is used for non-encrypted systems; Minimal layout with
+    // subvolumes should use install_bootloader_with_layout instead
+    let uses_subvolumes = config.disk.layout == PartitionLayout::Minimal;
+    configure_grub_defaults(cmd, config, &root_uuid, None, uses_subvolumes, install_root)?;
 
     run_grub_install(cmd, device, install_root)?;
 
@@ -98,7 +101,8 @@ fn install_grub_with_layout(
         };
 
         // Configure GRUB defaults for encrypted system
-        configure_grub_defaults(cmd, config, &luks_uuid, Some(&config.disk.luks_mapper_name), install_root)?;
+        // Check if layout uses subvolumes (Minimal does, Standard/CryptoSubvolume don't)
+        configure_grub_defaults(cmd, config, &luks_uuid, Some(&config.disk.luks_mapper_name), layout.uses_subvolumes(), install_root)?;
     } else {
         // Fall back to non-encrypted
         return install_grub(cmd, config, device, install_root);
@@ -173,11 +177,13 @@ pub fn create_efi_boot_entry(
 
 /// Configure GRUB defaults
 /// For encrypted systems, pass luks_uuid and mapper_name
+/// uses_subvolumes indicates if the layout uses btrfs subvolumes (for rootflags)
 fn configure_grub_defaults(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     root_or_luks_uuid: &str,
     mapper_name: Option<&str>,
+    uses_subvolumes: bool,
     install_root: &str,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
@@ -188,6 +194,9 @@ fn configure_grub_defaults(
             println!("    GRUB_ENABLE_CRYPTODISK=y");
             println!("    cryptdevice=UUID=<LUKS_UUID>:<mapper> root=/dev/mapper/<mapper>");
         }
+        if uses_subvolumes {
+            println!("    rootflags=subvol=@");
+        }
         return Ok(());
     }
 
@@ -196,17 +205,30 @@ fn configure_grub_defaults(
 
     if let Some(mapper) = mapper_name {
         // Encrypted system
-        cmdline_parts.push(format!("cryptdevice=UUID={}:{}", root_or_luks_uuid, mapper));
-        cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
-        // Only add subvol=@ for layouts that use btrfs subvolumes.
-        // CryptoSubvolume uses separate LUKS partitions with plain btrfs (no subvolumes).
-        if config.disk.layout != PartitionLayout::CryptoSubvolume {
-            cmdline_parts.push("rootflags=subvol=@".to_string());
+        if config.disk.layout == PartitionLayout::CryptoSubvolume {
+            // CryptoSubvolume uses custom hooks (crypttab-unlock + mountcrypt)
+            // NOT the standard encrypt hook, so we don't use cryptdevice= parameter.
+            // The mountcrypt hook's mount_handler handles all mounting.
+            // Set root= to the mapper device so mkinitcpio knows what to pass to mount_handler.
+            cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
+            cmdline_parts.push("rw".to_string());
+        } else {
+            // Standard/Minimal layouts use the encrypt hook with cryptdevice=
+            cmdline_parts.push(format!("cryptdevice=UUID={}:{}", root_or_luks_uuid, mapper));
+            cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
+            // Only add rootflags=subvol=@ if layout uses btrfs subvolumes
+            if uses_subvolumes {
+                cmdline_parts.push("rootflags=subvol=@".to_string());
+            }
+            cmdline_parts.push("rw".to_string());
         }
-        cmdline_parts.push("rw".to_string());
     } else {
         // Non-encrypted system
         cmdline_parts.push(format!("root=UUID={}", root_or_luks_uuid));
+        // Only add rootflags=subvol=@ if layout uses btrfs subvolumes
+        if uses_subvolumes {
+            cmdline_parts.push("rootflags=subvol=@".to_string());
+        }
         cmdline_parts.push("rw".to_string());
     }
 
