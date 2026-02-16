@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
 /// SecureBoot key paths (sbctl default locations)
-pub const SBCTL_KEYS_DIR: &str = "/usr/share/secureboot/keys";
+pub const SBCTL_KEYS_DIR: &str = "/var/lib/sbctl/keys";
 
 /// Setup SecureBoot keys based on the chosen method
 pub fn setup_secureboot(
@@ -56,10 +56,15 @@ fn setup_sbctl(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     info!("Setting up SecureBoot with sbctl");
 
     if cmd.is_dry_run() {
+        println!("  [dry-run] mkdir -p /var/lib/sbctl/keys");
         println!("  [dry-run] sbctl create-keys");
         println!("  [dry-run] sbctl enroll-keys --microsoft");
         return Ok(());
     }
+
+    // Ensure sbctl keys directory exists before key generation
+    let keys_dir = format!("{}/var/lib/sbctl/keys", install_root);
+    fs::create_dir_all(&keys_dir)?;
 
     // Create keys
     cmd.run_in_chroot(install_root, "sbctl create-keys")
@@ -67,6 +72,19 @@ fn setup_sbctl(cmd: &CommandRunner, install_root: &str) -> Result<()> {
             command: "sbctl create-keys".to_string(),
             stderr: e.to_string(),
         })?;
+
+    // Verify keys were generated
+    let db_key = format!("{}/db/db.key", keys_dir);
+    if !std::path::Path::new(&db_key).exists() {
+        return Err(DeploytixError::CommandFailed {
+            command: "sbctl create-keys".to_string(),
+            stderr: format!(
+                "Key generation completed but {} was not created. \
+                 Check that sbctl is correctly installed in the chroot.",
+                db_key
+            ),
+        });
+    }
 
     // Enroll keys (include Microsoft keys for compatibility)
     // Note: This only works if the system is booted in setup mode
