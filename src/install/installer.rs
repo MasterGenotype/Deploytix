@@ -163,6 +163,9 @@ impl Installer {
             self.generate_crypttab_multi_volume()?;
         } else if self.config.disk.layout == PartitionLayout::LvmThin {
             self.report_progress(0.60, "Setting up LVM crypttab...");
+            if self.config.disk.boot_encryption {
+                self.setup_lvm_thin_keyfiles()?;
+            }
             self.generate_crypttab_lvm_thin()?;
         }
 
@@ -758,6 +761,26 @@ impl Installer {
 
         self.lvm_thin_volumes = thin_volumes;
 
+        // Setup LUKS1 encryption on /boot partition if enabled
+        if self.config.disk.boot_encryption {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
+
+            let boot_container = configure::encryption::setup_boot_encryption(
+                &self.cmd,
+                &self.config,
+                &self.config.disk.device,
+                boot_part.number,
+            )?;
+
+            self.luks_boot_container = Some(boot_container);
+        }
+
         info!(
             "LVM thin provisioning setup complete: VG={}, pool={}",
             vg_name, pool_name
@@ -788,15 +811,20 @@ impl Installer {
         }
 
         // Format BOOT partition as btrfs
-        let boot_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_boot_fs)
-            .ok_or_else(|| {
-                DeploytixError::ConfigError("No Boot partition found in layout".to_string())
-            })?;
-        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
-        format_boot(&self.cmd, &boot_device)?;
+        if let Some(ref boot_container) = self.luks_boot_container {
+            // Encrypted boot: format the mapped device
+            format_boot(&self.cmd, &boot_container.mapped_path)?;
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
+            let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+            format_boot(&self.cmd, &boot_device)?;
+        }
 
         // Format EFI partition as FAT32
         let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
@@ -846,21 +874,25 @@ impl Installer {
         }
 
         // Mount BOOT partition
-        let boot_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.is_boot_fs)
-            .ok_or_else(|| {
-                DeploytixError::ConfigError("No Boot partition found in layout".to_string())
-            })?;
-        let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+        let boot_source = if let Some(ref boot_container) = self.luks_boot_container {
+            boot_container.mapped_path.clone()
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
+            partition_path(&self.config.disk.device, boot_part.number)
+        };
         let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
         if !self.cmd.is_dry_run() {
             fs::create_dir_all(&boot_mount)?;
         }
-        self.cmd.run("mount", &[&boot_device, &boot_mount])?;
-        info!("Mounted {} to {}", boot_device, boot_mount);
+        self.cmd.run("mount", &[&boot_source, &boot_mount])?;
+        info!("Mounted {} to {}", boot_source, boot_mount);
 
         // Mount EFI partition
         let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
@@ -885,6 +917,12 @@ impl Installer {
         let layout = self.layout.as_ref().unwrap();
         let vg_name = &self.config.disk.lvm_vg_name;
 
+        // Pass encrypted boot mapped device path if boot encryption is enabled
+        let boot_mapped = self
+            .luks_boot_container
+            .as_ref()
+            .map(|c| c.mapped_path.as_str());
+
         generate_fstab_lvm_thin(
             &self.cmd,
             vg_name,
@@ -892,6 +930,7 @@ impl Installer {
             &self.config.disk.device,
             layout,
             &self.config.disk.swap_type,
+            boot_mapped,
             INSTALL_ROOT,
         )
     }
@@ -909,18 +948,97 @@ impl Installer {
             // Get LUKS UUID
             let luks_uuid = configure::encryption::get_luks_uuid(&container.device)?;
 
-            let content = format!(
-                "# /etc/crypttab: LUKS container for LVM thin provisioning\n\
+            // Determine keyfile path for LVM container
+            let lvm_keyfile = if !self.keyfiles.is_empty() {
+                self.keyfiles
+                    .iter()
+                    .find(|k| k.volume_name == "Lvm" || k.volume_name == "LVM")
+                    .map(|k| k.keyfile_path.clone())
+                    .unwrap_or_else(|| "none".to_string())
+            } else {
+                "none".to_string()
+            };
+
+            let mut content = format!(
+                "# /etc/crypttab: LUKS containers for LVM thin provisioning\n\
                  # <target name>  <source device>  <key file>  <options>\n\
-                 {}  UUID={}  none  luks\n",
-                container.mapper_name, luks_uuid
+                 {}  UUID={}  {}  luks\n",
+                container.mapper_name, luks_uuid, lvm_keyfile
             );
+
+            // Add boot LUKS1 entry if boot encryption is enabled
+            // Boot always uses discard (LUKS1 doesn't support integrity)
+            if let Some(ref boot_container) = self.luks_boot_container {
+                let boot_uuid = configure::encryption::get_luks_uuid(&boot_container.device)?;
+
+                let boot_keyfile = self
+                    .keyfiles
+                    .iter()
+                    .find(|k| k.volume_name == "Boot")
+                    .map(|k| k.keyfile_path.clone())
+                    .unwrap_or_else(|| "none".to_string());
+
+                content.push_str(&format!(
+                    "Boot  UUID={}  {}  luks,discard\n",
+                    boot_uuid, boot_keyfile
+                ));
+            }
 
             if !self.cmd.is_dry_run() {
                 fs::write(&crypttab_path, content)?;
             }
             info!("Crypttab written to {}", crypttab_path);
         }
+        Ok(())
+    }
+
+    /// Setup keyfiles for LVM thin layout with boot encryption
+    ///
+    /// Creates keyfiles for the LVM LUKS container and the boot LUKS1 container,
+    /// enabling automatic unlocking during initramfs.
+    fn setup_lvm_thin_keyfiles(&mut self) -> Result<()> {
+        info!("[Phase 3/6] Setting up keyfiles for LVM thin boot encryption");
+
+        let password = self
+            .config
+            .disk
+            .encryption_password
+            .as_ref()
+            .ok_or_else(|| {
+                DeploytixError::ValidationError(
+                    "Encryption password required for keyfile setup".to_string(),
+                )
+            })?;
+
+        // Collect containers that need keyfiles
+        let mut all_containers: Vec<configure::encryption::LuksContainer> = Vec::new();
+
+        // Add LVM container
+        if let Some(ref lvm_container) = self.luks_lvm_container {
+            all_containers.push(lvm_container.clone());
+        }
+
+        // Add boot container
+        if let Some(ref boot_container) = self.luks_boot_container {
+            all_containers.push(boot_container.clone());
+        }
+
+        if all_containers.is_empty() {
+            return Ok(());
+        }
+
+        let keyfiles = configure::keyfiles::setup_keyfiles_for_volumes(
+            &self.cmd,
+            &all_containers,
+            password,
+            INSTALL_ROOT,
+        )?;
+
+        self.keyfiles = keyfiles;
+        info!(
+            "Keyfiles created for {} LVM thin volumes",
+            all_containers.len()
+        );
         Ok(())
     }
 

@@ -78,6 +78,15 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         if config.disk.encryption {
             hooks.push("encrypt".to_string());
         }
+
+        // When boot encryption is enabled, add crypttab-unlock hook to unlock
+        // the LUKS1 /boot container via /etc/crypttab. The encrypt hook handles
+        // the main Crypt-LVM container; crypttab-unlock handles Crypt-Boot and
+        // skips Crypt-LVM (already unlocked).
+        if config.disk.boot_encryption {
+            hooks.push("crypttab-unlock".to_string());
+        }
+
         // lvm2 hook is already added above
 
         // Filesystem-specific hooks
@@ -155,6 +164,13 @@ pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
     // For LvmThin layout with encryption, include LUKS keyfile
     if config.disk.encryption && config.disk.layout == PartitionLayout::LvmThin {
         files.push("/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
+
+        // When boot encryption is enabled, include crypttab and boot keyfile
+        // so crypttab-unlock hook can unlock the LUKS1 /boot container
+        if config.disk.boot_encryption {
+            files.push("/etc/crypttab".to_string());
+            files.push("/etc/cryptsetup-keys.d/cryptboot.key".to_string());
+        }
     }
 
     files
@@ -362,6 +378,80 @@ mod tests {
         assert!(
             !modules.contains(&"dm_integrity".to_string()),
             "Non-integrity config must not include dm_integrity module"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_encrypted_uses_encrypt_hook() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        let hooks = construct_hooks(&cfg);
+        assert!(
+            hooks.contains(&"encrypt".to_string()),
+            "LvmThin encrypted must include encrypt hook"
+        );
+        assert!(
+            hooks.contains(&"lvm2".to_string()),
+            "LvmThin must include lvm2 hook"
+        );
+        assert!(
+            !hooks.contains(&"crypttab-unlock".to_string()),
+            "LvmThin without boot encryption should not include crypttab-unlock"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_boot_encryption_adds_crypttab_unlock_hook() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        cfg.disk.boot_encryption = true;
+        let hooks = construct_hooks(&cfg);
+        assert!(
+            hooks.contains(&"encrypt".to_string()),
+            "LvmThin with boot encryption must still include encrypt hook"
+        );
+        assert!(
+            hooks.contains(&"crypttab-unlock".to_string()),
+            "LvmThin with boot encryption must include crypttab-unlock hook"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_boot_encryption_includes_crypttab_and_keyfiles() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        cfg.disk.boot_encryption = true;
+        let files = construct_files(&cfg);
+        assert!(
+            files.contains(&"/etc/cryptsetup-keys.d/cryptlvm.key".to_string()),
+            "LvmThin must include LVM keyfile"
+        );
+        assert!(
+            files.contains(&"/etc/crypttab".to_string()),
+            "LvmThin with boot encryption must include crypttab"
+        );
+        assert!(
+            files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
+            "LvmThin with boot encryption must include boot keyfile"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_without_boot_encryption_no_crypttab_in_files() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        let files = construct_files(&cfg);
+        assert!(
+            files.contains(&"/etc/cryptsetup-keys.d/cryptlvm.key".to_string()),
+            "LvmThin must include LVM keyfile"
+        );
+        assert!(
+            !files.contains(&"/etc/crypttab".to_string()),
+            "LvmThin without boot encryption should not include crypttab in initramfs"
+        );
+        assert!(
+            !files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
+            "LvmThin without boot encryption should not include boot keyfile"
         );
     }
 }
