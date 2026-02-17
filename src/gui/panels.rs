@@ -461,6 +461,7 @@ pub fn summary_panel(
     layout: &PartitionLayout,
     filesystem: &Filesystem,
     encryption: bool,
+    boot_encryption: bool,
     integrity: bool,
     swap_type: &SwapType,
     init: &InitSystem,
@@ -495,6 +496,16 @@ pub fn summary_panel(
             ui.label("Encryption:");
             ui.label(if encryption { "Enabled" } else { "Disabled" });
             ui.end_row();
+
+            if encryption {
+                ui.label("Boot Encryption:");
+                ui.label(if boot_encryption {
+                    "Enabled (LUKS1)"
+                } else {
+                    "Disabled"
+                });
+                ui.end_row();
+            }
 
             ui.label("Integrity:");
             ui.label(if integrity {
