@@ -74,6 +74,7 @@ pub fn disk_config_panel(
     encryption: &mut bool,
     encryption_password: &mut String,
     boot_encryption: &mut bool,
+    integrity: &mut bool,
     swap_type: &mut SwapType,
     zram_percent: &mut u8,
     lvm_vg_name: &mut String,
@@ -167,20 +168,37 @@ pub fn disk_config_panel(
         *encryption = false;
     }
 
-    // Encryption password
+    // Encryption password and integrity options
     if *encryption {
         ui.label("Encryption Password:");
         ui.add(egui::TextEdit::singleline(encryption_password).password(true));
         ui.add_space(8.0);
 
+        ui.checkbox(integrity, "Enable dm-integrity (per-sector HMAC-SHA256 integrity)");
+        if *integrity {
+            ui.label(
+                RichText::new("Detects silent data corruption. Disables TRIM/discard support.")
+                    .weak(),
+            );
+        }
+        ui.add_space(8.0);
+
+        // Boot encryption uses LUKS1 (integrity is automatically disabled for boot)
         if *layout != PartitionLayout::LvmThin {
             ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
+            if *integrity && *boot_encryption {
+                ui.label(
+                    RichText::new("Note: /boot uses LUKS1 without integrity (LUKS1 does not support dm-integrity)")
+                        .weak(),
+                );
+            }
             ui.add_space(8.0);
         } else {
             *boot_encryption = false;
         }
     } else {
         *boot_encryption = false;
+        *integrity = false;
     }
 
     // LVM Thin Provisioning settings
@@ -443,6 +461,7 @@ pub fn summary_panel(
     layout: &PartitionLayout,
     filesystem: &Filesystem,
     encryption: bool,
+    integrity: bool,
     swap_type: &SwapType,
     init: &InitSystem,
     bootloader: &Bootloader,
@@ -475,6 +494,14 @@ pub fn summary_panel(
 
             ui.label("Encryption:");
             ui.label(if encryption { "Enabled" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("Integrity:");
+            ui.label(if integrity {
+                "Enabled (HMAC-SHA256)"
+            } else {
+                "Disabled"
+            });
             ui.end_row();
 
             ui.label("Swap:");

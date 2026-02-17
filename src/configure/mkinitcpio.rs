@@ -29,6 +29,11 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
     // Encryption modules
     if config.disk.encryption {
         modules.extend(["dm_crypt".to_string(), "dm_mod".to_string()]);
+
+        // dm-integrity module for per-sector integrity protection
+        if config.disk.integrity {
+            modules.push("dm_integrity".to_string());
+        }
     }
 
     // LVM thin provisioning modules
@@ -336,6 +341,27 @@ mod tests {
         assert!(
             files.is_empty(),
             "Unencrypted Minimal layout should not embed crypttab/keyfiles"
+        );
+    }
+
+    #[test]
+    fn standard_encrypted_with_integrity_includes_dm_integrity_module() {
+        let mut cfg = config_with(PartitionLayout::Standard, true);
+        cfg.disk.integrity = true;
+        let modules = construct_modules(&cfg);
+        assert!(
+            modules.contains(&"dm_integrity".to_string()),
+            "Integrity-enabled config must include dm_integrity module"
+        );
+    }
+
+    #[test]
+    fn standard_encrypted_without_integrity_excludes_dm_integrity_module() {
+        let cfg = config_with(PartitionLayout::Standard, true);
+        let modules = construct_modules(&cfg);
+        assert!(
+            !modules.contains(&"dm_integrity".to_string()),
+            "Non-integrity config must not include dm_integrity module"
         );
     }
 }
