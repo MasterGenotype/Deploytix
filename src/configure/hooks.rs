@@ -78,6 +78,13 @@ fn generate_hooks(
         hooks.push(generate_mountcrypt_hook(config, layout));
     }
 
+    // For LvmThin with boot encryption, install the crypttab-unlock hook to
+    // unlock the LUKS1 /boot container. The encrypt hook handles the main
+    // Crypt-LVM container; crypttab-unlock handles Crypt-Boot separately.
+    if config.disk.boot_encryption && config.disk.layout == PartitionLayout::LvmThin {
+        hooks.push(generate_crypttab_unlock_hook());
+    }
+
     Ok(hooks)
 }
 
@@ -222,10 +229,20 @@ run_hook() {
                 ;;
         esac
 
-        # Convert the mapping name to title case (e.g., "Root" -> "Root", "ROOT" -> "Root")
-        local formatted_mapping
-        formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
-        local full_mapper_name="Crypt-$formatted_mapping"
+        # Determine the full mapper name.
+        # If the crypttab name already starts with "Crypt-", use it as-is.
+        # Otherwise, title-case it and prepend "Crypt-" (e.g., "Root" -> "Crypt-Root").
+        local full_mapper_name
+        case "$mapping" in
+            Crypt-*)
+                full_mapper_name="$mapping"
+                ;;
+            *)
+                local formatted_mapping
+                formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+                full_mapper_name="Crypt-$formatted_mapping"
+                ;;
+        esac
 
         # Skip EFI partition entries (should never be encrypted, but guard against misconfiguration)
         case "$formatted_mapping" in
@@ -661,6 +678,37 @@ mod tests {
         assert!(
             !hook.hook_content.contains("/dev/mapper/Crypt-Boot"),
             "Without boot_encryption, mountcrypt must not reference Crypt-Boot"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_boot_encryption_generates_crypttab_unlock_hook() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        cfg.disk.boot_encryption = true;
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert_eq!(hooks.len(), 1, "LvmThin boot encryption should generate 1 hook");
+        assert_eq!(hooks[0].name, "crypttab-unlock");
+    }
+
+    #[test]
+    fn lvm_thin_no_boot_encryption_no_hooks() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
+        assert!(
+            hooks.is_empty(),
+            "LvmThin without boot encryption should not generate custom hooks"
+        );
+    }
+
+    #[test]
+    fn crypttab_unlock_hook_handles_crypt_prefixed_names() {
+        let hook = generate_crypttab_unlock_hook();
+        // The hook should handle names that already start with "Crypt-"
+        assert!(
+            hook.hook_content.contains("Crypt-*)"),
+            "crypttab-unlock must handle names already prefixed with Crypt-"
         );
     }
 }

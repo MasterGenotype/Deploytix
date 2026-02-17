@@ -511,7 +511,9 @@ impl DeploymentConfig {
 
         // Boot encryption (LUKS1 on separate /boot partition)
         // When integrity is enabled, boot uses LUKS1 without integrity (LUKS1 doesn't support it)
-        let boot_encryption = if encryption && layout == PartitionLayout::Standard {
+        let boot_encryption = if encryption
+            && (layout == PartitionLayout::Standard || layout == PartitionLayout::LvmThin)
+        {
             prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
         } else {
             false
@@ -751,11 +753,13 @@ impl DeploymentConfig {
             ));
         }
 
-        // Boot encryption requires Standard layout with encryption enabled
+        // Boot encryption requires Standard or LvmThin layout with encryption enabled
         if self.disk.boot_encryption {
-            if self.disk.layout != PartitionLayout::Standard {
+            if self.disk.layout != PartitionLayout::Standard
+                && self.disk.layout != PartitionLayout::LvmThin
+            {
                 return Err(DeploytixError::ValidationError(
-                    "Boot encryption requires Standard layout".to_string(),
+                    "Boot encryption requires Standard or LvmThin layout".to_string(),
                 ));
             }
             if !self.disk.encryption {

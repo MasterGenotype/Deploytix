@@ -391,6 +391,8 @@ pub fn generate_fstab_multi_volume(
 /// Generate fstab for LVM thin provisioning layout
 ///
 /// Creates entries for thin LVs mounted from /dev/vg/lv paths.
+/// When `boot_mapped_device` is Some, the boot partition is encrypted and
+/// the filesystem UUID should be read from the mapped device path.
 pub fn generate_fstab_lvm_thin(
     cmd: &CommandRunner,
     vg_name: &str,
@@ -398,6 +400,7 @@ pub fn generate_fstab_lvm_thin(
     device: &str,
     layout: &ComputedLayout,
     swap_type: &SwapType,
+    boot_mapped_device: Option<&str>,
     install_root: &str,
 ) -> Result<()> {
     info!("Generating /etc/fstab for LVM thin volumes");
@@ -466,15 +469,25 @@ pub fn generate_fstab_lvm_thin(
     }
 
     // Add BOOT partition
-    let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
-    if let Some(boot) = boot_part {
-        let boot_device = partition_path(device, boot.number);
-        let boot_uuid = get_partition_uuid(&boot_device)?;
+    // When boot is encrypted, use the mapped device path for the filesystem UUID
+    if let Some(mapped_dev) = boot_mapped_device {
+        let boot_uuid = get_partition_uuid(mapped_dev)?;
         content.push_str(&format!(
-            "# Boot partition\n\
+            "# Boot partition (LUKS1 encrypted)\n\
              UUID={}  /boot  btrfs  defaults,noatime  0  2\n\n",
             boot_uuid
         ));
+    } else {
+        let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
+        if let Some(boot) = boot_part {
+            let boot_device = partition_path(device, boot.number);
+            let boot_uuid = get_partition_uuid(&boot_device)?;
+            content.push_str(&format!(
+                "# Boot partition\n\
+                 UUID={}  /boot  btrfs  defaults,noatime  0  2\n\n",
+                boot_uuid
+            ));
+        }
     }
 
     // Add EFI partition
