@@ -251,6 +251,30 @@ fn get_signing_key_paths(config: &DeploymentConfig, install_root: &str) -> (Stri
     }
 }
 
+/// Ensure sbctl keys exist, creating them if necessary
+fn ensure_sbctl_keys(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would ensure sbctl keys exist");
+        return Ok(());
+    }
+
+    // Check if keys already exist
+    let db_key_path = format!("{}/var/lib/sbctl/keys/db/db.key", install_root);
+    if std::path::Path::new(&db_key_path).exists() {
+        info!("sbctl keys already exist, skipping creation");
+        return Ok(());
+    }
+
+    info!("Creating sbctl keys before signing");
+    cmd.run_in_chroot(install_root, "sbctl create-keys")
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "sbctl create-keys".to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    Ok(())
+}
+
 /// Sign all boot-related files
 pub fn sign_boot_files(
     cmd: &CommandRunner,
@@ -262,6 +286,11 @@ pub fn sign_boot_files(
     }
 
     info!("Signing boot files for SecureBoot");
+
+    // Ensure keys exist before signing (for sbctl method)
+    if config.system.secureboot_method == SecureBootMethod::Sbctl {
+        ensure_sbctl_keys(cmd, install_root)?;
+    }
 
     // Files to sign
     let files_to_sign = [
