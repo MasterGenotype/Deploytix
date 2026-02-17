@@ -47,7 +47,8 @@ pub struct DiskConfig {
     pub keyfile_path: Option<String>,
     /// Enable dm-integrity for per-sector integrity protection alongside encryption
     /// Uses HMAC-SHA256 to detect silent data corruption on encrypted volumes.
-    /// Only supported with LUKS2 (not compatible with boot encryption or TRIM/discard).
+    /// Only supported with LUKS2; boot partition (LUKS1) is excluded from integrity.
+    /// Not compatible with TRIM/discard.
     #[serde(default)]
     pub integrity: bool,
     /// Enable keyfile-based automatic unlocking (default: true when encryption enabled)
@@ -509,11 +510,8 @@ impl DeploymentConfig {
         };
 
         // Boot encryption (LUKS1 on separate /boot partition)
-        // Not compatible with integrity (LUKS1 does not support dm-integrity)
-        let boot_encryption = if encryption
-            && layout == PartitionLayout::Standard
-            && !integrity
-        {
+        // When integrity is enabled, boot uses LUKS1 without integrity (LUKS1 doesn't support it)
+        let boot_encryption = if encryption && layout == PartitionLayout::Standard {
             prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
         } else {
             false
@@ -750,13 +748,6 @@ impl DeploymentConfig {
         if self.disk.integrity && !self.disk.encryption {
             return Err(DeploytixError::ValidationError(
                 "Integrity (dm-integrity) requires encryption to be enabled".to_string(),
-            ));
-        }
-
-        // Integrity is not compatible with boot encryption (LUKS1 doesn't support integrity)
-        if self.disk.integrity && self.disk.boot_encryption {
-            return Err(DeploytixError::ValidationError(
-                "Integrity (dm-integrity) is not compatible with boot encryption (LUKS1 does not support dm-integrity)".to_string(),
             ));
         }
 

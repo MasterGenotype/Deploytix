@@ -183,9 +183,15 @@ pub fn disk_config_panel(
         }
         ui.add_space(8.0);
 
-        // Boot encryption is not compatible with integrity (LUKS1 doesn't support it)
-        if *layout != PartitionLayout::LvmThin && !*integrity {
+        // Boot encryption uses LUKS1 (integrity is automatically disabled for boot)
+        if *layout != PartitionLayout::LvmThin {
             ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
+            if *integrity && *boot_encryption {
+                ui.label(
+                    RichText::new("Note: /boot uses LUKS1 without integrity (LUKS1 does not support dm-integrity)")
+                        .weak(),
+                );
+            }
             ui.add_space(8.0);
         } else {
             *boot_encryption = false;
