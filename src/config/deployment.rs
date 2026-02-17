@@ -45,6 +45,11 @@ pub struct DiskConfig {
     /// Path to keyfile (None = password prompt)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyfile_path: Option<String>,
+    /// Enable dm-integrity for per-sector integrity protection alongside encryption
+    /// Uses HMAC-SHA256 to detect silent data corruption on encrypted volumes.
+    /// Only supported with LUKS2 (not compatible with boot encryption or TRIM/discard).
+    #[serde(default)]
+    pub integrity: bool,
     /// Enable keyfile-based automatic unlocking (default: true when encryption enabled)
     #[serde(default = "default_true")]
     pub keyfile_enabled: bool,
@@ -493,8 +498,22 @@ impl DeploymentConfig {
                 layout == PartitionLayout::Minimal // Minimal always uses subvolumes
             };
 
+        // Integrity (dm-integrity alongside LUKS2 encryption)
+        let integrity = if encryption {
+            prompt_confirm(
+                "Enable dm-integrity (per-sector HMAC-SHA256 integrity protection)?",
+                false,
+            )?
+        } else {
+            false
+        };
+
         // Boot encryption (LUKS1 on separate /boot partition)
-        let boot_encryption = if encryption && layout == PartitionLayout::Standard {
+        // Not compatible with integrity (LUKS1 does not support dm-integrity)
+        let boot_encryption = if encryption
+            && layout == PartitionLayout::Standard
+            && !integrity
+        {
             prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
         } else {
             false
@@ -580,6 +599,7 @@ impl DeploymentConfig {
                 boot_encryption,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
+                integrity,
                 keyfile_enabled: encryption, // Enable keyfiles when encryption is enabled
                 use_subvolumes,
                 use_lvm_thin,
@@ -630,6 +650,7 @@ impl DeploymentConfig {
                 boot_encryption: false,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
                 keyfile_path: None,
+                integrity: false,
                 keyfile_enabled: false,
                 use_subvolumes: false,
                 use_lvm_thin: false,
@@ -722,6 +743,20 @@ impl DeploymentConfig {
         {
             return Err(DeploytixError::ValidationError(
                 "Encryption is only supported on Standard and LvmThin layouts".to_string(),
+            ));
+        }
+
+        // Integrity requires encryption
+        if self.disk.integrity && !self.disk.encryption {
+            return Err(DeploytixError::ValidationError(
+                "Integrity (dm-integrity) requires encryption to be enabled".to_string(),
+            ));
+        }
+
+        // Integrity is not compatible with boot encryption (LUKS1 doesn't support integrity)
+        if self.disk.integrity && self.disk.boot_encryption {
+            return Err(DeploytixError::ValidationError(
+                "Integrity (dm-integrity) is not compatible with boot encryption (LUKS1 does not support dm-integrity)".to_string(),
             ));
         }
 

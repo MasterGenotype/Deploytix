@@ -56,10 +56,13 @@ pub fn setup_encryption(
         luks_device, mapper_name
     );
 
+    let integrity = config.disk.integrity;
+
     if cmd.is_dry_run() {
+        let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
         println!(
-            "  [dry-run] cryptsetup luksFormat --type luks2 {}",
-            luks_device
+            "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
+            integrity_flag, luks_device
         );
         println!(
             "  [dry-run] cryptsetup open {} {}",
@@ -72,8 +75,12 @@ pub fn setup_encryption(
         });
     }
 
-    // Format LUKS container
-    luks_format(&luks_device, password)?;
+    // Format LUKS container (with or without integrity)
+    if integrity {
+        luks_format_integrity(&luks_device, password)?;
+    } else {
+        luks_format(&luks_device, password)?;
+    }
 
     // Open LUKS container
     luks_open(&luks_device, &mapper_name, password)?;
@@ -92,28 +99,57 @@ pub fn setup_encryption(
 
 /// Format a device as LUKS2
 fn luks_format(device: &str, password: &str) -> Result<()> {
-    info!(
-        "Formatting {} as LUKS2 container (aes-xts-plain64, argon2id)",
-        device
-    );
+    luks_format_inner(device, password, false)
+}
+
+/// Format a device as LUKS2 with dm-integrity (HMAC-SHA256 per-sector integrity)
+fn luks_format_integrity(device: &str, password: &str) -> Result<()> {
+    luks_format_inner(device, password, true)
+}
+
+/// Internal LUKS2 format implementation
+fn luks_format_inner(device: &str, password: &str, integrity: bool) -> Result<()> {
+    if integrity {
+        info!(
+            "Formatting {} as LUKS2 container with dm-integrity (aes-xts-plain64, argon2id, hmac-sha256)",
+            device
+        );
+    } else {
+        info!(
+            "Formatting {} as LUKS2 container (aes-xts-plain64, argon2id)",
+            device
+        );
+    }
+
+    let mut args = vec![
+        "luksFormat",
+        "--type",
+        "luks2",
+        "--cipher",
+        "aes-xts-plain64",
+        "--key-size",
+        "512",
+        "--hash",
+        "sha512",
+        "--pbkdf",
+        "argon2id",
+        "--batch-mode",
+    ];
+
+    // Add integrity flag for dm-integrity support
+    if integrity {
+        args.push("--integrity");
+        args.push("hmac-sha256");
+        // Use 4096 sector size for optimal performance with integrity
+        args.push("--sector-size");
+        args.push("4096");
+    }
+
+    args.push(device);
 
     // Use stdin to pass password securely (fixes command injection vulnerability)
     let mut child = Command::new("cryptsetup")
-        .args([
-            "luksFormat",
-            "--type",
-            "luks2",
-            "--cipher",
-            "aes-xts-plain64",
-            "--key-size",
-            "512",
-            "--hash",
-            "sha512",
-            "--pbkdf",
-            "argon2id",
-            "--batch-mode",
-            device,
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| DeploytixError::CommandFailed {
@@ -323,15 +359,45 @@ pub fn setup_single_luks(
     password: &str,
     mapper_name: &str,
 ) -> Result<LuksContainer> {
+    setup_single_luks_inner(cmd, device, password, mapper_name, false)
+}
+
+/// Setup LUKS2 encryption with dm-integrity for a single partition
+///
+/// Same as `setup_single_luks` but adds per-sector HMAC-SHA256 integrity protection.
+pub fn setup_single_luks_with_integrity(
+    cmd: &CommandRunner,
+    device: &str,
+    password: &str,
+    mapper_name: &str,
+) -> Result<LuksContainer> {
+    setup_single_luks_inner(cmd, device, password, mapper_name, true)
+}
+
+fn setup_single_luks_inner(
+    cmd: &CommandRunner,
+    device: &str,
+    password: &str,
+    mapper_name: &str,
+    integrity: bool,
+) -> Result<LuksContainer> {
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-    info!(
-        "Setting up LUKS2 encryption on {} (mapper: {})",
-        device, mapper_name
-    );
+    if integrity {
+        info!(
+            "Setting up LUKS2 encryption with dm-integrity on {} (mapper: {})",
+            device, mapper_name
+        );
+    } else {
+        info!(
+            "Setting up LUKS2 encryption on {} (mapper: {})",
+            device, mapper_name
+        );
+    }
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] cryptsetup luksFormat --type luks2 {}", device);
+        let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
+        println!("  [dry-run] cryptsetup luksFormat --type luks2{} {}", integrity_flag, device);
         println!("  [dry-run] cryptsetup open {} {}", device, mapper_name);
         return Ok(LuksContainer {
             device: device.to_string(),
@@ -340,8 +406,12 @@ pub fn setup_single_luks(
         });
     }
 
-    // Format LUKS container
-    luks_format(device, password)?;
+    // Format LUKS container (with or without integrity)
+    if integrity {
+        luks_format_integrity(device, password)?;
+    } else {
+        luks_format(device, password)?;
+    }
 
     // Open LUKS container
     luks_open(device, mapper_name, password)?;
@@ -378,6 +448,7 @@ pub fn setup_multi_volume_encryption(
         DeploytixError::ValidationError("Encryption password required".to_string())
     })?;
 
+    let integrity = config.disk.integrity;
     let mut containers = Vec::new();
 
     for (part_num, name) in luks_partitions {
@@ -387,23 +458,35 @@ pub fn setup_multi_volume_encryption(
         let mapper_name = format!("Crypt-{}", title_case_name);
         let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
-        info!(
-            "Setting up LUKS2 encryption on {} (mapper: {})",
-            luks_device, mapper_name
-        );
+        if integrity {
+            info!(
+                "Setting up LUKS2 encryption with dm-integrity on {} (mapper: {})",
+                luks_device, mapper_name
+            );
+        } else {
+            info!(
+                "Setting up LUKS2 encryption on {} (mapper: {})",
+                luks_device, mapper_name
+            );
+        }
 
         if cmd.is_dry_run() {
+            let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
             println!(
-                "  [dry-run] cryptsetup luksFormat --type luks2 {}",
-                luks_device
+                "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
+                integrity_flag, luks_device
             );
             println!(
                 "  [dry-run] cryptsetup open {} {}",
                 luks_device, mapper_name
             );
         } else {
-            // Format LUKS container
-            luks_format(&luks_device, password)?;
+            // Format LUKS container (with or without integrity)
+            if integrity {
+                luks_format_integrity(&luks_device, password)?;
+            } else {
+                luks_format(&luks_device, password)?;
+            }
 
             // Open LUKS container
             luks_open(&luks_device, &mapper_name, password)?;

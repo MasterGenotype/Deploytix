@@ -666,6 +666,7 @@ impl Installer {
             &self.luks_containers,
             self.luks_boot_container.as_ref(),
             &self.keyfiles,
+            self.config.disk.integrity,
             INSTALL_ROOT,
         )
     }
@@ -718,12 +719,21 @@ impl Installer {
                     )
                 })?;
 
-            let container = configure::encryption::setup_single_luks(
-                &self.cmd,
-                &lvm_device,
-                password,
-                "Crypt-LVM",
-            )?;
+            let container = if self.config.disk.integrity {
+                configure::encryption::setup_single_luks_with_integrity(
+                    &self.cmd,
+                    &lvm_device,
+                    password,
+                    "Crypt-LVM",
+                )?
+            } else {
+                configure::encryption::setup_single_luks(
+                    &self.cmd,
+                    &lvm_device,
+                    password,
+                    "Crypt-LVM",
+                )?
+            };
 
             // Create PV on the LUKS container
             lvm::create_pv(&self.cmd, &container.mapped_path)?;
