@@ -532,6 +532,7 @@ impl eframe::App for DeploytixGui {
                         &self.partition_layout,
                         &self.filesystem,
                         self.encryption,
+                        self.boot_encryption,
                         self.integrity,
                         &self.swap_type,
                         &self.init_system,
