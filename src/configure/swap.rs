@@ -163,33 +163,43 @@ fn setup_zram_s6(install_root: &str, percent: u8, algorithm: &str) -> Result<()>
     let sv_dir = format!("{}/etc/s6/sv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
 
-    // Create run script
-    let run_script = format!(
-        r#"#!/bin/execlineb -P
-foreground {{
-    backtick -n RAM_KB {{ pipeline {{ redirfd -r 0 /proc/meminfo }} grep MemTotal pipeline {{ awk "{{print $2}}" }} }}
-    importas -u RAM_KB RAM_KB
-    define ZRAM_SIZE ${{RAM_KB * {percent} / 100 * 1024}}
-    foreground {{ modprobe zram num_devices=1 }}
-    foreground {{ redirfd -w 1 /sys/block/zram0/comp_algorithm echo {algorithm} }}
-    foreground {{ redirfd -w 1 /sys/block/zram0/disksize echo $ZRAM_SIZE }}
-    foreground {{ mkswap /dev/zram0 }}
-    swapon -p 100 /dev/zram0
-}}
-s6-pause
+    // Create type file first - this is an s6-rc oneshot service
+    fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
+
+    // Oneshot services use an `up` script (not `run`, which is for longruns).
+    // The script runs to completion and exits; no s6-pause needed.
+    let up_script = format!(
+        r#"#!/bin/sh
+RAM_KB=$(grep MemTotal /proc/meminfo | awk '{{print $2}}')
+ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
+
+modprobe zram num_devices=1
+echo {algorithm} > /sys/block/zram0/comp_algorithm
+echo $ZRAM_SIZE > /sys/block/zram0/disksize
+mkswap /dev/zram0
+swapon -p 100 /dev/zram0
 "#,
         percent = percent,
         algorithm = algorithm
     );
 
-    let run_path = format!("{}/run", sv_dir);
-    fs::write(&run_path, run_script)?;
-    let mut perms = fs::metadata(&run_path)?.permissions();
+    let up_path = format!("{}/up", sv_dir);
+    fs::write(&up_path, up_script)?;
+    let mut perms = fs::metadata(&up_path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&run_path, perms)?;
+    fs::set_permissions(&up_path, perms)?;
 
-    // Create type file
-    fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
+    // `down` is the oneshot counterpart to `finish` in runit - runs on service stop
+    let down_script = r#"#!/bin/sh
+swapoff /dev/zram0 2>/dev/null
+echo 1 > /sys/block/zram0/reset 2>/dev/null
+"#;
+
+    let down_path = format!("{}/down", sv_dir);
+    fs::write(&down_path, down_script)?;
+    let mut perms = fs::metadata(&down_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&down_path, perms)?;
 
     info!("Created s6 ZRAM service at {}", sv_dir);
     Ok(())
