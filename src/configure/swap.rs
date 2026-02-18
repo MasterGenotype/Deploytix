@@ -159,37 +159,78 @@ stop() {{
 }
 
 /// Create ZRAM s6 service
+///
+/// Follows the structure used by the `zram-s6` AUR package
+/// (upstream: github.com/Senderman/s6-services).  The service is an s6-rc
+/// oneshot, so the startup script lives in `up` (not `run`, which is for
+/// longruns).  Configuration is stored in `/etc/s6/config/zram.conf` and
+/// read at boot via `envfile`.
 fn setup_zram_s6(install_root: &str, percent: u8, algorithm: &str) -> Result<()> {
     let sv_dir = format!("{}/etc/s6/sv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
 
-    // Create run script
-    let run_script = format!(
-        r#"#!/bin/execlineb -P
-foreground {{
-    backtick -n RAM_KB {{ pipeline {{ redirfd -r 0 /proc/meminfo }} grep MemTotal pipeline {{ awk "{{print $2}}" }} }}
-    importas -u RAM_KB RAM_KB
-    define ZRAM_SIZE ${{RAM_KB * {percent} / 100 * 1024}}
-    foreground {{ modprobe zram num_devices=1 }}
-    foreground {{ redirfd -w 1 /sys/block/zram0/comp_algorithm echo {algorithm} }}
-    foreground {{ redirfd -w 1 /sys/block/zram0/disksize echo $ZRAM_SIZE }}
-    foreground {{ mkswap /dev/zram0 }}
-    swapon -p 100 /dev/zram0
-}}
-s6-pause
-"#,
-        percent = percent,
-        algorithm = algorithm
+    // dependencies.d/ — declare that devfs and sysfs must be mounted first
+    let deps_dir = format!("{}/dependencies.d", sv_dir);
+    fs::create_dir_all(&deps_dir)?;
+    fs::write(format!("{}/mount-devfs", deps_dir), "")?;
+    fs::write(format!("{}/mount-sysfs", deps_dir), "")?;
+
+    // /etc/s6/config/zram.conf — configuration read by the up script at boot
+    let config_dir = format!("{}/etc/s6/config", install_root);
+    fs::create_dir_all(&config_dir)?;
+
+    // Compute ZRAM size in bytes from the current machine's RAM and the
+    // requested percentage.  The installer runs on the live system which has
+    // the same physical RAM as the target, so this is accurate.
+    let ram_mib = get_ram_mib();
+    let zram_size_bytes = ram_mib * (percent as u64) / 100 * 1024 * 1024;
+
+    let config_content = format!(
+        "COMP_ALGORITHM={}\nZRAM_SIZE={}\n",
+        algorithm, zram_size_bytes
     );
+    fs::write(format!("{}/zram.conf", config_dir), config_content)?;
 
-    let run_path = format!("{}/run", sv_dir);
-    fs::write(&run_path, run_script)?;
-    let mut perms = fs::metadata(&run_path)?.permissions();
+    // up — execlineb oneshot startup script (mirrors the AUR package)
+    let up_script = r#"#!/usr/bin/execlineb -P
+fdmove -c 2 1
+envfile /etc/s6/config/zram.conf
+importas comp_algorithm COMP_ALGORITHM
+importas zram_size ZRAM_SIZE
+
+foreground { modprobe zram }
+foreground { redirfd -w 1 /sys/block/zram0/comp_algorithm echo $comp_algorithm }
+foreground { redirfd -w 1 /sys/block/zram0/disksize echo $zram_size }
+foreground { mkswap --label zram0 /dev/zram0 }
+swapon --priority 100 /dev/zram0
+"#;
+
+    let up_path = format!("{}/up", sv_dir);
+    fs::write(&up_path, up_script)?;
+    let mut perms = fs::metadata(&up_path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&run_path, perms)?;
+    fs::set_permissions(&up_path, perms)?;
 
-    // Create type file
+    // down — teardown script run when the service is stopped
+    let down_script = r#"#!/usr/bin/execlineb -P
+fdmove -c 2 1
+foreground { swapoff /dev/zram0 }
+redirfd -w 1 /sys/block/zram0/reset echo 1
+"#;
+
+    let down_path = format!("{}/down", sv_dir);
+    fs::write(&down_path, down_script)?;
+    let mut perms = fs::metadata(&down_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&down_path, perms)?;
+
+    // type — declares this as an s6-rc oneshot (runs once, not supervised)
     fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
+
+    // Enable the service by adding it to the default bundle
+    let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
+    fs::create_dir_all(&enabled_dir)?;
+    fs::write(format!("{}/zram", enabled_dir), "")?;
 
     info!("Created s6 ZRAM service at {}", sv_dir);
     Ok(())
