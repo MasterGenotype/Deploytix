@@ -163,11 +163,21 @@ fn setup_zram_s6(install_root: &str, percent: u8, algorithm: &str) -> Result<()>
     let sv_dir = format!("{}/etc/s6/sv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
 
-    // Longrun service: s6 supervises the process; `run` sets up zram then
-    // calls `exec s6-pause` to stay alive under supervision.
-    fs::write(format!("{}/type", sv_dir), "longrun\n")?;
+    // s6-rc oneshot: the `up` script runs to completion; s6 does not supervise
+    // a persistent process.  This matches the AUR zram-s6 reference package
+    // (Senderman/s6-services) which uses the same oneshot + up pattern.
+    fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
 
-    let run_script = format!(
+    // Declare ordering dependencies so /dev and /sys are mounted before we
+    // try to write to /sys/block/zram0/ (mirrors AUR dependencies.d/).
+    let dep_dir = format!("{}/dependencies.d", sv_dir);
+    fs::create_dir_all(&dep_dir)?;
+    fs::write(format!("{}/mount-devfs", dep_dir), "")?;
+    fs::write(format!("{}/mount-sysfs", dep_dir), "")?;
+
+    // Plain sh is used instead of execlineb because the size is calculated
+    // dynamically from a percentage of physical RAM at service start time.
+    let up_script = format!(
         r#"#!/bin/sh
 RAM_KB=$(grep MemTotal /proc/meminfo | awk '{{print $2}}')
 ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
@@ -175,32 +185,30 @@ ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
 modprobe zram num_devices=1
 echo {algorithm} > /sys/block/zram0/comp_algorithm
 echo $ZRAM_SIZE > /sys/block/zram0/disksize
-mkswap /dev/zram0
-swapon -p 100 /dev/zram0
-
-exec s6-pause
+mkswap --label zram0 /dev/zram0
+swapon --priority 100 /dev/zram0
 "#,
         percent = percent,
         algorithm = algorithm
     );
 
-    let run_path = format!("{}/run", sv_dir);
-    fs::write(&run_path, run_script)?;
-    let mut perms = fs::metadata(&run_path)?.permissions();
+    let up_path = format!("{}/up", sv_dir);
+    fs::write(&up_path, up_script)?;
+    let mut perms = fs::metadata(&up_path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&run_path, perms)?;
+    fs::set_permissions(&up_path, perms)?;
 
-    // finish script runs when the supervised process exits - clean up swap
-    let finish_script = r#"#!/bin/sh
+    // `down` is the teardown counterpart to `up` for s6-rc oneshots.
+    let down_script = r#"#!/bin/sh
 swapoff /dev/zram0 2>/dev/null
 echo 1 > /sys/block/zram0/reset 2>/dev/null
 "#;
 
-    let finish_path = format!("{}/finish", sv_dir);
-    fs::write(&finish_path, finish_script)?;
-    let mut perms = fs::metadata(&finish_path)?.permissions();
+    let down_path = format!("{}/down", sv_dir);
+    fs::write(&down_path, down_script)?;
+    let mut perms = fs::metadata(&down_path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&finish_path, perms)?;
+    fs::set_permissions(&down_path, perms)?;
 
     info!("Created s6 ZRAM service at {}", sv_dir);
     Ok(())
