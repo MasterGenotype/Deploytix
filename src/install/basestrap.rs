@@ -3,7 +3,9 @@
 use crate::config::{DeploymentConfig, DesktopEnvironment, Filesystem, NetworkBackend};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
-use tracing::info;
+use std::thread;
+use std::time::Duration;
+use tracing::{info, warn};
 
 /// Build the package list for basestrap
 pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
@@ -143,11 +145,46 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     packages
 }
 
+/// Maximum number of retry attempts for basestrap on network failures
+const BASESTRAP_MAX_RETRIES: u32 = 3;
+
+/// Delay between retry attempts (in seconds)
+const BASESTRAP_RETRY_DELAY_SECS: u64 = 5;
+
+/// Check if an error message indicates a transient network failure
+fn is_network_error(stderr: &str) -> bool {
+    let network_error_patterns = [
+        "Operation too slow",
+        "failed retrieving file",
+        "failed to retrieve some files",
+        "Connection timed out",
+        "Could not resolve host",
+        "Network is unreachable",
+        "Connection refused",
+        "SSL connection timeout",
+        "error: failed to synchronize",
+    ];
+
+    network_error_patterns
+        .iter()
+        .any(|pattern| stderr.contains(pattern))
+}
+
 /// Run basestrap to install the base system
 pub fn run_basestrap(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     install_root: &str,
+) -> Result<()> {
+    run_basestrap_with_retries(cmd, config, install_root, BASESTRAP_MAX_RETRIES)
+}
+
+/// Run basestrap with configurable retry count
+pub fn run_basestrap_with_retries(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+    max_retries: u32,
 ) -> Result<()> {
     let packages = build_package_list(config);
 
@@ -162,10 +199,44 @@ pub fn run_basestrap(
     let pkg_refs: Vec<&str> = packages.iter().map(|s| s.as_str()).collect();
     args.extend(pkg_refs);
 
-    cmd.run("basestrap", &args)
-        .map(|_| ())
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "basestrap".to_string(),
-            stderr: e.to_string(),
-        })
+    let mut last_error = None;
+
+    for attempt in 1..=max_retries {
+        match cmd.run("basestrap", &args) {
+            Ok(_) => {
+                if attempt > 1 {
+                    info!("basestrap succeeded on attempt {}", attempt);
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+
+                if is_network_error(&error_str) && attempt < max_retries {
+                    warn!(
+                        "basestrap failed due to network error (attempt {}/{}): {}",
+                        attempt, max_retries, error_str
+                    );
+                    warn!(
+                        "Retrying in {} seconds...",
+                        BASESTRAP_RETRY_DELAY_SECS
+                    );
+                    thread::sleep(Duration::from_secs(BASESTRAP_RETRY_DELAY_SECS));
+                    last_error = Some(error_str);
+                } else {
+                    // Non-network error or final attempt - fail immediately
+                    return Err(DeploytixError::CommandFailed {
+                        command: "basestrap".to_string(),
+                        stderr: error_str,
+                    });
+                }
+            }
+        }
+    }
+
+    // Should not reach here, but handle it just in case
+    Err(DeploytixError::CommandFailed {
+        command: "basestrap".to_string(),
+        stderr: last_error.unwrap_or_else(|| "Unknown error after retries".to_string()),
+    })
 }

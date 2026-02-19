@@ -184,7 +184,8 @@ pub fn disk_config_panel(
         ui.add_space(8.0);
 
         // Boot encryption uses LUKS1 (integrity is automatically disabled for boot)
-        if *layout != PartitionLayout::LvmThin {
+        // Available for Standard and LvmThin layouts
+        if *layout == PartitionLayout::Standard || *layout == PartitionLayout::LvmThin {
             ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
             if *integrity && *boot_encryption {
                 ui.label(

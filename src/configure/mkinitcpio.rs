@@ -74,7 +74,7 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         // Note: filesystems hook is NOT needed when using mountcrypt
         // as mountcrypt handles all mounting
     } else if config.disk.layout == PartitionLayout::LvmThin {
-        // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
+    // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
         if config.disk.encryption {
             hooks.push("encrypt".to_string());
         }
@@ -96,6 +96,10 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
 
         hooks.push("filesystems".to_string());
         hooks.push("fsck".to_string());
+
+        // LvmThin has a separate /usr thin volume that must be mounted before init.
+        // The usr hook reads /new_root/etc/fstab and mounts /usr early.
+        hooks.push("usr".to_string());
 
         // Resume hook for hibernation (for swap partition or swap file)
         if config.system.hibernation {
@@ -452,6 +456,24 @@ mod tests {
         assert!(
             !files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
             "LvmThin without boot encryption should not include boot keyfile"
+        );
+    }
+
+    #[test]
+    fn lvm_thin_includes_usr_hook() {
+        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        cfg.disk.use_lvm_thin = true;
+        let hooks = construct_hooks(&cfg);
+        assert!(
+            hooks.contains(&"usr".to_string()),
+            "LvmThin must include usr hook to mount /usr before init"
+        );
+        // usr hook must come after filesystems
+        let filesystems_pos = hooks.iter().position(|h| h == "filesystems").unwrap();
+        let usr_pos = hooks.iter().position(|h| h == "usr").unwrap();
+        assert!(
+            filesystems_pos < usr_pos,
+            "usr hook must come after filesystems hook"
         );
     }
 }
