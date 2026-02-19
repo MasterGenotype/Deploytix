@@ -321,6 +321,12 @@ impl DeploytixGui {
                     let gui_progress = 0.15 + progress * 0.80;
                     let _ = progress_tx.send(InstallMessage::Progress(gui_progress));
                     let _ = progress_tx.send(InstallMessage::Status(status.to_string()));
+                    // Also add status updates to the log for visibility
+                    let _ = progress_tx.send(InstallMessage::Log(format!(
+                        "[{:.0}%] {}",
+                        gui_progress * 100.0,
+                        status
+                    )));
                 });
 
             let installer = Installer::new(config, dry_run)

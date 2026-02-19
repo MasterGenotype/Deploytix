@@ -607,12 +607,19 @@ pub fn progress_panel(
     ui.label("Log:");
     ui.add_space(4.0);
 
-    egui::ScrollArea::vertical()
-        .max_height(200.0)
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for msg in log_messages {
-                ui.label(RichText::new(msg).monospace().size(11.0));
-            }
-        });
+    // Use auto_shrink(false) and stick_to_bottom(true) for auto-scrolling logs
+    let scroll_area = egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .auto_shrink([false, false])
+        .stick_to_bottom(true);
+
+    scroll_area.show(ui, |ui| {
+        for msg in log_messages {
+            ui.label(RichText::new(msg).monospace().size(11.0));
+        }
+        // Add invisible widget at end to ensure scroll area updates
+        if !log_messages.is_empty() {
+            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+        }
+    });
 }
