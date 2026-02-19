@@ -23,6 +23,7 @@ use crate::install::fstab::{
 };
 use crate::install::{generate_fstab, mount_partitions, run_basestrap, unmount_all};
 use crate::utils::command::CommandRunner;
+use crate::utils::deps::ensure_dependencies;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
 use std::fs;
@@ -219,6 +220,16 @@ impl Installer {
             "[Phase 1/6] Preparing installation for {}",
             self.config.disk.device
         );
+
+        // Check host system dependencies
+        self.report_progress(0.02, "Checking host dependencies...");
+        ensure_dependencies(
+            &self.cmd,
+            &self.config.disk.layout,
+            &self.config.disk.filesystem,
+            self.config.disk.encryption,
+            &self.config.system.bootloader,
+        )?;
 
         // Get device info and compute layout
         let device_info = get_device_info(&self.config.disk.device)?;
@@ -543,9 +554,7 @@ impl Installer {
             .luks_containers
             .iter()
             .find(|c| c.volume_name == "Root")
-            .ok_or_else(|| {
-                DeploytixError::ConfigError("No Root container found".to_string())
-            })?;
+            .ok_or_else(|| DeploytixError::ConfigError("No Root container found".to_string()))?;
 
         // Mount root
         if !self.cmd.is_dry_run() {

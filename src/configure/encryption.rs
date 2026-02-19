@@ -43,10 +43,7 @@ pub fn resolve_mapper_name(desired: &str) -> String {
     if !is_mapper_active(desired) {
         return desired.to_string();
     }
-    tracing::warn!(
-        "Mapper name '{}' already in use, disambiguating",
-        desired
-    );
+    tracing::warn!("Mapper name '{}' already in use, disambiguating", desired);
     for i in 1..=99 {
         let candidate = format!("{}-{}", desired, i);
         if !is_mapper_active(&candidate) {
