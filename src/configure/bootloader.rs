@@ -464,6 +464,16 @@ fn configure_grub_defaults_lvm_thin(
     // The encrypt hook reads cryptdevice= to know which LUKS device to decrypt
     cmdline_parts.push(format!("cryptdevice=UUID={}:Crypt-LVM", luks_uuid));
     cmdline_parts.push(format!("root={}", root_lv));
+
+    // When boot_encryption is enabled, a keyfile for Crypt-LVM is embedded in
+    // the initramfs (at /etc/cryptsetup-keys.d/cryptlvm.key).  Tell the encrypt
+    // hook to use it so the LUKS container is opened automatically without
+    // prompting for a second password at early boot.
+    if config.disk.boot_encryption {
+        cmdline_parts
+            .push("cryptkey=rootfs:/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
+    }
+
     cmdline_parts.push("rw".to_string());
 
     // Add resume for hibernation

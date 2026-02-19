@@ -776,6 +776,14 @@ impl DeploymentConfig {
             ));
         }
 
+        // lvm_thin_pool_percent must be 1–100 (passed as N%VG to lvcreate)
+        if self.disk.lvm_thin_pool_percent == 0 || self.disk.lvm_thin_pool_percent > 100 {
+            return Err(DeploytixError::ValidationError(format!(
+                "lvm_thin_pool_percent must be between 1 and 100, got {}",
+                self.disk.lvm_thin_pool_percent
+            )));
+        }
+
         // LvmThin layout requires btrfs filesystem
         if self.disk.layout == PartitionLayout::LvmThin && self.disk.filesystem != Filesystem::Btrfs
         {
