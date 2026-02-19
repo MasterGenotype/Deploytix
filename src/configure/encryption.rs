@@ -151,23 +151,25 @@ fn luks_format_inner(device: &str, password: &str, integrity: bool) -> Result<()
     let mut child = Command::new("cryptsetup")
         .args(&args)
         .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| DeploytixError::CommandFailed {
             command: "cryptsetup luksFormat".to_string(),
             stderr: e.to_string(),
         })?;
 
-    // Write password to stdin
+    // Write password to stdin with newline - required by cryptsetup
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(password.as_bytes())?;
+        writeln!(stdin, "{}", password)?;
     }
     drop(child.stdin.take()); // Close stdin to signal EOF
 
-    let status = child.wait()?;
-    if !status.success() {
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DeploytixError::CommandFailed {
             command: "cryptsetup luksFormat".to_string(),
-            stderr: "Failed to format LUKS container".to_string(),
+            stderr: format!("Failed to format LUKS container: {}", stderr),
         });
     }
 
@@ -181,6 +183,7 @@ fn luks_open(device: &str, mapper_name: &str, password: &str) -> Result<()> {
     let mut child = Command::new("cryptsetup")
         .args(["open", device, mapper_name])
         .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| DeploytixError::CommandFailed {
             command: "cryptsetup open".to_string(),
@@ -188,15 +191,17 @@ fn luks_open(device: &str, mapper_name: &str, password: &str) -> Result<()> {
         })?;
 
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(password.as_bytes())?;
+        // Write password with newline - required by cryptsetup when reading from stdin
+        writeln!(stdin, "{}", password)?;
     }
     drop(child.stdin.take()); // Close stdin to signal EOF
 
-    let status = child.wait()?;
-    if !status.success() {
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DeploytixError::CommandFailed {
             command: "cryptsetup open".to_string(),
-            stderr: "Failed to open LUKS container".to_string(),
+            stderr: format!("Failed to open LUKS container: {}", stderr),
         });
     }
 
@@ -294,22 +299,25 @@ fn luks_format_v1(device: &str, password: &str) -> Result<()> {
             device,
         ])
         .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| DeploytixError::CommandFailed {
             command: "cryptsetup luksFormat (LUKS1)".to_string(),
             stderr: e.to_string(),
         })?;
 
+    // Write password with newline - required by cryptsetup
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(password.as_bytes())?;
+        writeln!(stdin, "{}", password)?;
     }
     drop(child.stdin.take());
 
-    let status = child.wait()?;
-    if !status.success() {
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DeploytixError::CommandFailed {
             command: "cryptsetup luksFormat (LUKS1)".to_string(),
-            stderr: "Failed to format LUKS1 container for /boot".to_string(),
+            stderr: format!("Failed to format LUKS1 container for /boot: {}", stderr),
         });
     }
 
