@@ -1,7 +1,14 @@
 # Build configuration for portable static binary
-# To build: rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl
+# Prerequisites:
+#   apt install musl-tools          # provides musl-gcc linker
+#   rustup target add x86_64-unknown-linux-musl
+#
+# Build portable CLI:
+#   cargo portable          (alias below)
+#   make portable           (via Makefile)
 
 [target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [build]
@@ -9,4 +16,5 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # target = "x86_64-unknown-linux-musl"
 
 [alias]
-portable = "build --release --target x86_64-unknown-linux-musl"
+# Builds the CLI binary only; GUI requires dynamic system libs (X11/Wayland)
+portable = "build --release --target x86_64-unknown-linux-musl --bin deploytix"
