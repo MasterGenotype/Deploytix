@@ -307,6 +307,7 @@ pub fn create_efi_boot_entry(
 ///
 /// This finds the boot entry with the given label and moves it to the front
 /// of the boot order.
+#[allow(dead_code)]
 pub fn set_efi_boot_order_priority(
     cmd: &CommandRunner,
     label: &str,

@@ -388,21 +388,32 @@ pub fn generate_fstab_multi_volume(
     Ok(())
 }
 
+/// Parameters for LVM thin fstab generation
+pub struct LvmThinFstabParams<'a> {
+    pub cmd: &'a CommandRunner,
+    pub vg_name: &'a str,
+    pub thin_volumes: &'a [ThinVolumeDef],
+    pub device: &'a str,
+    pub layout: &'a ComputedLayout,
+    pub swap_type: &'a SwapType,
+    pub boot_mapped_device: Option<&'a str>,
+    pub install_root: &'a str,
+}
+
 /// Generate fstab for LVM thin provisioning layout
 ///
 /// Creates entries for thin LVs mounted from /dev/vg/lv paths.
 /// When `boot_mapped_device` is Some, the boot partition is encrypted and
 /// the filesystem UUID should be read from the mapped device path.
-pub fn generate_fstab_lvm_thin(
-    cmd: &CommandRunner,
-    vg_name: &str,
-    thin_volumes: &[ThinVolumeDef],
-    device: &str,
-    layout: &ComputedLayout,
-    swap_type: &SwapType,
-    boot_mapped_device: Option<&str>,
-    install_root: &str,
-) -> Result<()> {
+pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
+    let cmd = params.cmd;
+    let vg_name = params.vg_name;
+    let thin_volumes = params.thin_volumes;
+    let device = params.device;
+    let layout = params.layout;
+    let swap_type = params.swap_type;
+    let boot_mapped_device = params.boot_mapped_device;
+    let install_root = params.install_root;
     info!("Generating /etc/fstab for LVM thin volumes");
 
     if cmd.is_dry_run() {
