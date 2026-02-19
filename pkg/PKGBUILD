@@ -1,14 +1,14 @@
 # Maintainer: superphenotype
 pkgbase=deploytix-git
 pkgname=('deploytix-git' 'deploytix-gui-git')
-pkgver=0.1.0.r0.g0000000
+pkgver=1.1.0.r1.g9e89ae3
 pkgrel=1
 pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
 arch=('x86_64')
-url="https://github.com/superphenotype/deploytix"
-license=('MIT')
+url="https://github.com/MasterGenotype/Deploytix"
+license=('GPL-3.0-or-later')
 makedepends=('cargo' 'git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
-source=("git+${url}.git")
+source=("deploytix::git+ssh://git@github.com/MasterGenotype/Deploytix.git")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -34,6 +34,17 @@ build() {
 package_deploytix-git() {
     pkgdesc="Automated Artix Linux deployment installer (CLI)"
     depends=('gcc-libs')
+    optdepends=(
+        'dosfstools: EFI partition formatting (mkfs.vfat)'
+        'e2fsprogs: ext4 filesystem support'
+        'btrfs-progs: btrfs filesystem support'
+        'xfsprogs: xfs filesystem support'
+        'f2fs-tools: f2fs filesystem support'
+        'cryptsetup: LUKS encryption support'
+        'lvm2: LVM thin provisioning layout'
+        'grub: GRUB bootloader'
+        'artools: basestrap for Artix installation'
+    )
     provides=('deploytix')
     conflicts=('deploytix')
 
@@ -52,4 +63,5 @@ package_deploytix-gui-git() {
     cd deploytix
     install -Dm755 "target/release/deploytix-gui" "$pkgdir/usr/bin/deploytix-gui"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 deploytix-gui.desktop "$pkgdir/usr/share/applications/deploytix-gui.desktop"
 }
