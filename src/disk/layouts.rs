@@ -2,7 +2,7 @@
 //!
 //! Ported from Disk-Populater.sh
 
-use crate::config::PartitionLayout;
+use crate::config::{CustomPartitionEntry, PartitionLayout};
 use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
 
@@ -524,25 +524,167 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
     })
 }
 
+/// Compute the custom user-defined layout
+///
+/// Layout: EFI, Boot, optional Swap, then user-defined partitions from `entries`.
+/// Exactly one partition may have `size_mib = 0` (remainder).
+fn compute_custom_layout(
+    disk_mib: u64,
+    encryption: bool,
+    use_swap_partition: bool,
+    entries: &[CustomPartitionEntry],
+) -> Result<ComputedLayout> {
+    let ram_mib = get_ram_mib();
+    let swap_mib = if use_swap_partition {
+        calculate_swap_mib(ram_mib)
+    } else {
+        0
+    };
+
+    // Validate: at most one remainder partition
+    let remainder_count = entries.iter().filter(|e| e.size_mib == 0).count();
+    if remainder_count > 1 {
+        return Err(DeploytixError::ConfigError(
+            "Only one custom partition may specify size_mib = 0 (remainder)".to_string(),
+        ));
+    }
+
+    // Calculate reserved space for system partitions
+    let reserved_mib = EFI_MIB + BOOT_MIB + swap_mib;
+
+    // Calculate total fixed size from user entries
+    let fixed_total: u64 = entries.iter().map(|e| e.size_mib).sum();
+
+    // Validate disk has enough space
+    let min_required = reserved_mib + fixed_total + if remainder_count == 0 { 0 } else { 1024 }; // 1GiB minimum for remainder
+    if disk_mib < min_required {
+        return Err(DeploytixError::DiskTooSmall {
+            size_mib: disk_mib,
+            required_mib: min_required,
+        });
+    }
+
+    // Build system partitions
+    let mut partitions = vec![
+        PartitionDef {
+            number: 1,
+            name: "EFI".to_string(),
+            size_mib: EFI_MIB,
+            type_guid: partition_types::EFI.to_string(),
+            mount_point: Some("/boot/efi".to_string()),
+            is_swap: false,
+            is_efi: true,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        },
+        PartitionDef {
+            number: 2,
+            name: "BOOT".to_string(),
+            size_mib: BOOT_MIB,
+            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+            mount_point: Some("/boot".to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: true,
+            attributes: Some("LegacyBIOSBootable".to_string()),
+        },
+    ];
+
+    let mut next_part_num: u32 = 3;
+
+    // Optional swap partition
+    if use_swap_partition {
+        partitions.push(PartitionDef {
+            number: next_part_num,
+            name: "SWAP".to_string(),
+            size_mib: swap_mib,
+            type_guid: partition_types::LINUX_SWAP.to_string(),
+            mount_point: None,
+            is_swap: true,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        });
+        next_part_num += 1;
+    }
+
+    // Add user-defined partitions
+    for entry in entries {
+        let label = entry.effective_label();
+        let is_luks = entry.is_encrypted(encryption);
+
+        // Determine GPT type GUID based on mount point
+        let type_guid = match entry.mount_point.as_str() {
+            "/" => partition_types::LINUX_ROOT_X86_64,
+            "/usr" => partition_types::LINUX_USR_X86_64,
+            "/var" => partition_types::LINUX_VAR,
+            "/home" => partition_types::LINUX_HOME,
+            _ => partition_types::LINUX_FILESYSTEM,
+        }
+        .to_string();
+
+        // Align size (remainder stays 0)
+        let size_mib = if entry.size_mib > 0 {
+            floor_align(entry.size_mib, ALIGN_MIB)
+        } else {
+            0
+        };
+
+        partitions.push(PartitionDef {
+            number: next_part_num,
+            name: label,
+            size_mib,
+            type_guid,
+            mount_point: Some(entry.mount_point.clone()),
+            is_swap: false,
+            is_efi: false,
+            is_luks,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        });
+        next_part_num += 1;
+    }
+
+    Ok(ComputedLayout {
+        partitions,
+        total_mib: disk_mib,
+        subvolumes: None, // Custom layout uses separate partitions
+    })
+}
+
 /// Compute partition layout for a disk
 ///
 /// For Standard layout, pass `encryption` flag to enable LUKS on data partitions.
+/// For Custom layout, pass `custom_partitions` with user-defined partition entries.
 pub fn compute_layout(
     layout: &PartitionLayout,
     disk_mib: u64,
     encryption: bool,
+    use_swap_partition: bool,
+    custom_partitions: Option<&[CustomPartitionEntry]>,
 ) -> Result<ComputedLayout> {
     match layout {
         PartitionLayout::Standard => compute_standard_layout(disk_mib, encryption),
         PartitionLayout::Minimal => compute_minimal_layout(disk_mib),
-        PartitionLayout::LvmThin => compute_lvm_thin_layout(disk_mib, true), // Default to swap partition
-        PartitionLayout::Custom => Err(DeploytixError::ConfigError(
-            "Custom layouts not yet implemented".to_string(),
-        )),
+        PartitionLayout::LvmThin => compute_lvm_thin_layout(disk_mib, use_swap_partition),
+        PartitionLayout::Custom => {
+            let entries = custom_partitions.ok_or_else(|| {
+                DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
+            })?;
+            compute_custom_layout(disk_mib, encryption, use_swap_partition, entries)
+        }
     }
 }
 
 /// Compute LVM thin layout with swap type consideration
+#[allow(dead_code)]
 pub fn compute_lvm_thin_layout_with_swap(
     disk_mib: u64,
     use_swap_partition: bool,

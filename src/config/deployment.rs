@@ -17,6 +17,49 @@ pub struct DeploymentConfig {
     pub desktop: DesktopConfig,
 }
 
+/// One user-defined data partition for PartitionLayout::Custom.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPartitionEntry {
+    /// Root-relative mount point, e.g. "/", "/home", "/var", "/data".
+    pub mount_point: String,
+
+    /// Partition label (e.g. "ROOT", "HOME").
+    /// If omitted, derived from the last path component, uppercased.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Size in MiB. Set to 0 to consume all remaining disk space.
+    /// Exactly one entry in the list may be 0.
+    pub size_mib: u64,
+
+    /// Per-partition encryption override. Inherits `disk.encryption` when None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<bool>,
+}
+
+impl CustomPartitionEntry {
+    /// Derive label from mount_point if not explicitly set.
+    /// "/" -> "ROOT", "/home" -> "HOME", "/var/log" -> "LOG"
+    pub fn effective_label(&self) -> String {
+        if let Some(ref label) = self.label {
+            label.clone()
+        } else if self.mount_point == "/" {
+            "ROOT".to_string()
+        } else {
+            self.mount_point
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or("DATA")
+                .to_uppercase()
+        }
+    }
+
+    /// Determine if this partition should be encrypted.
+    pub fn is_encrypted(&self, global_encryption: bool) -> bool {
+        self.encryption.unwrap_or(global_encryption)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskConfig {
     /// Target device path (e.g., /dev/sda)
@@ -85,6 +128,11 @@ pub struct DiskConfig {
     /// ZRAM compression algorithm (default: "zstd")
     #[serde(default = "default_zram_algorithm")]
     pub zram_algorithm: String,
+
+    /// Partition list for PartitionLayout::Custom.
+    /// EFI, Boot, and Swap are always prepended by the system.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_partitions: Option<Vec<CustomPartitionEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,9 +510,102 @@ impl DeploymentConfig {
             PartitionLayout::Standard,
             PartitionLayout::Minimal,
             PartitionLayout::LvmThin,
+            PartitionLayout::Custom,
         ];
         let layout_idx = prompt_select("Partition layout", &layouts, 0)?;
         let layout = layouts[layout_idx].clone();
+
+        // Custom partitions for Custom layout
+        let custom_partitions = if layout == PartitionLayout::Custom {
+            println!("\n📦 Custom Partition Configuration");
+            println!("  Note: EFI (512 MiB), Boot (2 GiB), and Swap are prepended automatically.");
+            println!("  Set size_mib=0 for one partition to use remaining space.\n");
+
+            let mut entries = Vec::new();
+            loop {
+                let mount_point = prompt_input("Mount point (e.g. /, /home, /var)", None)?;
+
+                // Validate mount point
+                if !mount_point.starts_with('/') {
+                    println!("  Mount point must start with '/'");
+                    continue;
+                }
+                if mount_point == "/boot" || mount_point == "/boot/efi" {
+                    println!("  /boot and /boot/efi are reserved for system partitions");
+                    continue;
+                }
+                if entries
+                    .iter()
+                    .any(|e: &CustomPartitionEntry| e.mount_point == mount_point)
+                {
+                    println!("  Duplicate mount point");
+                    continue;
+                }
+
+                let size_str = prompt_input("Size in MiB (0 = remaining space)", Some("0"))?;
+                let size_mib: u64 = size_str.parse().unwrap_or(0);
+
+                // Check for multiple remainder partitions
+                if size_mib == 0
+                    && entries
+                        .iter()
+                        .any(|e: &CustomPartitionEntry| e.size_mib == 0)
+                {
+                    println!("  Only one partition may use remaining space (size_mib=0)");
+                    continue;
+                }
+
+                let default_label = if mount_point == "/" {
+                    "ROOT".to_string()
+                } else {
+                    mount_point
+                        .rsplit('/')
+                        .find(|s| !s.is_empty())
+                        .unwrap_or("DATA")
+                        .to_uppercase()
+                };
+                let label_str = prompt_input(
+                    &format!("Partition label [{}]", default_label),
+                    Some(&default_label),
+                )?;
+                let label = if label_str == default_label {
+                    None
+                } else {
+                    Some(label_str)
+                };
+
+                entries.push(CustomPartitionEntry {
+                    mount_point,
+                    label,
+                    size_mib,
+                    encryption: None, // Inherit from global setting
+                });
+
+                if !prompt_confirm("Add another partition?", true)? {
+                    break;
+                }
+            }
+
+            // Ensure at least one entry with mount_point == "/"
+            if !entries.iter().any(|e| e.mount_point == "/") {
+                println!(
+                    "  Warning: No root (/) partition defined. Adding one with remaining space."
+                );
+                entries.insert(
+                    0,
+                    CustomPartitionEntry {
+                        mount_point: "/".to_string(),
+                        label: None,
+                        size_mib: 0,
+                        encryption: None,
+                    },
+                );
+            }
+
+            Some(entries)
+        } else {
+            None
+        };
 
         // Filesystem (LvmThin requires btrfs)
         let filesystem = if layout == PartitionLayout::LvmThin {
@@ -481,11 +622,11 @@ impl DeploymentConfig {
             filesystems[fs_idx].clone()
         };
 
-        // Encryption option (required for LvmThin, optional for Standard)
+        // Encryption option (required for LvmThin, optional for Standard and Custom)
         let encryption = if layout == PartitionLayout::LvmThin {
             println!("  LvmThin layout uses LUKS encryption.");
             true
-        } else if layout == PartitionLayout::Standard {
+        } else if layout == PartitionLayout::Standard || layout == PartitionLayout::Custom {
             prompt_confirm("Enable LUKS encryption on data partitions?", false)?
         } else {
             false // Minimal layout doesn't support encryption currently
@@ -610,6 +751,7 @@ impl DeploymentConfig {
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
+                custom_partitions,
             },
             system: SystemConfig {
                 init,
@@ -661,6 +803,7 @@ impl DeploymentConfig {
                 swap_file_size_mib: 0,
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
+                custom_partitions: None,
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -736,13 +879,14 @@ impl DeploymentConfig {
             ));
         }
 
-        // Encryption supported on Standard and LvmThin layouts
+        // Encryption supported on Standard, LvmThin, and Custom layouts
         if self.disk.encryption
             && self.disk.layout != PartitionLayout::Standard
             && self.disk.layout != PartitionLayout::LvmThin
+            && self.disk.layout != PartitionLayout::Custom
         {
             return Err(DeploytixError::ValidationError(
-                "Encryption is only supported on Standard and LvmThin layouts".to_string(),
+                "Encryption is only supported on Standard, LvmThin, and Custom layouts".to_string(),
             ));
         }
 
@@ -810,6 +954,79 @@ impl DeploymentConfig {
             return Err(DeploytixError::ValidationError(
                 "SecureBoot with ManualKeys method requires secureboot_keys_path".to_string(),
             ));
+        }
+
+        // Custom layout validation
+        if self.disk.layout == PartitionLayout::Custom {
+            let partitions = self.disk.custom_partitions.as_ref().ok_or_else(|| {
+                DeploytixError::ValidationError(
+                    "Custom layout requires custom_partitions to be defined".to_string(),
+                )
+            })?;
+
+            if partitions.is_empty() {
+                return Err(DeploytixError::ValidationError(
+                    "Custom layout requires at least one partition".to_string(),
+                ));
+            }
+
+            // Must have exactly one root partition
+            let root_count = partitions.iter().filter(|p| p.mount_point == "/").count();
+            if root_count != 1 {
+                return Err(DeploytixError::ValidationError(
+                    "Custom layout must have exactly one partition with mount_point = \"/\""
+                        .to_string(),
+                ));
+            }
+
+            // All mount points must start with '/'
+            for p in partitions {
+                if !p.mount_point.starts_with('/') {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "Mount point '{}' must start with '/'",
+                        p.mount_point
+                    )));
+                }
+            }
+
+            // Reserved mount points
+            for p in partitions {
+                if p.mount_point == "/boot" || p.mount_point == "/boot/efi" {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "Mount point '{}' is reserved for system partitions",
+                        p.mount_point
+                    )));
+                }
+            }
+
+            // No duplicate mount points
+            let mut seen = std::collections::HashSet::new();
+            for p in partitions {
+                if !seen.insert(&p.mount_point) {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "Duplicate mount point '{}' in custom_partitions",
+                        p.mount_point
+                    )));
+                }
+            }
+
+            // At most one remainder partition (size_mib = 0)
+            let remainder_count = partitions.iter().filter(|p| p.size_mib == 0).count();
+            if remainder_count > 1 {
+                return Err(DeploytixError::ValidationError(
+                    "Only one custom partition may have size_mib = 0 (remainder)".to_string(),
+                ));
+            }
+
+            // Per-partition encryption requires global encryption
+            for p in partitions {
+                if p.encryption == Some(true) && !self.disk.encryption {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "Partition '{}' has encryption=true but global encryption is disabled",
+                        p.mount_point
+                    )));
+                }
+            }
         }
 
         Ok(())

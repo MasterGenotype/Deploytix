@@ -107,7 +107,7 @@ Example `deploytix.toml`:
 ```toml
 [disk]
 device = "/dev/sda"
-layout = "standard"       # standard, minimal, crypto_subvolume
+layout = "standard"       # standard, minimal, lvmthin, custom
 filesystem = "btrfs"
 encryption = false
 
@@ -169,6 +169,36 @@ After allocating fixed-size partitions (EFI, Boot, Swap), the remaining disk spa
 | Home | Remainder | LUKS2 | /home |
 
 Each encrypted partition uses a separate LUKS2 container. Root is unlocked with a passphrase; remaining volumes unlock automatically via keyfiles stored in the initramfs.
+
+### Custom (user-defined partitions)
+
+The Custom layout lets you define your own data partitions. EFI (512 MiB), Boot (2 GiB), and Swap are prepended automatically. Set `size_mib = 0` on exactly one partition to use the remaining disk space.
+
+```toml
+[disk]
+device = "/dev/sda"
+layout = "custom"
+filesystem = "ext4"
+encryption = false
+
+[[disk.custom_partitions]]
+mount_point = "/"
+size_mib = 30720      # 30 GiB
+
+[[disk.custom_partitions]]
+mount_point = "/var"
+size_mib = 10240      # 10 GiB
+
+[[disk.custom_partitions]]
+mount_point = "/home"
+size_mib = 0          # Consumes all remaining space
+```
+
+**Custom partition fields:**
+- `mount_point` (required): Absolute path, e.g. `/`, `/home`, `/data`. Cannot be `/boot` or `/boot/efi` (reserved).
+- `size_mib` (required): Size in MiB. Use `0` for one partition to fill the remaining disk space.
+- `label` (optional): Partition label. If omitted, derived from the last path component (e.g. `/home` → `HOME`).
+- `encryption` (optional): Per-partition encryption override. Inherits from `disk.encryption` when omitted.
 
 ## Architecture
 

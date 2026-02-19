@@ -12,8 +12,7 @@ use crate::disk::formatting::{
     create_btrfs_filesystem, format_all_partitions, format_boot, format_efi, format_swap,
 };
 use crate::disk::layouts::{
-    compute_layout, compute_lvm_thin_layout_with_swap, get_luks_partitions, print_layout_summary,
-    ComputedLayout,
+    compute_layout, get_luks_partitions, print_layout_summary, ComputedLayout,
 };
 use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
@@ -233,17 +232,14 @@ impl Installer {
         );
 
         // Compute partition layout
-        // For LvmThin, use the swap-aware layout function
-        let layout = if self.config.disk.layout == PartitionLayout::LvmThin {
-            let use_swap_partition = self.config.disk.swap_type == SwapType::Partition;
-            compute_lvm_thin_layout_with_swap(disk_mib, use_swap_partition)?
-        } else {
-            compute_layout(
-                &self.config.disk.layout,
-                disk_mib,
-                self.config.disk.encryption,
-            )?
-        };
+        let use_swap_partition = self.config.disk.swap_type == SwapType::Partition;
+        let layout = compute_layout(
+            &self.config.disk.layout,
+            disk_mib,
+            self.config.disk.encryption,
+            use_swap_partition,
+            self.config.disk.custom_partitions.as_deref(),
+        )?;
         print_layout_summary(&layout);
         self.layout = Some(layout);
 

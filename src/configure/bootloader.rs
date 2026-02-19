@@ -124,12 +124,7 @@ fn install_grub_with_layout(
         if config.disk.layout == PartitionLayout::LvmThin {
             // LvmThin: encrypt hook needs cryptdevice= parameter,
             // root is on an LVM LV, not a mapper device
-            configure_grub_defaults_lvm_thin(
-                cmd,
-                config,
-                &luks_uuid,
-                install_root,
-            )?;
+            configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root)?;
         } else {
             // Standard layout: configure with mapper name for root
             configure_grub_defaults(
@@ -221,11 +216,7 @@ pub fn run_grub_install_with_secureboot(
 /// - Has grub.cfg embedded in a memdisk
 /// - Uses --disable-shim-lock for sbctl-based signing
 /// - Avoids "verification requested but nobody cares" errors
-fn run_grub_mkstandalone(
-    cmd: &CommandRunner,
-    device: &str,
-    install_root: &str,
-) -> Result<()> {
+fn run_grub_mkstandalone(cmd: &CommandRunner, device: &str, install_root: &str) -> Result<()> {
     info!("Creating standalone GRUB EFI binary");
 
     if cmd.is_dry_run() {
@@ -308,10 +299,7 @@ pub fn create_efi_boot_entry(
 /// This finds the boot entry with the given label and moves it to the front
 /// of the boot order.
 #[allow(dead_code)]
-pub fn set_efi_boot_order_priority(
-    cmd: &CommandRunner,
-    label: &str,
-) -> Result<()> {
+pub fn set_efi_boot_order_priority(cmd: &CommandRunner, label: &str) -> Result<()> {
     info!("Setting EFI boot order priority for '{}'", label);
 
     if cmd.is_dry_run() {
@@ -321,12 +309,12 @@ pub fn set_efi_boot_order_priority(
 
     // Get current boot entries to find the entry number for our label
     let output = crate::utils::command::run_command_output("efibootmgr", &[])?;
-    
+
     // Parse output to find our entry number
     // Format: Boot0014* Artix-SB	HD(...)
     let mut our_entry: Option<String> = None;
     let mut other_entries: Vec<String> = Vec::new();
-    
+
     for line in output.lines() {
         if line.starts_with("Boot") && line.contains('*') {
             // Extract entry number (e.g., "0014" from "Boot0014*")
@@ -345,11 +333,14 @@ pub fn set_efi_boot_order_priority(
         let mut new_order = vec![entry];
         new_order.extend(other_entries);
         let order_str = new_order.join(",");
-        
+
         cmd.run("efibootmgr", &["-o", &order_str])?;
         info!("Boot order set: {}", order_str);
     } else {
-        info!("Boot entry '{}' not found, skipping boot order change", label);
+        info!(
+            "Boot entry '{}' not found, skipping boot order change",
+            label
+        );
     }
 
     Ok(())
@@ -451,7 +442,10 @@ fn configure_grub_defaults_lvm_thin(
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would configure /etc/default/grub for LvmThin");
-        println!("    cryptdevice=UUID={}:Crypt-LVM root={}", luks_uuid, root_lv);
+        println!(
+            "    cryptdevice=UUID={}:Crypt-LVM root={}",
+            luks_uuid, root_lv
+        );
         if config.disk.boot_encryption {
             println!("    GRUB_ENABLE_CRYPTODISK=y");
         }
@@ -470,8 +464,7 @@ fn configure_grub_defaults_lvm_thin(
     // hook to use it so the LUKS container is opened automatically without
     // prompting for a second password at early boot.
     if config.disk.boot_encryption {
-        cmdline_parts
-            .push("cryptkey=rootfs:/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
+        cmdline_parts.push("cryptkey=rootfs:/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
     }
 
     cmdline_parts.push("rw".to_string());

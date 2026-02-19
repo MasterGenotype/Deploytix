@@ -59,7 +59,11 @@ pub fn setup_encryption(
     let integrity = config.disk.integrity;
 
     if cmd.is_dry_run() {
-        let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
+        let integrity_flag = if integrity {
+            " --integrity hmac-sha256"
+        } else {
+            ""
+        };
         println!(
             "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
             integrity_flag, luks_device
@@ -404,8 +408,15 @@ fn setup_single_luks_inner(
     }
 
     if cmd.is_dry_run() {
-        let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
-        println!("  [dry-run] cryptsetup luksFormat --type luks2{} {}", integrity_flag, device);
+        let integrity_flag = if integrity {
+            " --integrity hmac-sha256"
+        } else {
+            ""
+        };
+        println!(
+            "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
+            integrity_flag, device
+        );
         println!("  [dry-run] cryptsetup open {} {}", device, mapper_name);
         return Ok(LuksContainer {
             device: device.to_string(),
@@ -479,7 +490,11 @@ pub fn setup_multi_volume_encryption(
         }
 
         if cmd.is_dry_run() {
-            let integrity_flag = if integrity { " --integrity hmac-sha256" } else { "" };
+            let integrity_flag = if integrity {
+                " --integrity hmac-sha256"
+            } else {
+                ""
+            };
             println!(
                 "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
                 integrity_flag, luks_device

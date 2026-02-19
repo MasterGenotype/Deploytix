@@ -1,8 +1,8 @@
 //! Panel components for the GUI wizard
 
 use crate::config::{
-    Bootloader, DesktopEnvironment, Filesystem, InitSystem, NetworkBackend, PartitionLayout,
-    SecureBootMethod, SwapType,
+    Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, NetworkBackend,
+    PartitionLayout, SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
 use egui::{RichText, Ui};
@@ -80,6 +80,10 @@ pub fn disk_config_panel(
     lvm_vg_name: &mut String,
     lvm_thin_pool_name: &mut String,
     lvm_thin_pool_percent: &mut u8,
+    custom_partitions: &mut Vec<CustomPartitionEntry>,
+    new_partition_mount: &mut String,
+    new_partition_size: &mut String,
+    new_partition_label: &mut String,
 ) -> bool {
     ui.heading("Disk Configuration");
     ui.add_space(8.0);
@@ -105,6 +109,11 @@ pub fn disk_config_panel(
                 PartitionLayout::LvmThin,
                 "LVM Thin (EFI, Boot, LUKS + LVM thin provisioning)",
             );
+            ui.selectable_value(
+                layout,
+                PartitionLayout::Custom,
+                "Custom (define your own partitions)",
+            );
         });
     ui.add_space(8.0);
 
@@ -125,8 +134,7 @@ pub fn disk_config_panel(
     if *layout == PartitionLayout::LvmThin {
         // LvmThin requires btrfs, show as read-only
         ui.label(
-            RichText::new("btrfs (required by LVM Thin layout)")
-                .color(egui::Color32::LIGHT_GRAY),
+            RichText::new("btrfs (required by LVM Thin layout)").color(egui::Color32::LIGHT_GRAY),
         );
     } else {
         egui::ComboBox::from_id_salt("filesystem")
@@ -168,7 +176,7 @@ pub fn disk_config_panel(
                 .color(egui::Color32::LIGHT_GRAY),
         );
         ui.add_space(8.0);
-    } else if *layout == PartitionLayout::Standard {
+    } else if *layout == PartitionLayout::Standard || *layout == PartitionLayout::Custom {
         ui.checkbox(encryption, "Enable LUKS encryption on data partitions");
         ui.add_space(8.0);
     } else {
@@ -181,7 +189,10 @@ pub fn disk_config_panel(
         ui.add(egui::TextEdit::singleline(encryption_password).password(true));
         ui.add_space(8.0);
 
-        ui.checkbox(integrity, "Enable dm-integrity (per-sector HMAC-SHA256 integrity)");
+        ui.checkbox(
+            integrity,
+            "Enable dm-integrity (per-sector HMAC-SHA256 integrity)",
+        );
         if *integrity {
             ui.label(
                 RichText::new("Detects silent data corruption. Disables TRIM/discard support.")
@@ -235,9 +246,107 @@ pub fn disk_config_panel(
         ui.add_space(4.0);
 
         ui.label(
-            RichText::new("Thin volumes: root (50G), usr (50G), var (30G), home (200G)")
-                .weak(),
+            RichText::new("Thin volumes: root (50G), usr (50G), var (30G), home (200G)").weak(),
         );
+        ui.add_space(8.0);
+    }
+
+    // Custom Partition settings
+    if *layout == PartitionLayout::Custom {
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(RichText::new("Custom Partitions").strong());
+        ui.label(
+            RichText::new("EFI (512 MiB), Boot (2 GiB), and Swap are added automatically.").weak(),
+        );
+        ui.add_space(4.0);
+
+        // List existing partitions
+        let mut remove_idx: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .max_height(150.0)
+            .id_salt("custom_partitions_scroll")
+            .show(ui, |ui| {
+                for (i, part) in custom_partitions.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let size_str = if part.size_mib == 0 {
+                            "remainder".to_string()
+                        } else {
+                            format!("{} MiB", part.size_mib)
+                        };
+                        ui.label(format!(
+                            "{} - {} ({})",
+                            part.mount_point,
+                            part.effective_label(),
+                            size_str
+                        ));
+                        // Don't allow removing the root partition
+                        if part.mount_point != "/" && ui.small_button("✕").clicked() {
+                            remove_idx = Some(i);
+                        }
+                    });
+                }
+            });
+
+        // Remove partition if requested
+        if let Some(idx) = remove_idx {
+            custom_partitions.remove(idx);
+        }
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("Add New Partition:").strong());
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Mount Point:");
+            ui.add(egui::TextEdit::singleline(new_partition_mount).desired_width(100.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Size (MiB, 0=remainder):");
+            ui.add(egui::TextEdit::singleline(new_partition_size).desired_width(80.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Label (optional):");
+            ui.add(egui::TextEdit::singleline(new_partition_label).desired_width(100.0));
+        });
+
+        if ui.button("➕ Add Partition").clicked() {
+            let mount = new_partition_mount.trim();
+            let size: u64 = new_partition_size.parse().unwrap_or(0);
+
+            // Validate
+            let mut valid = true;
+            if !mount.starts_with('/') {
+                valid = false;
+            }
+            if mount == "/boot" || mount == "/boot/efi" {
+                valid = false;
+            }
+            if custom_partitions.iter().any(|p| p.mount_point == mount) {
+                valid = false;
+            }
+            // Only one remainder partition allowed
+            if size == 0 && custom_partitions.iter().any(|p| p.size_mib == 0) {
+                valid = false;
+            }
+
+            if valid && !mount.is_empty() {
+                let label = if new_partition_label.trim().is_empty() {
+                    None
+                } else {
+                    Some(new_partition_label.trim().to_string())
+                };
+                custom_partitions.push(CustomPartitionEntry {
+                    mount_point: mount.to_string(),
+                    label,
+                    size_mib: size,
+                    encryption: None, // Inherit from global setting
+                });
+                new_partition_mount.clear();
+                new_partition_size.clear();
+                new_partition_label.clear();
+            }
+        }
         ui.add_space(8.0);
     }
 
@@ -248,17 +357,31 @@ pub fn disk_config_panel(
     }
 
     if *layout == PartitionLayout::LvmThin && lvm_vg_name.is_empty() {
-        ui.label(
-            RichText::new("⚠ Volume group name cannot be empty").color(egui::Color32::RED),
-        );
+        ui.label(RichText::new("⚠ Volume group name cannot be empty").color(egui::Color32::RED));
         return false;
     }
 
     if *layout == PartitionLayout::LvmThin && lvm_thin_pool_name.is_empty() {
-        ui.label(
-            RichText::new("⚠ Thin pool name cannot be empty").color(egui::Color32::RED),
-        );
+        ui.label(RichText::new("⚠ Thin pool name cannot be empty").color(egui::Color32::RED));
         return false;
+    }
+
+    // Custom layout validation
+    if *layout == PartitionLayout::Custom {
+        if custom_partitions.is_empty() {
+            ui.label(
+                RichText::new("⚠ Custom layout requires at least one partition")
+                    .color(egui::Color32::RED),
+            );
+            return false;
+        }
+        if !custom_partitions.iter().any(|p| p.mount_point == "/") {
+            ui.label(
+                RichText::new("⚠ Custom layout must have a root (/) partition")
+                    .color(egui::Color32::RED),
+            );
+            return false;
+        }
     }
 
     true

@@ -1,9 +1,9 @@
 //! Main GUI application
 
 use crate::config::{
-    Bootloader, DeploymentConfig, DesktopConfig, DesktopEnvironment, DiskConfig, Filesystem,
-    InitSystem, NetworkBackend, NetworkConfig, PartitionLayout, SecureBootMethod, SwapType,
-    SystemConfig, UserConfig,
+    Bootloader, CustomPartitionEntry, DeploymentConfig, DesktopConfig, DesktopEnvironment,
+    DiskConfig, Filesystem, InitSystem, NetworkBackend, NetworkConfig, PartitionLayout,
+    SecureBootMethod, SwapType, SystemConfig, UserConfig,
 };
 use crate::disk::detection::{list_block_devices, BlockDevice};
 use crate::install::Installer;
@@ -96,6 +96,12 @@ pub struct DeploytixGui {
     lvm_vg_name: String,
     lvm_thin_pool_name: String,
     lvm_thin_pool_percent: u8,
+    // Custom partitions
+    custom_partitions: Vec<CustomPartitionEntry>,
+    // Editing state for new partition
+    new_partition_mount: String,
+    new_partition_size: String,
+    new_partition_label: String,
 
     // System config
     init_system: InitSystem,
@@ -150,6 +156,15 @@ impl Default for DeploytixGui {
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),
             lvm_thin_pool_percent: 95,
+            custom_partitions: vec![CustomPartitionEntry {
+                mount_point: "/".to_string(),
+                label: None,
+                size_mib: 0, // Remainder
+                encryption: None,
+            }],
+            new_partition_mount: String::new(),
+            new_partition_size: String::new(),
+            new_partition_label: String::new(),
 
             init_system: InitSystem::Runit,
             bootloader: Bootloader::Grub,
@@ -236,6 +251,12 @@ impl DeploytixGui {
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_percent: self.zram_percent,
                 zram_algorithm: "zstd".to_string(),
+                // Custom partitions
+                custom_partitions: if self.partition_layout == PartitionLayout::Custom {
+                    Some(self.custom_partitions.clone())
+                } else {
+                    None
+                },
             },
             system: SystemConfig {
                 init: self.init_system.clone(),
@@ -501,6 +522,10 @@ impl eframe::App for DeploytixGui {
                     &mut self.lvm_vg_name,
                     &mut self.lvm_thin_pool_name,
                     &mut self.lvm_thin_pool_percent,
+                    &mut self.custom_partitions,
+                    &mut self.new_partition_mount,
+                    &mut self.new_partition_size,
+                    &mut self.new_partition_label,
                 ),
                 WizardStep::SystemConfig => panels::system_config_panel(
                     ui,

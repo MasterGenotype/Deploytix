@@ -689,7 +689,11 @@ mod tests {
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
-        assert_eq!(hooks.len(), 1, "LvmThin boot encryption should generate 1 hook");
+        assert_eq!(
+            hooks.len(),
+            1,
+            "LvmThin boot encryption should generate 1 hook"
+        );
         assert_eq!(hooks[0].name, "crypttab-unlock");
     }
 

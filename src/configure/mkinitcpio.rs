@@ -74,7 +74,7 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         // Note: filesystems hook is NOT needed when using mountcrypt
         // as mountcrypt handles all mounting
     } else if config.disk.layout == PartitionLayout::LvmThin {
-    // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
+        // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
         if config.disk.encryption {
             hooks.push("encrypt".to_string());
         }

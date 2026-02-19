@@ -217,10 +217,7 @@ pub fn run_basestrap_with_retries(
                         "basestrap failed due to network error (attempt {}/{}): {}",
                         attempt, max_retries, error_str
                     );
-                    warn!(
-                        "Retrying in {} seconds...",
-                        BASESTRAP_RETRY_DELAY_SECS
-                    );
+                    warn!("Retrying in {} seconds...", BASESTRAP_RETRY_DELAY_SECS);
                     thread::sleep(Duration::from_secs(BASESTRAP_RETRY_DELAY_SECS));
                     last_error = Some(error_str);
                 } else {
