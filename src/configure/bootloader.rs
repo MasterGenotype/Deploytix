@@ -1,6 +1,6 @@
 //! Bootloader installation and configuration
 
-use crate::config::{Bootloader, DeploymentConfig, PartitionLayout};
+use crate::config::{Bootloader, DeploymentConfig, PartitionLayout, SecureBootMethod};
 use crate::configure::encryption::get_luks_uuid;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::get_partition_uuid;
@@ -10,6 +10,16 @@ use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
+
+/// GRUB modules to embed for standalone EFI binary
+/// Includes crypto modules for LUKS encryption support
+const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile echo \
+    efifwsetup efinet ext2 fat font gettext gfxmenu gfxterm gfxterm_background \
+    gzio halt help hfsplus iso9660 jpeg keystatus loadenv loopback linux ls \
+    lsefi lsefimmap lsefisystab lssal memdisk minicmd normal ntfs part_apple \
+    part_msdos part_gpt password_pbkdf2 png probe reboot regexp search \
+    search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
+    video xfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
 
 /// Install and configure the bootloader
 pub fn install_bootloader(
@@ -173,21 +183,81 @@ fn run_grub_install(cmd: &CommandRunner, device: &str, install_root: &str) -> Re
 }
 
 /// Run grub-install with SecureBoot signing
+///
+/// For sbctl method with encryption, uses grub-mkstandalone to create a self-contained
+/// EFI binary that avoids GRUB's internal verifier issues.
 pub fn run_grub_install_with_secureboot(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     device: &str,
     install_root: &str,
 ) -> Result<()> {
-    // First, run standard GRUB install
-    run_grub_install(cmd, device, install_root)?;
+    // For sbctl method with encryption, use standalone GRUB to avoid verification errors
+    let use_standalone = config.system.secureboot
+        && config.system.secureboot_method == SecureBootMethod::Sbctl
+        && config.disk.encryption;
 
-    // Then sign the EFI binaries if SecureBoot is enabled
+    if use_standalone {
+        info!("Using standalone GRUB for SecureBoot with encryption");
+        run_grub_mkstandalone(cmd, device, install_root)?;
+    } else {
+        // Standard GRUB install for non-encrypted or shim-based SecureBoot
+        run_grub_install(cmd, device, install_root)?;
+    }
+
+    // Sign the EFI binaries if SecureBoot is enabled
     if config.system.secureboot {
         info!("Signing GRUB for SecureBoot");
         crate::configure::secureboot::sign_boot_files(cmd, config, install_root)?;
     }
 
+    Ok(())
+}
+
+/// Create standalone GRUB EFI binary with embedded modules and config
+///
+/// This method creates a self-contained GRUB that:
+/// - Has all modules embedded (no external module loading)
+/// - Has grub.cfg embedded in a memdisk
+/// - Uses --disable-shim-lock for sbctl-based signing
+/// - Avoids "verification requested but nobody cares" errors
+fn run_grub_mkstandalone(
+    cmd: &CommandRunner,
+    device: &str,
+    install_root: &str,
+) -> Result<()> {
+    info!("Creating standalone GRUB EFI binary");
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] grub-mkconfig -o /boot/grub/grub.cfg");
+        println!("  [dry-run] grub-mkstandalone --format=x86_64-efi --output=/boot/efi/EFI/BOOT/BOOTX64.EFI --disable-shim-lock --modules=\"...\" boot/grub/grub.cfg=/boot/grub/grub.cfg");
+        println!("  [dry-run] efibootmgr --create --disk {} --part 1 --loader /EFI/BOOT/BOOTX64.EFI --label 'Artix-SB'", device);
+        return Ok(());
+    }
+
+    // First generate GRUB config
+    cmd.run_in_chroot(install_root, "grub-mkconfig -o /boot/grub/grub.cfg")?;
+
+    // Ensure EFI directory exists
+    let efi_boot_dir = format!("{}/boot/efi/EFI/BOOT", install_root);
+    fs::create_dir_all(&efi_boot_dir)?;
+
+    // Create standalone GRUB with embedded config and modules
+    let grub_mkstandalone_cmd = format!(
+        "grub-mkstandalone \
+            --format=x86_64-efi \
+            --output=/boot/efi/EFI/BOOT/BOOTX64.EFI \
+            --disable-shim-lock \
+            --modules=\"{}\" \
+            \"boot/grub/grub.cfg=/boot/grub/grub.cfg\"",
+        GRUB_STANDALONE_MODULES
+    );
+    cmd.run_in_chroot(install_root, &grub_mkstandalone_cmd)?;
+
+    // Create EFI boot entry with SecureBoot label
+    create_efi_boot_entry(cmd, device, 1, "Artix-SB")?;
+
+    info!("Standalone GRUB created successfully");
     Ok(())
 }
 
@@ -230,6 +300,57 @@ pub fn create_efi_boot_entry(
     )?;
 
     info!("EFI boot entry '{}' created successfully", label);
+    Ok(())
+}
+
+/// Set the EFI boot order to prioritize the given entry
+///
+/// This finds the boot entry with the given label and moves it to the front
+/// of the boot order.
+pub fn set_efi_boot_order_priority(
+    cmd: &CommandRunner,
+    label: &str,
+) -> Result<()> {
+    info!("Setting EFI boot order priority for '{}'", label);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would set boot order priority for '{}'", label);
+        return Ok(());
+    }
+
+    // Get current boot entries to find the entry number for our label
+    let output = crate::utils::command::run_command_output("efibootmgr", &[])?;
+    
+    // Parse output to find our entry number
+    // Format: Boot0014* Artix-SB	HD(...)
+    let mut our_entry: Option<String> = None;
+    let mut other_entries: Vec<String> = Vec::new();
+    
+    for line in output.lines() {
+        if line.starts_with("Boot") && line.contains('*') {
+            // Extract entry number (e.g., "0014" from "Boot0014*")
+            if let Some(entry_num) = line.strip_prefix("Boot").and_then(|s| s.split('*').next()) {
+                if line.contains(label) {
+                    our_entry = Some(entry_num.to_string());
+                } else {
+                    other_entries.push(entry_num.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(entry) = our_entry {
+        // Build new boot order with our entry first
+        let mut new_order = vec![entry];
+        new_order.extend(other_entries);
+        let order_str = new_order.join(",");
+        
+        cmd.run("efibootmgr", &["-o", &order_str])?;
+        info!("Boot order set: {}", order_str);
+    } else {
+        info!("Boot entry '{}' not found, skipping boot order change", label);
+    }
+
     Ok(())
 }
 
