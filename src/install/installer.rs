@@ -492,8 +492,7 @@ impl Installer {
 
         // Format each LUKS-mapped device as BTRFS
         for container in &self.luks_containers {
-            let label = container.mapper_name.trim_start_matches("Crypt-");
-            create_btrfs_filesystem(&self.cmd, &container.mapped_path, label)?;
+            create_btrfs_filesystem(&self.cmd, &container.mapped_path, &container.volume_name)?;
         }
 
         // Format SWAP partition
@@ -543,9 +542,9 @@ impl Installer {
         let root_container = self
             .luks_containers
             .iter()
-            .find(|c| c.mapper_name == "Crypt-Root")
+            .find(|c| c.volume_name == "Root")
             .ok_or_else(|| {
-                DeploytixError::ConfigError("No Crypt-Root container found".to_string())
+                DeploytixError::ConfigError("No Root container found".to_string())
             })?;
 
         // Mount root
@@ -558,14 +557,11 @@ impl Installer {
 
         // Mount other encrypted volumes
         for container in &self.luks_containers {
-            if container.mapper_name == "Crypt-Root" {
+            if container.volume_name == "Root" {
                 continue; // Already mounted
             }
 
-            let mount_name = container
-                .mapper_name
-                .trim_start_matches("Crypt-")
-                .to_lowercase();
+            let mount_name = container.volume_name.to_lowercase();
             let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
 
             if !self.cmd.is_dry_run() {
@@ -725,6 +721,7 @@ impl Installer {
                     &lvm_device,
                     password,
                     "Crypt-LVM",
+                    "Lvm",
                 )?
             } else {
                 configure::encryption::setup_single_luks(
@@ -732,6 +729,7 @@ impl Installer {
                     &lvm_device,
                     password,
                     "Crypt-LVM",
+                    "Lvm",
                 )?
             };
 
@@ -960,7 +958,7 @@ impl Installer {
                 "# /etc/crypttab: LUKS containers for LVM thin provisioning\n\
                  # <target name>  <source device>  <key file>  <options>\n\
                  {}  UUID={}  {}  luks\n",
-                container.mapper_name, luks_uuid, lvm_keyfile
+                container.volume_name, luks_uuid, lvm_keyfile
             );
 
             // Add boot LUKS1 entry if boot encryption is enabled

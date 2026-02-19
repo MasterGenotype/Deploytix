@@ -426,11 +426,11 @@ fn default_hostname() -> String {
     "artix".to_string()
 }
 
-fn default_luks_mapper_name() -> String {
+pub fn default_luks_mapper_name() -> String {
     "Crypt-Root".to_string()
 }
 
-fn default_luks_boot_mapper_name() -> String {
+pub fn default_luks_boot_mapper_name() -> String {
     "Crypt-Boot".to_string()
 }
 

@@ -1,12 +1,17 @@
-PREFIX ?= $(HOME)/.local
-BINDIR := $(PREFIX)/bin
+PREFIX     ?= $(HOME)/.local
+BINDIR     := $(PREFIX)/bin
+APPDIR     := $(PREFIX)/share/applications
+POLKITDIR  := /usr/share/polkit-1/actions
 
 CLI_BIN      := target/release/deploytix
 GUI_BIN      := target/release/deploytix-gui
 GCC_BIN      := target/x86_64-unknown-linux-gnu/release/deploytix
 PORTABLE_BIN := target/x86_64-unknown-linux-musl/release/deploytix
 
-.PHONY: all build gui gcc portable install install-cli install-gui install-gcc install-portable uninstall clean fmt lint test
+.PHONY: all build gui gcc portable install install-cli install-gcc install-portable uninstall clean fmt lint test
+
+DESKTOP_FILE := deploytix-gui.desktop
+POLKIT_FILE  := com.deploytix.gui.policy
 
 ## Default: build CLI
 all: build
@@ -35,9 +40,15 @@ portable:
 
 ## Install GUI binary to $(BINDIR)  [default: ~/.local/bin]
 install: gui
-	@mkdir -p $(BINDIR)
+	@mkdir -p $(BINDIR) $(APPDIR)
 	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
+	sed 's|%BINDIR%|$(BINDIR)|g' $(DESKTOP_FILE) > $(APPDIR)/$(DESKTOP_FILE)
+	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
+	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
+	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)
 	@echo "Installed deploytix-gui -> $(BINDIR)/deploytix-gui"
+	@echo "Installed desktop entry  -> $(APPDIR)/$(DESKTOP_FILE)"
+	@echo "Installed polkit policy -> $(POLKITDIR)/$(POLKIT_FILE)"
 
 ## Install CLI binary to $(BINDIR)
 install-cli: build
@@ -47,11 +58,17 @@ install-cli: build
 
 ## Install both CLI and GUI binaries to $(BINDIR)
 install-all: build gui
-	@mkdir -p $(BINDIR)
+	@mkdir -p $(BINDIR) $(APPDIR)
 	install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
 	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
+	sed 's|%BINDIR%|$(BINDIR)|g' $(DESKTOP_FILE) > $(APPDIR)/$(DESKTOP_FILE)
+	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
+	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
+	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)
 	@echo "Installed deploytix      -> $(BINDIR)/deploytix"
 	@echo "Installed deploytix-gui  -> $(BINDIR)/deploytix-gui"
+	@echo "Installed desktop entry  -> $(APPDIR)/$(DESKTOP_FILE)"
+	@echo "Installed polkit policy -> $(POLKITDIR)/$(POLKIT_FILE)"
 
 ## Install GCC CLI binary to $(BINDIR)
 install-gcc: gcc
@@ -65,10 +82,14 @@ install-portable: portable
 	install -m 755 $(PORTABLE_BIN) $(BINDIR)/deploytix
 	@echo "Installed portable deploytix -> $(BINDIR)/deploytix"
 
-## Remove installed binaries
+## Remove installed binaries and desktop entry
 uninstall:
 	rm -f $(BINDIR)/deploytix $(BINDIR)/deploytix-gui
+	rm -f $(APPDIR)/$(DESKTOP_FILE)
+	sudo rm -f $(POLKITDIR)/$(POLKIT_FILE)
 	@echo "Uninstalled deploytix and deploytix-gui from $(BINDIR)"
+	@echo "Removed desktop entry from $(APPDIR)"
+	@echo "Removed polkit policy from $(POLKITDIR)"
 
 ## Format source code
 fmt:

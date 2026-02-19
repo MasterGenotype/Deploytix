@@ -23,10 +23,39 @@ fn to_title_case(s: &str) -> String {
 pub struct LuksContainer {
     /// Source device (e.g., /dev/sda3)
     pub device: String,
-    /// Mapper name (e.g., Crypt-Root)
+    /// Active mapper name, potentially disambiguated (e.g., Crypt-Root or Crypt-Root-1)
     pub mapper_name: String,
     /// Mapped device path (e.g., /dev/mapper/Crypt-Root)
     pub mapped_path: String,
+    /// Canonical volume name for config generation (e.g., "Root", "Usr", "Lvm", "Boot")
+    /// Boot-time configs (crypttab, fstab, hooks) use this instead of parsing mapper_name.
+    pub volume_name: String,
+}
+
+/// Check whether a device-mapper name is already active.
+pub fn is_mapper_active(name: &str) -> bool {
+    std::path::Path::new(&format!("/dev/mapper/{}", name)).exists()
+}
+
+/// Return `desired` if it is not already active, otherwise try
+/// `desired-1`, `desired-2`, … up to `-99`.
+pub fn resolve_mapper_name(desired: &str) -> String {
+    if !is_mapper_active(desired) {
+        return desired.to_string();
+    }
+    tracing::warn!(
+        "Mapper name '{}' already in use, disambiguating",
+        desired
+    );
+    for i in 1..=99 {
+        let candidate = format!("{}-{}", desired, i);
+        if !is_mapper_active(&candidate) {
+            tracing::info!("Using disambiguated mapper name '{}'", candidate);
+            return candidate;
+        }
+    }
+    // Extremely unlikely; fall back to the original and let cryptsetup report the error
+    desired.to_string()
 }
 
 /// Setup LUKS encryption for the specified partition (legacy single-volume)
@@ -48,7 +77,9 @@ pub fn setup_encryption(
     })?;
 
     let luks_device = partition_path(device, luks_partition);
-    let mapper_name = config.disk.luks_mapper_name.clone();
+    let canonical_mapper = config.disk.luks_mapper_name.clone();
+    let volume_name = canonical_mapper.trim_start_matches("Crypt-").to_string();
+    let mapper_name = resolve_mapper_name(&canonical_mapper);
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
     info!(
@@ -76,6 +107,7 @@ pub fn setup_encryption(
             device: luks_device,
             mapper_name,
             mapped_path,
+            volume_name,
         });
     }
 
@@ -98,6 +130,7 @@ pub fn setup_encryption(
         device: luks_device,
         mapper_name,
         mapped_path,
+        volume_name,
     })
 }
 
@@ -236,7 +269,9 @@ pub fn setup_boot_encryption(
     })?;
 
     let boot_device = partition_path(device, boot_partition);
-    let mapper_name = config.disk.luks_boot_mapper_name.clone();
+    let canonical_mapper = config.disk.luks_boot_mapper_name.clone();
+    let volume_name = canonical_mapper.trim_start_matches("Crypt-").to_string();
+    let mapper_name = resolve_mapper_name(&canonical_mapper);
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
     info!(
@@ -257,6 +292,7 @@ pub fn setup_boot_encryption(
             device: boot_device,
             mapper_name,
             mapped_path,
+            volume_name,
         });
     }
 
@@ -275,6 +311,7 @@ pub fn setup_boot_encryption(
         device: boot_device,
         mapper_name,
         mapped_path,
+        volume_name,
     })
 }
 
@@ -369,9 +406,10 @@ pub fn setup_single_luks(
     cmd: &CommandRunner,
     device: &str,
     password: &str,
-    mapper_name: &str,
+    canonical_mapper: &str,
+    volume_name: &str,
 ) -> Result<LuksContainer> {
-    setup_single_luks_inner(cmd, device, password, mapper_name, false)
+    setup_single_luks_inner(cmd, device, password, canonical_mapper, volume_name, false)
 }
 
 /// Setup LUKS2 encryption with dm-integrity for a single partition
@@ -381,18 +419,21 @@ pub fn setup_single_luks_with_integrity(
     cmd: &CommandRunner,
     device: &str,
     password: &str,
-    mapper_name: &str,
+    canonical_mapper: &str,
+    volume_name: &str,
 ) -> Result<LuksContainer> {
-    setup_single_luks_inner(cmd, device, password, mapper_name, true)
+    setup_single_luks_inner(cmd, device, password, canonical_mapper, volume_name, true)
 }
 
 fn setup_single_luks_inner(
     cmd: &CommandRunner,
     device: &str,
     password: &str,
-    mapper_name: &str,
+    canonical_mapper: &str,
+    volume_name: &str,
     integrity: bool,
 ) -> Result<LuksContainer> {
+    let mapper_name = resolve_mapper_name(canonical_mapper);
     let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
     if integrity {
@@ -420,8 +461,9 @@ fn setup_single_luks_inner(
         println!("  [dry-run] cryptsetup open {} {}", device, mapper_name);
         return Ok(LuksContainer {
             device: device.to_string(),
-            mapper_name: mapper_name.to_string(),
+            mapper_name: mapper_name.clone(),
             mapped_path,
+            volume_name: volume_name.to_string(),
         });
     }
 
@@ -433,7 +475,7 @@ fn setup_single_luks_inner(
     }
 
     // Open LUKS container
-    luks_open(device, mapper_name, password)?;
+    luks_open(device, &mapper_name, password)?;
 
     info!(
         "LUKS2 encryption setup complete: {} -> {}",
@@ -442,8 +484,9 @@ fn setup_single_luks_inner(
 
     Ok(LuksContainer {
         device: device.to_string(),
-        mapper_name: mapper_name.to_string(),
+        mapper_name,
         mapped_path,
+        volume_name: volume_name.to_string(),
     })
 }
 
@@ -473,8 +516,9 @@ pub fn setup_multi_volume_encryption(
     for (part_num, name) in luks_partitions {
         let luks_device = partition_path(device, *part_num);
         // Convert partition name to title case (e.g., "ROOT" -> "Root")
-        let title_case_name = to_title_case(name);
-        let mapper_name = format!("Crypt-{}", title_case_name);
+        let volume_name = to_title_case(name);
+        let canonical_mapper = format!("Crypt-{}", volume_name);
+        let mapper_name = resolve_mapper_name(&canonical_mapper);
         let mapped_path = format!("/dev/mapper/{}", mapper_name);
 
         if integrity {
@@ -524,6 +568,7 @@ pub fn setup_multi_volume_encryption(
             device: luks_device,
             mapper_name,
             mapped_path,
+            volume_name: volume_name.clone(),
         });
     }
 

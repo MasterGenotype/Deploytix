@@ -137,11 +137,7 @@ pub fn setup_keyfiles_for_volumes(
     }
 
     for container in containers {
-        // Extract volume name from mapper name (e.g., "Crypt-Root" -> "Root")
-        let volume_name = container
-            .mapper_name
-            .trim_start_matches("Crypt-")
-            .to_string();
+        let volume_name = container.volume_name.clone();
 
         // Generate keyfile path (inside installed system)
         let keyfile_rel = keyfile_path(&volume_name);

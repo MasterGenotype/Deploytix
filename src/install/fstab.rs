@@ -290,10 +290,7 @@ pub fn generate_fstab_multi_volume(
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate fstab with encrypted volumes:");
         for container in containers {
-            let mp = container
-                .mapper_name
-                .trim_start_matches("Crypt-")
-                .to_lowercase();
+            let mp = container.volume_name.to_lowercase();
             let mount_point = if mp == "root" {
                 "/"
             } else {
@@ -318,12 +315,7 @@ pub fn generate_fstab_multi_volume(
 
     // Add encrypted volume entries
     for container in containers {
-        let volume_name = container
-            .mapper_name
-            .trim_start_matches("Crypt-")
-            .to_string();
-
-        let mount_point = match volume_name.as_str() {
+        let mount_point = match container.volume_name.as_str() {
             "Root" => "/".to_string(),
             name => format!("/{}", name.to_lowercase()),
         };
@@ -336,7 +328,7 @@ pub fn generate_fstab_multi_volume(
         content.push_str(&format!(
             "# {} partition (LUKS encrypted)\n\
              UUID={}  {}  btrfs  defaults,noatime,compress=zstd  0  {}\n\n",
-            volume_name, fs_uuid, mount_point, pass
+            container.volume_name, fs_uuid, mount_point, pass
         ));
     }
 

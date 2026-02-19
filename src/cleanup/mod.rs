@@ -84,24 +84,33 @@ impl Cleaner {
     }
 
     /// Close any open LUKS encrypted volumes
+    ///
+    /// Dynamically enumerates `/dev/mapper/Crypt-*` entries so that both
+    /// canonical names (e.g. `Crypt-Root`) and disambiguated names
+    /// (e.g. `Crypt-Root-1`) are closed.
     fn close_encrypted_volumes(&self) -> Result<()> {
         info!("Closing any open LUKS encrypted volumes");
 
-        // Common mapper names used in the original script
-        let mapper_names = [
-            "Crypt-Boot",
-            "Crypt-Swap",
-            "Crypt-Root",
-            "Crypt-Usr",
-            "Crypt-Var",
-            "Crypt-Home",
-        ];
+        let mapper_dir = std::path::Path::new("/dev/mapper");
+        if let Ok(entries) = fs::read_dir(mapper_dir) {
+            // Collect and sort in reverse so deeper volumes close before root
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("Crypt-") {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            names.reverse();
 
-        for name in mapper_names {
-            let mapper_path = format!("/dev/mapper/{}", name);
-            if std::path::Path::new(&mapper_path).exists() {
+            for name in names {
                 info!("Closing {}", name);
-                let _ = self.cmd.run("cryptsetup", &["close", name]);
+                let _ = self.cmd.run("cryptsetup", &["close", &name]);
             }
         }
 

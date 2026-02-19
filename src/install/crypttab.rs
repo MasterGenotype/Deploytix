@@ -125,20 +125,18 @@ pub fn generate_crypttab_multi_volume(
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate /etc/crypttab:");
         for container in containers {
-            let volume_name = container.mapper_name.trim_start_matches("Crypt-");
-            let kf_path = keyfile_path(volume_name);
+            let kf_path = keyfile_path(&container.volume_name);
             println!(
                 "    {} UUID=<LUKS_UUID> {} {}",
-                volume_name, kf_path, options
+                container.volume_name, kf_path, options
             );
         }
         if let Some(boot) = boot_container {
-            let volume_name = boot.mapper_name.trim_start_matches("Crypt-");
-            let kf_path = keyfile_path(volume_name);
+            let kf_path = keyfile_path(&boot.volume_name);
             // Boot uses LUKS1, always discard (no integrity)
             println!(
                 "    {} UUID=<BOOT_LUKS_UUID> {} luks,discard",
-                volume_name, kf_path
+                boot.volume_name, kf_path
             );
         }
         return Ok(());
@@ -155,22 +153,16 @@ pub fn generate_crypttab_multi_volume(
     for container in containers {
         let uuid = get_luks_uuid(&container.device)?;
 
-        // Extract volume name from mapper name (e.g., "Crypt-Root" -> "Root")
-        let volume_name = container
-            .mapper_name
-            .trim_start_matches("Crypt-")
-            .to_string();
-
         // Find matching keyfile
         let kf_path = keyfiles
             .iter()
-            .find(|k| k.volume_name == volume_name)
+            .find(|k| k.volume_name == container.volume_name)
             .map(|k| k.keyfile_path.clone())
-            .unwrap_or_else(|| keyfile_path(&volume_name));
+            .unwrap_or_else(|| keyfile_path(&container.volume_name));
 
         content.push_str(&format!(
             "{name}    UUID={uuid}    {keyfile}    {options}\n",
-            name = volume_name,
+            name = container.volume_name,
             uuid = uuid,
             keyfile = kf_path,
             options = options,
@@ -181,17 +173,16 @@ pub fn generate_crypttab_multi_volume(
     // Boot always uses discard (LUKS1 doesn't support integrity)
     if let Some(boot) = boot_container {
         let uuid = get_luks_uuid(&boot.device)?;
-        let volume_name = boot.mapper_name.trim_start_matches("Crypt-").to_string();
 
         let kf_path = keyfiles
             .iter()
-            .find(|k| k.volume_name == volume_name)
+            .find(|k| k.volume_name == boot.volume_name)
             .map(|k| k.keyfile_path.clone())
-            .unwrap_or_else(|| keyfile_path(&volume_name));
+            .unwrap_or_else(|| keyfile_path(&boot.volume_name));
 
         content.push_str(&format!(
             "{name}    UUID={uuid}    {keyfile}    luks,discard\n",
-            name = volume_name,
+            name = boot.volume_name,
             uuid = uuid,
             keyfile = kf_path,
         ));

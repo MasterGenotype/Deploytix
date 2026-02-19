@@ -1,0 +1,55 @@
+# Maintainer: superphenotype
+pkgbase=deploytix-git
+pkgname=('deploytix-git' 'deploytix-gui-git')
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
+arch=('x86_64')
+url="https://github.com/superphenotype/deploytix"
+license=('MIT')
+makedepends=('cargo' 'git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+source=("git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd deploytix
+    git describe --long --tags --abbrev=7 2>/dev/null \
+        | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+        || printf "0.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd deploytix
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd deploytix
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release --frozen --features gui
+}
+
+package_deploytix-git() {
+    pkgdesc="Automated Artix Linux deployment installer (CLI)"
+    depends=('gcc-libs')
+    provides=('deploytix')
+    conflicts=('deploytix')
+
+    cd deploytix
+    install -Dm755 "target/release/deploytix" "$pkgdir/usr/bin/deploytix"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+package_deploytix-gui-git() {
+    pkgdesc="Automated Artix Linux deployment installer (GUI)"
+    depends=('deploytix-git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+    provides=('deploytix-gui')
+    conflicts=('deploytix-gui')
+
+    cd deploytix
+    install -Dm755 "target/release/deploytix-gui" "$pkgdir/usr/bin/deploytix-gui"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

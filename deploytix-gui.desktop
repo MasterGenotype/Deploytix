@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Deploytix
+Comment=Automated Artix Linux deployment installer
+Exec=env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%BINDIR% pkexec %BINDIR%/deploytix-gui
+Icon=utilities-terminal
+Terminal=false
+Categories=System;Utility;
+Keywords=linux;installer;artix;deployment;

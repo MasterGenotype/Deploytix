@@ -234,9 +234,9 @@ impl DeploytixGui {
                 } else {
                     None
                 },
-                luks_mapper_name: "Crypt-Root".to_string(),
+                luks_mapper_name: crate::config::default_luks_mapper_name(),
                 boot_encryption: self.boot_encryption,
-                luks_boot_mapper_name: "Crypt-Boot".to_string(),
+                luks_boot_mapper_name: crate::config::default_luks_boot_mapper_name(),
                 keyfile_path: None,
                 integrity: self.integrity,
                 keyfile_enabled: self.encryption,
