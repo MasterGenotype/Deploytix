@@ -145,7 +145,14 @@ pub fn get_partition_uuid(partition: &str) -> Result<String> {
         )));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let uuid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uuid.is_empty() {
+        return Err(DeploytixError::FilesystemError(format!(
+            "blkid returned empty UUID for {}",
+            partition
+        )));
+    }
+    Ok(uuid)
 }
 
 /// Get all partition UUIDs for a layout

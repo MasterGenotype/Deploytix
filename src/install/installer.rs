@@ -20,6 +20,7 @@ use crate::disk::partitioning::apply_partitions;
 use crate::install::crypttab::generate_crypttab_multi_volume;
 use crate::install::fstab::{
     append_swap_file_entry, generate_fstab_lvm_thin, generate_fstab_multi_volume,
+    LvmThinFstabParams,
 };
 use crate::install::{generate_fstab, mount_partitions, run_basestrap, unmount_all};
 use crate::utils::command::CommandRunner;
@@ -923,16 +924,16 @@ impl Installer {
             .as_ref()
             .map(|c| c.mapped_path.as_str());
 
-        generate_fstab_lvm_thin(
-            &self.cmd,
+        generate_fstab_lvm_thin(&LvmThinFstabParams {
+            cmd: &self.cmd,
             vg_name,
-            &self.lvm_thin_volumes,
-            &self.config.disk.device,
+            thin_volumes: &self.lvm_thin_volumes,
+            device: &self.config.disk.device,
             layout,
-            &self.config.disk.swap_type,
-            boot_mapped,
-            INSTALL_ROOT,
-        )
+            swap_type: &self.config.disk.swap_type,
+            boot_mapped_device: boot_mapped,
+            install_root: INSTALL_ROOT,
+        })
     }
 
     /// Generate crypttab for LVM thin layout

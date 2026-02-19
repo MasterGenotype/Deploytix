@@ -5,7 +5,7 @@ use crate::disk::formatting::{create_btrfs_subvolumes, mount_btrfs_subvolumes};
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Mount all partitions according to the layout
 /// Handles both regular partitions and btrfs subvolume layouts
@@ -157,7 +157,12 @@ pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     // Unmount each
     for mp in mount_points {
         info!("Unmounting {}", mp);
-        let _ = cmd.run("umount", &[mp]);
+        if let Err(e) = cmd.run("umount", &[mp]) {
+            warn!("Failed to unmount {}: {} (trying lazy unmount)", mp, e);
+            if let Err(e2) = cmd.run("umount", &["-l", mp]) {
+                warn!("Lazy unmount also failed for {}: {}", mp, e2);
+            }
+        }
     }
 
     Ok(())

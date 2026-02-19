@@ -175,11 +175,18 @@ impl Cleaner {
 
         if let Ok(output) = result {
             if !output.status.success() {
-                // Fall back to fdisk
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("echo -e 'g\\nw' | fdisk {}", device))
-                    .output();
+                // Fall back to fdisk with piped stdin (no shell interpolation)
+                let _ = std::process::Command::new("fdisk")
+                    .arg(device)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        if let Some(ref mut stdin) = child.stdin {
+                            use std::io::Write;
+                            let _ = stdin.write_all(b"g\nw\n");
+                        }
+                        child.wait()
+                    });
             }
         }
 
