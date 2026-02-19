@@ -85,6 +85,7 @@ pub fn disk_config_panel(
     ui.add_space(8.0);
 
     // Partition Layout
+    let prev_layout = layout.clone();
     ui.label("Partition Layout:");
     egui::ComboBox::from_id_salt("layout")
         .selected_text(format!("{}", layout))
@@ -111,6 +112,12 @@ pub fn disk_config_panel(
     if *layout == PartitionLayout::LvmThin {
         *encryption = true;
         *filesystem = Filesystem::Btrfs;
+    }
+
+    // When switching away from LvmThin, clear the encryption state that was
+    // force-enabled by LvmThin so it doesn't bleed into Standard/Minimal.
+    if prev_layout == PartitionLayout::LvmThin && *layout != PartitionLayout::LvmThin {
+        *encryption = false;
     }
 
     // Filesystem
