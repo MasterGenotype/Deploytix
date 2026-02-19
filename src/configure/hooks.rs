@@ -233,12 +233,14 @@ run_hook() {
         # If the crypttab name already starts with "Crypt-", use it as-is.
         # Otherwise, title-case it and prepend "Crypt-" (e.g., "Root" -> "Crypt-Root").
         local full_mapper_name
+        local formatted_mapping=""
         case "$mapping" in
             Crypt-*)
                 full_mapper_name="$mapping"
+                # Extract the portion after "Crypt-" for the EFI check below
+                formatted_mapping="${mapping#Crypt-}"
                 ;;
             *)
-                local formatted_mapping
                 formatted_mapping=$(echo "$mapping" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
                 full_mapper_name="Crypt-$formatted_mapping"
                 ;;
