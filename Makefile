@@ -3,9 +3,10 @@ BINDIR := $(PREFIX)/bin
 
 CLI_BIN      := target/release/deploytix
 GUI_BIN      := target/release/deploytix-gui
+GCC_BIN      := target/x86_64-unknown-linux-gnu/release/deploytix
 PORTABLE_BIN := target/x86_64-unknown-linux-musl/release/deploytix
 
-.PHONY: all build gui portable install install-cli install-gui install-portable uninstall clean fmt lint test
+.PHONY: all build gui gcc portable install install-cli install-gui install-gcc install-portable uninstall clean fmt lint test
 
 ## Default: build CLI
 all: build
@@ -17,6 +18,12 @@ build:
 ## Build GUI binary (release)
 gui:
 	cargo build --release --features gui
+
+## Build CLI binary with explicit GCC linker (glibc, dynamically linked)
+gcc:
+	cargo build --release --target x86_64-unknown-linux-gnu --bin deploytix
+	@echo "GCC binary: $(GCC_BIN)"
+	@file $(GCC_BIN)
 
 ## Build portable static CLI binary (musl, zero dynamic deps)
 ## Prerequisites: apt install musl-tools
@@ -45,6 +52,12 @@ install-all: build gui
 	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
 	@echo "Installed deploytix      -> $(BINDIR)/deploytix"
 	@echo "Installed deploytix-gui  -> $(BINDIR)/deploytix-gui"
+
+## Install GCC CLI binary to $(BINDIR)
+install-gcc: gcc
+	@mkdir -p $(BINDIR)
+	install -m 755 $(GCC_BIN) $(BINDIR)/deploytix
+	@echo "Installed gcc deploytix -> $(BINDIR)/deploytix"
 
 ## Install portable (musl) CLI binary to $(BINDIR)
 install-portable: portable
