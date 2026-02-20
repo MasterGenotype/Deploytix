@@ -135,6 +135,10 @@ pub struct DeploytixGui {
     install_finished: bool,
     install_error: Option<String>,
     install_receiver: Option<Receiver<InstallMessage>>,
+
+    // Config save/load
+    config_file_path: String,
+    config_message: Option<(String, bool)>, // (message, is_error)
 }
 
 impl Default for DeploytixGui {
@@ -192,6 +196,9 @@ impl Default for DeploytixGui {
             install_finished: false,
             install_error: None,
             install_receiver: None,
+
+            config_file_path: String::new(),
+            config_message: None,
         }
     }
 }
@@ -368,6 +375,77 @@ impl DeploytixGui {
         });
     }
 
+    fn save_config(&mut self) {
+        let path = self.config_file_path.trim().to_string();
+        if path.is_empty() {
+            self.config_message = Some(("Enter a file path first".to_string(), true));
+            return;
+        }
+        let config = self.build_config();
+        match config.to_file(&path) {
+            Ok(()) => self.config_message = Some((format!("Saved to {}", path), false)),
+            Err(e) => self.config_message = Some((format!("Save failed: {}", e), true)),
+        }
+    }
+
+    fn load_config(&mut self) {
+        let path = self.config_file_path.trim().to_string();
+        if path.is_empty() {
+            self.config_message = Some(("Enter a file path first".to_string(), true));
+            return;
+        }
+        match DeploymentConfig::from_file(&path) {
+            Ok(config) => {
+                self.load_from_config(config);
+                self.config_message = Some((format!("Loaded from {}", path), false));
+            }
+            Err(e) => self.config_message = Some((format!("Load failed: {}", e), true)),
+        }
+    }
+
+    fn load_from_config(&mut self, config: DeploymentConfig) {
+        // Disk settings
+        self.partition_layout = config.disk.layout;
+        self.filesystem = config.disk.filesystem;
+        self.encryption = config.disk.encryption;
+        self.encryption_password = config.disk.encryption_password.unwrap_or_default();
+        self.boot_encryption = config.disk.boot_encryption;
+        self.integrity = config.disk.integrity;
+        self.swap_type = config.disk.swap_type;
+        self.zram_percent = config.disk.zram_percent;
+        self.lvm_vg_name = config.disk.lvm_vg_name;
+        self.lvm_thin_pool_name = config.disk.lvm_thin_pool_name;
+        self.lvm_thin_pool_percent = config.disk.lvm_thin_pool_percent;
+        self.custom_partitions = config.disk.custom_partitions.unwrap_or_default();
+
+        // Try to match the saved device path against the discovered device list
+        self.selected_device_index = self
+            .devices
+            .iter()
+            .position(|d| d.path == config.disk.device);
+
+        // System settings
+        self.init_system = config.system.init;
+        self.bootloader = config.system.bootloader;
+        self.timezone = config.system.timezone;
+        self.locale = config.system.locale;
+        self.keymap = config.system.keymap;
+        self.hostname = config.system.hostname;
+        self.secureboot = config.system.secureboot;
+        self.secureboot_method = config.system.secureboot_method;
+
+        // User settings
+        let password = config.user.password;
+        self.username = config.user.name;
+        self.user_password = password.clone();
+        self.user_password_confirm = password;
+        self.sudoer = config.user.sudoer;
+
+        // Network & Desktop
+        self.network_backend = config.network.backend;
+        self.desktop_env = config.desktop.environment;
+    }
+
     fn poll_install_messages(&mut self) {
         let mut should_clear_receiver = false;
 
@@ -451,10 +529,37 @@ impl eframe::App for DeploytixGui {
             ui.add_space(8.0);
         });
 
-        // Bottom panel with navigation buttons
+        // Bottom panel with navigation buttons and config save/load
         let mut can_proceed = false;
+        let mut save_config_clicked = false;
+        let mut load_config_clicked = false;
         egui::TopBottomPanel::bottom("navigation").show(ctx, |ui| {
             ui.add_space(8.0);
+
+            // Config file save/load row (hidden during installation)
+            if self.step != WizardStep::Installing {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label("Config file:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.config_file_path)
+                            .desired_width(220.0)
+                            .hint_text("path/to/config.toml"),
+                    );
+                    save_config_clicked = ui.button("💾 Save").clicked();
+                    load_config_clicked = ui.button("📂 Load").clicked();
+                    if let Some((ref msg, is_error)) = self.config_message {
+                        let color = if is_error {
+                            egui::Color32::RED
+                        } else {
+                            egui::Color32::GREEN
+                        };
+                        ui.label(egui::RichText::new(msg).color(color));
+                    }
+                });
+                ui.separator();
+            }
+
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
 
@@ -497,6 +602,13 @@ impl eframe::App for DeploytixGui {
             });
             ui.add_space(8.0);
         });
+
+        if save_config_clicked {
+            self.save_config();
+        }
+        if load_config_clicked {
+            self.load_config();
+        }
 
         // Main content panel
         egui::CentralPanel::default().show(ctx, |ui| {

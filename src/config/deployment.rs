@@ -476,6 +476,13 @@ impl DeploymentConfig {
         Ok(config)
     }
 
+    /// Save configuration to a TOML file
+    pub fn to_file(&self, path: &str) -> Result<()> {
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
     /// Create configuration interactively
     pub fn from_wizard(device: Option<String>) -> Result<Self> {
         println!("\n🚀 Deploytix Configuration Wizard\n");
