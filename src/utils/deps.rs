@@ -143,31 +143,50 @@ pub fn ensure_dependencies(
     encryption: bool,
     bootloader: &Bootloader,
 ) -> Result<()> {
-    let missing = check_dependencies(layout, filesystem, encryption, bootloader);
+    let required = required_binaries(layout, filesystem, encryption, bootloader);
+    let bin_to_pkg = binary_to_package();
 
-    if missing.is_empty() {
+    // Collect missing binaries with their providing packages
+    let mut missing_packages: Vec<String> = Vec::new();
+    let mut missing_details: Vec<(String, String)> = Vec::new(); // (binary, package)
+
+    for bin in required {
+        if !binary_exists(bin) {
+            let pkg = bin_to_pkg
+                .get(bin)
+                .copied()
+                .unwrap_or("unknown");
+            missing_details.push((bin.to_string(), pkg.to_string()));
+            if !missing_packages.contains(&pkg.to_string()) {
+                missing_packages.push(pkg.to_string());
+            }
+        }
+    }
+
+    if missing_details.is_empty() {
         info!("All required host dependencies are installed");
         return Ok(());
     }
 
-    println!("\n⚠ Missing host system packages:");
-    for pkg in &missing {
-        println!("  - {}", pkg);
+    println!("\n⚠ Missing host system dependencies:");
+    for (bin, pkg) in &missing_details {
+        println!("  - {} (package: {})", bin, pkg);
     }
+    println!("\nPackages to install: {}", missing_packages.join(" "));
     println!();
 
     if cmd.is_dry_run() {
         println!(
             "[dry-run] Would install: pacman -S --noconfirm {}",
-            missing.join(" ")
+            missing_packages.join(" ")
         );
         return Ok(());
     }
 
     let install = prompt_confirm(
         &format!(
-            "Install missing packages? (pacman -S {})",
-            missing.join(" ")
+            "Install {} missing package(s) now?",
+            missing_packages.len()
         ),
         true,
     )?;
@@ -182,12 +201,12 @@ pub fn ensure_dependencies(
     println!("Installing packages...");
     let status = Command::new("pacman")
         .args(["-S", "--noconfirm"])
-        .args(&missing)
+        .args(&missing_packages)
         .status()?;
 
     if !status.success() {
         return Err(crate::utils::error::DeploytixError::CommandFailed {
-            command: format!("pacman -S {}", missing.join(" ")),
+            command: format!("pacman -S {}", missing_packages.join(" ")),
             stderr: format!("Exit code: {:?}", status.code()),
         });
     }

@@ -37,8 +37,9 @@ pub fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
     Confirm::with_theme(&theme)
         .with_prompt(prompt)
         .default(default)
-        .interact()
-        .map_err(|_| DeploytixError::UserCancelled)
+        .interact_opt()
+        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .ok_or(DeploytixError::UserCancelled)
 }
 
 /// Prompt for selection from a list
@@ -48,8 +49,9 @@ pub fn prompt_select<T: ToString>(prompt: &str, items: &[T], default: usize) -> 
         .with_prompt(prompt)
         .items(items)
         .default(default)
-        .interact()
-        .map_err(|_| DeploytixError::UserCancelled)
+        .interact_opt()
+        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .ok_or(DeploytixError::UserCancelled)
 }
 
 /// Prompt for fuzzy selection from a list
@@ -59,8 +61,9 @@ pub fn prompt_fuzzy_select<T: ToString>(prompt: &str, items: &[T]) -> Result<usi
     FuzzySelect::with_theme(&theme)
         .with_prompt(prompt)
         .items(items)
-        .interact()
-        .map_err(|_| DeploytixError::UserCancelled)
+        .interact_opt()
+        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .ok_or(DeploytixError::UserCancelled)
 }
 
 /// Prompt for optional input (can be empty)
