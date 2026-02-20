@@ -120,7 +120,7 @@ pub fn format_all_partitions(
                 "Skipping {} (LUKS partition, formatted by encryption module)",
                 part_path
             );
-        } else if part.is_bios_boot {
+        } else if part.is_boot_fs {
             format_boot(cmd, &part_path)?;
         } else {
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;

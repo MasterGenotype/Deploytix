@@ -200,8 +200,8 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
         .saturating_sub(usr_mib)
         .saturating_sub(var_mib);
 
-    // If home is too small, reduce other partitions deterministically
-    if home_mib == 0 || home_mib > disk_mib {
+    // If home is too small (saturating subtraction hit zero), reduce other partitions deterministically
+    if home_mib == 0 {
         let mut deficit =
             (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib).saturating_sub(disk_mib);
 

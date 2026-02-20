@@ -1,6 +1,6 @@
 //! Fstab generation
 
-use crate::config::SwapType;
+use crate::config::{Filesystem, SwapType};
 use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
@@ -19,6 +19,7 @@ pub fn generate_fstab(
     cmd: &CommandRunner,
     device: &str,
     layout: &ComputedLayout,
+    filesystem: &Filesystem,
     install_root: &str,
 ) -> Result<()> {
     // Check if this layout uses subvolumes
@@ -57,13 +58,32 @@ pub fn generate_fstab(
         if part.is_swap {
             fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
         } else if let Some(ref mount_point) = part.mount_point {
-            // Determine filesystem type and options
+            // Determine filesystem type and options based on partition role
             let (fstype, options, pass) = if part.is_efi {
                 ("vfat", "defaults,noatime", 2)
-            } else if mount_point == "/" {
-                ("btrfs", "defaults,noatime,compress=zstd", 1)
+            } else if part.is_boot_fs {
+                // BOOT partition is always btrfs (format_boot always uses mkfs.btrfs)
+                ("btrfs", "defaults,noatime", 2)
             } else {
-                ("btrfs", "defaults,noatime,compress=zstd", 2)
+                // Data partitions use the user-chosen filesystem
+                let (fstype, options) = match filesystem {
+                    Filesystem::Ext4 => ("ext4", "defaults,noatime"),
+                    Filesystem::Btrfs => ("btrfs", "defaults,noatime,compress=zstd"),
+                    Filesystem::Xfs => ("xfs", "defaults,noatime"),
+                    Filesystem::F2fs => ("f2fs", "defaults,noatime"),
+                };
+                // btrfs and xfs do not use fsck (pass=0); ext4/f2fs use pass 1 for root, 2 for rest
+                let pass = match filesystem {
+                    Filesystem::Btrfs | Filesystem::Xfs => 0,
+                    _ => {
+                        if mount_point == "/" {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                };
+                (fstype, options, pass)
             };
 
             fstab_content.push_str(&format!(
@@ -160,10 +180,9 @@ fn generate_fstab_with_subvolumes(
                 uuid
             ));
         } else if let Some(ref mount_point) = part.mount_point {
-            let fstype = if part.is_efi { "vfat" } else { "btrfs" };
             content.push_str(&format!(
-                "\nUUID={}  {}  {}  defaults,noatime  0  2\n",
-                uuid, mount_point, fstype
+                "\nUUID={}  {}  btrfs  defaults,noatime  0  2\n",
+                uuid, mount_point
             ));
         }
     }

@@ -199,8 +199,6 @@ pub fn run_basestrap_with_retries(
     let pkg_refs: Vec<&str> = packages.iter().map(|s| s.as_str()).collect();
     args.extend(pkg_refs);
 
-    let mut last_error = None;
-
     for attempt in 1..=max_retries {
         match cmd.run("basestrap", &args) {
             Ok(_) => {
@@ -219,7 +217,6 @@ pub fn run_basestrap_with_retries(
                     );
                     warn!("Retrying in {} seconds...", BASESTRAP_RETRY_DELAY_SECS);
                     thread::sleep(Duration::from_secs(BASESTRAP_RETRY_DELAY_SECS));
-                    last_error = Some(error_str);
                 } else {
                     // Non-network error or final attempt - fail immediately
                     return Err(DeploytixError::CommandFailed {
@@ -231,9 +228,10 @@ pub fn run_basestrap_with_retries(
         }
     }
 
-    // Should not reach here, but handle it just in case
+    // Unreachable: the loop always exits via `return` on the final attempt.
+    // Required to satisfy the compiler since the loop bound is not statically known.
     Err(DeploytixError::CommandFailed {
         command: "basestrap".to_string(),
-        stderr: last_error.unwrap_or_else(|| "Unknown error after retries".to_string()),
+        stderr: "Unknown error after retries".to_string(),
     })
 }

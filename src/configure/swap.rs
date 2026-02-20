@@ -382,18 +382,24 @@ fn create_btrfs_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Res
     // Create empty file
     std::fs::File::create(path)?;
 
-    // Disable COW
+    // Disable COW — remove the empty file if this fails to avoid leaving an unusable stub
     cmd.run("chattr", &["+C", path])
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "chattr +C".to_string(),
-            stderr: e.to_string(),
+        .map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            DeploytixError::CommandFailed {
+                command: "chattr +C".to_string(),
+                stderr: e.to_string(),
+            }
         })?;
 
-    // Allocate space
+    // Allocate space — remove the empty file if this fails
     cmd.run("fallocate", &["-l", &format!("{}M", size_mib), path])
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "fallocate".to_string(),
-            stderr: e.to_string(),
+        .map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            DeploytixError::CommandFailed {
+                command: "fallocate".to_string(),
+                stderr: e.to_string(),
+            }
         })?;
 
     Ok(())

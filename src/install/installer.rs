@@ -98,6 +98,15 @@ impl Installer {
 
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
+        let result = self.run_inner();
+        if result.is_err() {
+            self.emergency_cleanup();
+        }
+        result
+    }
+
+    /// Inner installation logic. Extracted so `run` can call `emergency_cleanup` on any error.
+    fn run_inner(&mut self) -> Result<()> {
         info!(
             "Starting Deploytix installation on {} ({} layout, {} init)",
             self.config.disk.device, self.config.disk.layout, self.config.system.init
@@ -214,6 +223,23 @@ impl Installer {
         Ok(())
     }
 
+    /// Best-effort cleanup called when installation fails mid-way.
+    /// Unmounts filesystems and closes LUKS/LVM resources to leave the system in a clean state.
+    fn emergency_cleanup(&self) {
+        info!("Installation failed — running emergency cleanup");
+        let _ = unmount_all(&self.cmd, INSTALL_ROOT);
+        if let Some(ref boot_container) = self.luks_boot_container {
+            let _ = configure::encryption::close_luks(&self.cmd, &boot_container.mapper_name);
+        }
+        if !self.luks_containers.is_empty() {
+            let _ = close_multi_luks(&self.cmd, &self.luks_containers);
+        }
+        if let Some(ref lvm_container) = self.luks_lvm_container {
+            let _ = lvm::deactivate_vg(&self.cmd, &self.config.disk.lvm_vg_name);
+            let _ = configure::encryption::close_luks(&self.cmd, &lvm_container.mapper_name);
+        }
+    }
+
     /// Prepare for installation
     fn prepare(&mut self) -> Result<()> {
         info!(
@@ -327,7 +353,13 @@ impl Installer {
         info!("[Phase 3/6] Generating /etc/fstab with partition UUIDs");
 
         let layout = self.layout.as_ref().unwrap();
-        generate_fstab(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
+        generate_fstab(
+            &self.cmd,
+            &self.config.disk.device,
+            layout,
+            &self.config.disk.filesystem,
+            INSTALL_ROOT,
+        )?;
 
         Ok(())
     }
