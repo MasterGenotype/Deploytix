@@ -22,7 +22,7 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<Output> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        warn!("Command failed: {} {}", program, args.join(" "));
+        warn!("Command failed: {} {}\n  stderr: {}", program, args.join(" "), stderr.trim());
         return Err(DeploytixError::CommandFailed {
             command: format!("{} {}", program, args.join(" ")),
             stderr,

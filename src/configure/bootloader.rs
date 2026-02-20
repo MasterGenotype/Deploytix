@@ -226,7 +226,12 @@ fn run_grub_mkstandalone(cmd: &CommandRunner, device: &str, install_root: &str) 
         return Ok(());
     }
 
-    // First generate GRUB config
+    // Ensure /boot/grub directory exists inside chroot
+    // (normally created by grub-install, but standalone mode skips grub-install)
+    let grub_dir = format!("{}/boot/grub", install_root);
+    fs::create_dir_all(&grub_dir)?;
+
+    // Generate GRUB config
     cmd.run_in_chroot(install_root, "grub-mkconfig -o /boot/grub/grub.cfg")?;
 
     // Ensure EFI directory exists
