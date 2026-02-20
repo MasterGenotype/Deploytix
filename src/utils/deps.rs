@@ -3,7 +3,6 @@
 use crate::config::{Bootloader, Filesystem, PartitionLayout};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
-use crate::utils::prompt::prompt_confirm;
 use std::collections::HashMap;
 use std::process::Command;
 use tracing::info;
@@ -183,22 +182,8 @@ pub fn ensure_dependencies(
         return Ok(());
     }
 
-    let install = prompt_confirm(
-        &format!(
-            "Install {} missing package(s) now?",
-            missing_packages.len()
-        ),
-        true,
-    )?;
-
-    if !install {
-        return Err(crate::utils::error::DeploytixError::ConfigError(
-            "Required dependencies are missing. Please install them manually.".to_string(),
-        ));
-    }
-
-    // Install packages
-    println!("Installing packages...");
+    // Install missing packages automatically
+    println!("Installing missing packages...");
     let status = Command::new("pacman")
         .args(["-S", "--noconfirm"])
         .args(&missing_packages)
