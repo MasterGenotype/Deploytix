@@ -1,9 +1,13 @@
 [Desktop Entry]
 Type=Application
 Name=Deploytix
+GenericName=Deploytix
 Comment=Automated Artix Linux deployment installer
-Exec=pkexec /usr/bin/deploytix-gui
+Exec=pkexec %BINDIR%/deploytix-gui
 Icon=system-software-install
+NoDisplay=false
+StartupNotify=true
 Terminal=false
-Categories=System;Settings;
+Categories=System;
 Keywords=linux;installer;artix;deployment;
+X-KDE-SubstituteUID=false

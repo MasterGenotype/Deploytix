@@ -63,5 +63,8 @@ package_deploytix-gui-git() {
     cd deploytix
     install -Dm755 "target/release/deploytix-gui" "$pkgdir/usr/bin/deploytix-gui"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -Dm644 deploytix-gui.desktop "$pkgdir/usr/share/applications/deploytix-gui.desktop"
+    sed 's|%BINDIR%|/usr/bin|g' deploytix-gui.desktop > deploytix-gui.desktop.out
+    install -Dm644 deploytix-gui.desktop.out "$pkgdir/usr/share/applications/deploytix-gui.desktop"
+    install -Dm644 com.deploytix.gui.policy "$pkgdir/usr/share/polkit-1/actions/com.deploytix.gui.policy"
+    sed -i 's|%BINDIR%|/usr/bin|g' "$pkgdir/usr/share/polkit-1/actions/com.deploytix.gui.policy"
 }
