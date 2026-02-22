@@ -103,10 +103,25 @@ impl Installer {
             self.config.disk.device, self.config.disk.layout, self.config.system.init
         );
 
-        // Phase 1: Preparation
+        // Phase 1: Preparation (no resources to clean up if this fails)
         self.report_progress(0.0, "Preparing installation...");
         self.prepare()?;
 
+        // Run all remaining phases with cleanup guard
+        let result = self.run_phases();
+
+        if let Err(ref err) = result {
+            eprintln!("\n✗ Installation failed: {}", err);
+            eprintln!("  Performing emergency cleanup...");
+            self.emergency_cleanup();
+        }
+
+        result
+    }
+
+    /// Run all installation phases after preparation.
+    /// Separated from `run()` so that `emergency_cleanup()` can be called on failure.
+    fn run_phases(&mut self) -> Result<()> {
         // Phase 2: Disk operations
         self.report_progress(0.10, "Partitioning disk...");
         self.partition_disk()?;
@@ -212,6 +227,80 @@ impl Installer {
         println!("  You can now reboot into your new Artix Linux system.");
 
         Ok(())
+    }
+
+    /// Best-effort emergency cleanup when installation fails.
+    /// Unmounts filesystems, deactivates LVM, and closes LUKS devices.
+    /// All errors are logged but otherwise ignored to ensure maximum cleanup.
+    fn emergency_cleanup(&self) {
+        use tracing::warn;
+
+        info!("Emergency cleanup: releasing all resources on {}", INSTALL_ROOT);
+
+        // 1. Unmount all filesystems under INSTALL_ROOT (deepest first)
+        if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+            let mut mount_points: Vec<&str> = mounts
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
+                        Some(parts[1])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            mount_points.sort_by_key(|b| std::cmp::Reverse(b.matches('/').count()));
+
+            for mp in mount_points {
+                info!("Emergency cleanup: unmounting {}", mp);
+                if self.cmd.run("umount", &[mp]).is_err() {
+                    // Try lazy unmount as fallback
+                    if let Err(e) = self.cmd.run("umount", &["-l", mp]) {
+                        warn!("Emergency cleanup: failed to unmount {}: {}", mp, e);
+                    }
+                }
+            }
+        }
+
+        // 2. Deactivate LVM volume group if it was created
+        if self.config.disk.layout == PartitionLayout::LvmThin {
+            let vg_name = &self.config.disk.lvm_vg_name;
+            info!("Emergency cleanup: deactivating VG {}", vg_name);
+            if let Err(e) = lvm::deactivate_vg(&self.cmd, vg_name) {
+                warn!("Emergency cleanup: failed to deactivate VG {}: {}", vg_name, e);
+            }
+        }
+
+        // 3. Close all LUKS containers (enumerate /dev/mapper/Crypt-*)
+        let mapper_dir = std::path::Path::new("/dev/mapper");
+        if let Ok(entries) = fs::read_dir(mapper_dir) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("Crypt-") {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Sort reverse so deeper volumes (e.g. Crypt-LVM) close before outer (Crypt-LVM_dif)
+            names.sort();
+            names.reverse();
+
+            for name in names {
+                info!("Emergency cleanup: closing LUKS {}", name);
+                if let Err(e) = self.cmd.run("cryptsetup", &["close", &name]) {
+                    warn!("Emergency cleanup: failed to close {}: {}", name, e);
+                }
+            }
+        }
+
+        info!("Emergency cleanup complete");
     }
 
     /// Prepare for installation

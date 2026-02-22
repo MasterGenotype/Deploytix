@@ -6,10 +6,10 @@ use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
 
-/// KDE Plasma packages
+/// KDE Plasma packages (individual packages instead of plasma-meta to avoid systemd conflicts on Artix)
 const KDE_PACKAGES: &[&str] = &[
-    "plasma-meta",
     "plasma-desktop",
+    "plasma-workspace",
     "konsole",
     "dolphin",
     "sddm",
@@ -19,6 +19,14 @@ const KDE_PACKAGES: &[&str] = &[
     // Desktop integration
     "bluez",
     "power-profiles-daemon",
+    // KDE system integration
+    "powerdevil",
+    "bluedevil",
+    "kde-gtk-config",
+    "kdeplasma-addons",
+    "kscreen",
+    "kwallet-pam",
+    "xdg-desktop-portal-kde",
 ];
 
 /// s6-specific service packages for KDE
