@@ -102,7 +102,7 @@ pub struct ComputedLayout {
 impl ComputedLayout {
     /// Check if this layout uses btrfs subvolumes
     pub fn uses_subvolumes(&self) -> bool {
-        self.subvolumes.is_some() && !self.subvolumes.as_ref().unwrap().is_empty()
+        self.subvolumes.as_ref().map_or(false, |v| !v.is_empty())
     }
 }
 

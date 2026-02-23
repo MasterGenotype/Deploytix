@@ -1,6 +1,6 @@
 //! Bootloader installation and configuration
 
-use crate::config::{Bootloader, DeploymentConfig, PartitionLayout, SecureBootMethod};
+use crate::config::{Bootloader, DeploymentConfig, PartitionLayout, SecureBootMethod, SwapType};
 use crate::configure::encryption::get_luks_uuid;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::get_partition_uuid;
@@ -57,24 +57,45 @@ fn install_grub(
 ) -> Result<()> {
     info!("Installing GRUB bootloader to {} (x86_64-efi)", device);
 
-    // Get root partition - find it dynamically based on layout
-    // For encrypted Standard layout, should use install_grub_with_layout
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+    // Get root partition - find it dynamically based on layout.
+    // Encrypted layouts must use install_bootloader_with_layout to get the LUKS UUID.
+    if config.disk.encryption
+        && (config.disk.layout == PartitionLayout::Standard
+            || config.disk.layout == PartitionLayout::Custom)
+    {
         return Err(crate::utils::error::DeploytixError::ConfigError(
-            "Encrypted Standard layout requires install_bootloader_with_layout".to_string(),
+            "Encrypted Standard/Custom layout requires install_bootloader_with_layout".to_string(),
         ));
     }
 
     let root_partition_num = match config.disk.layout {
-        PartitionLayout::Standard => 4, // Root is partition 4 in standard layout
-        PartitionLayout::Minimal => 4, // Root is partition 4 in minimal layout (EFI, Boot, Swap, Root)
+        PartitionLayout::Standard => 4, // EFI(1), Boot(2), Swap(3), Root(4)
+        PartitionLayout::Minimal => 4,  // EFI(1), Boot(2), Swap(3), Root(4)
         PartitionLayout::LvmThin => {
             // LvmThin should use install_bootloader_with_layout
             return Err(crate::utils::error::DeploytixError::ConfigError(
                 "LvmThin layout requires install_bootloader_with_layout".to_string(),
             ));
         }
-        PartitionLayout::Custom => 4, // Assume standard for custom
+        PartitionLayout::Custom => {
+            // Root partition number depends on whether a swap partition is present
+            // and the order of user-defined partitions: EFI(1), Boot(2), [Swap(3)], user...
+            let has_swap = config.disk.swap_type == SwapType::Partition;
+            let first_user_num: u32 = if has_swap { 4 } else { 3 };
+            match config
+                .disk
+                .custom_partitions
+                .as_ref()
+                .and_then(|parts| parts.iter().position(|p| p.mount_point == "/"))
+            {
+                Some(idx) => first_user_num + idx as u32,
+                None => {
+                    return Err(crate::utils::error::DeploytixError::ConfigError(
+                        "Custom layout has no root (/) partition defined".to_string(),
+                    ))
+                }
+            }
+        }
     };
 
     let root_part = partition_path(device, root_partition_num);
@@ -527,15 +548,32 @@ fn install_systemd_boot(
     }
 
     let root_partition_num = match config.disk.layout {
-        PartitionLayout::Standard => 4,
-        PartitionLayout::Minimal => 4, // Root is partition 4 (EFI, Boot, Swap, Root)
+        PartitionLayout::Standard => 4, // EFI(1), Boot(2), Swap(3), Root(4)
+        PartitionLayout::Minimal => 4,  // EFI(1), Boot(2), Swap(3), Root(4)
         PartitionLayout::LvmThin => {
             // LvmThin requires encryption which uses GRUB, so this shouldn't be reached
             return Err(crate::utils::error::DeploytixError::ConfigError(
                 "systemd-boot is not supported with LvmThin layout (use GRUB)".to_string(),
             ));
         }
-        PartitionLayout::Custom => 4,
+        PartitionLayout::Custom => {
+            // Root partition number depends on whether a swap partition is present.
+            let has_swap = config.disk.swap_type == SwapType::Partition;
+            let first_user_num: u32 = if has_swap { 4 } else { 3 };
+            match config
+                .disk
+                .custom_partitions
+                .as_ref()
+                .and_then(|parts| parts.iter().position(|p| p.mount_point == "/"))
+            {
+                Some(idx) => first_user_num + idx as u32,
+                None => {
+                    return Err(crate::utils::error::DeploytixError::ConfigError(
+                        "Custom layout has no root (/) partition defined".to_string(),
+                    ))
+                }
+            }
+        }
     };
 
     let root_part = partition_path(device, root_partition_num);

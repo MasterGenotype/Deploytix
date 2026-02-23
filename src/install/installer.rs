@@ -434,10 +434,12 @@ impl Installer {
         // mkinitcpio
         configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &self.config, INSTALL_ROOT)?;
 
-        // Bootloader (use layout-aware version for encrypted systems)
+        // Bootloader (use layout-aware version for all encrypted systems,
+        // including Custom layout which may have variable partition numbering)
         if self.config.disk.encryption
             && (self.config.disk.layout == PartitionLayout::Standard
-                || self.config.disk.layout == PartitionLayout::LvmThin)
+                || self.config.disk.layout == PartitionLayout::LvmThin
+                || self.config.disk.layout == PartitionLayout::Custom)
         {
             let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader_with_layout(

@@ -37,9 +37,9 @@ pub fn create_user(
     let useradd_cmd = format!("useradd -m -G {} -s /bin/bash {}", groups_str, username);
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
 
-    // Set password using chpasswd
-    let chpasswd_cmd = format!("echo '{}:{}' | chpasswd", username, password);
-    cmd.run_in_chroot(install_root, &chpasswd_cmd)?;
+    // Set password using chpasswd, passing credentials via stdin to avoid
+    // exposure in process listings or shell history.
+    cmd.run_in_chroot_stdin(install_root, "chpasswd", &format!("{}:{}", username, password))?;
 
     // Configure sudoers if user should be sudoer
     if config.user.sudoer {
@@ -95,8 +95,8 @@ pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str
         return Ok(());
     }
 
-    let chpasswd_cmd = format!("echo 'root:{}' | chpasswd", password);
-    cmd.run_in_chroot(install_root, &chpasswd_cmd)?;
+    // Pass credentials via stdin to avoid exposure in process listings.
+    cmd.run_in_chroot_stdin(install_root, "chpasswd", &format!("root:{}", password))?;
 
     Ok(())
 }
