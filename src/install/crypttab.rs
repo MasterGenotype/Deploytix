@@ -198,3 +198,21 @@ pub fn generate_crypttab_multi_volume(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── crypttab_options ─────────────────────────────────────────────────────
+
+    #[test]
+    fn crypttab_options_without_integrity_includes_discard() {
+        assert_eq!(crypttab_options(false), "luks,discard");
+    }
+
+    #[test]
+    fn crypttab_options_with_integrity_omits_discard() {
+        // dm-integrity is incompatible with TRIM/discard
+        assert_eq!(crypttab_options(true), "luks");
+    }
+}

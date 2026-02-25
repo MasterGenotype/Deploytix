@@ -867,6 +867,134 @@ pub fn has_usr_partition(layout: &PartitionLayout) -> bool {
     matches!(layout, PartitionLayout::Standard)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PartitionLayout;
+
+    // ── Pure math helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn floor_align_rounds_down_to_nearest_multiple() {
+        assert_eq!(floor_align(0, 4), 0);
+        assert_eq!(floor_align(3, 4), 0);
+        assert_eq!(floor_align(4, 4), 4);
+        assert_eq!(floor_align(7, 4), 4);
+        assert_eq!(floor_align(1023, 1024), 0);
+        assert_eq!(floor_align(1024, 1024), 1024);
+        assert_eq!(floor_align(2047, 1024), 1024);
+        assert_eq!(floor_align(2048, 1024), 2048);
+    }
+
+    #[test]
+    fn clamp_returns_value_within_range() {
+        assert_eq!(clamp(50, 0, 100), 50);
+        assert_eq!(clamp(0, 10, 100), 10, "below min should clamp up");
+        assert_eq!(clamp(200, 0, 100), 100, "above max should clamp down");
+        assert_eq!(clamp(0, 0, 100), 0, "equal to min should be unchanged");
+        assert_eq!(clamp(100, 0, 100), 100, "equal to max should be unchanged");
+    }
+
+    #[test]
+    fn calculate_swap_mib_doubles_ram_within_bounds() {
+        // 512 MiB RAM -> 2*512 = 1024, below SWAP_MIN_MIB (4096), so clamped up
+        let small = calculate_swap_mib(512);
+        assert_eq!(small, floor_align(SWAP_MIN_MIB, ALIGN_MIB));
+
+        // 8 GiB RAM -> 2*8192 = 16384, within bounds
+        let typical = calculate_swap_mib(8192);
+        assert_eq!(typical, floor_align(16384, ALIGN_MIB));
+
+        // 64 GiB RAM -> 2*65536 = 131072, above SWAP_MAX_MIB (20480), clamped down
+        let large = calculate_swap_mib(65536);
+        assert_eq!(large, floor_align(SWAP_MAX_MIB, ALIGN_MIB));
+    }
+
+    #[test]
+    fn calculate_swap_mib_result_is_always_aligned() {
+        for ram in [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
+            let swap = calculate_swap_mib(ram);
+            assert_eq!(swap % ALIGN_MIB, 0, "swap for RAM={} must be 4 MiB aligned", ram);
+        }
+    }
+
+    // ── Layout query helpers ─────────────────────────────────────────────────
+
+    fn make_partition(number: u32, name: &str, is_luks: bool) -> PartitionDef {
+        PartitionDef {
+            number,
+            name: name.to_string(),
+            size_mib: 1024,
+            type_guid: String::new(),
+            mount_point: Some(format!("/{}", name.to_lowercase())),
+            is_swap: false,
+            is_efi: false,
+            is_luks,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+        }
+    }
+
+    fn make_layout(partitions: Vec<PartitionDef>) -> ComputedLayout {
+        ComputedLayout {
+            total_mib: 100_000,
+            partitions,
+            subvolumes: None,
+            planned_thin_volumes: None,
+        }
+    }
+
+    #[test]
+    fn get_luks_partitions_returns_only_encrypted_partitions() {
+        let layout = make_layout(vec![
+            make_partition(1, "EFI", false),
+            make_partition(2, "ROOT", true),
+            make_partition(3, "HOME", true),
+        ]);
+        let luks = get_luks_partitions(&layout);
+        assert_eq!(luks.len(), 2);
+        assert!(luks.iter().all(|p| p.is_luks));
+        assert_eq!(luks[0].name, "ROOT");
+        assert_eq!(luks[1].name, "HOME");
+    }
+
+    #[test]
+    fn get_luks_partitions_empty_when_no_encryption() {
+        let layout = make_layout(vec![
+            make_partition(1, "EFI", false),
+            make_partition(2, "ROOT", false),
+        ]);
+        assert!(get_luks_partitions(&layout).is_empty());
+    }
+
+    #[test]
+    fn has_usr_partition_true_only_for_standard_layout() {
+        assert!(has_usr_partition(&PartitionLayout::Standard));
+        assert!(!has_usr_partition(&PartitionLayout::Minimal));
+        assert!(!has_usr_partition(&PartitionLayout::LvmThin));
+        assert!(!has_usr_partition(&PartitionLayout::Custom));
+    }
+
+    #[test]
+    fn standard_subvolumes_includes_root_and_home() {
+        let svols = standard_subvolumes();
+        let mounts: Vec<&str> = svols.iter().map(|s| s.mount_point.as_str()).collect();
+        assert!(mounts.contains(&"/"), "must include root subvolume");
+        assert!(mounts.contains(&"/home"), "must include /home subvolume");
+        assert!(!svols.is_empty());
+    }
+
+    #[test]
+    fn standard_subvolumes_each_have_non_empty_fields() {
+        for sv in standard_subvolumes() {
+            assert!(!sv.name.is_empty(), "subvolume name must not be empty");
+            assert!(sv.mount_point.starts_with('/'), "mount_point must start with /");
+            assert!(!sv.mount_options.is_empty(), "mount_options must not be empty");
+        }
+    }
+}
+
 /// Print layout summary
 pub fn print_layout_summary(layout: &ComputedLayout) {
     println!("\nPartition layout (total: {} MiB):", layout.total_mib);
