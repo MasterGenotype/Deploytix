@@ -1,6 +1,6 @@
 [package]
 name = "deploytix"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["superphenotype"]
 description = "Automated Artix Linux deployment installer for removable media and disks"
