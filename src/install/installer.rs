@@ -232,7 +232,10 @@ impl Installer {
     fn emergency_cleanup(&self) {
         use tracing::warn;
 
-        info!("Emergency cleanup: releasing all resources on {}", INSTALL_ROOT);
+        info!(
+            "Emergency cleanup: releasing all resources on {}",
+            INSTALL_ROOT
+        );
 
         // 1. Unmount all filesystems under INSTALL_ROOT (deepest first)
         if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
@@ -266,7 +269,10 @@ impl Installer {
             let vg_name = &self.config.disk.lvm_vg_name;
             info!("Emergency cleanup: deactivating VG {}", vg_name);
             if let Err(e) = lvm::deactivate_vg(&self.cmd, vg_name) {
-                warn!("Emergency cleanup: failed to deactivate VG {}: {}", vg_name, e);
+                warn!(
+                    "Emergency cleanup: failed to deactivate VG {}: {}",
+                    vg_name, e
+                );
             }
         }
 

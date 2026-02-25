@@ -549,8 +549,14 @@ mod tests {
     fn swap_file_fstab_entry_has_swap_type_and_defaults() {
         let entry = swap_file_fstab_entry();
         assert!(entry.contains("swap"), "fstab entry must specify type=swap");
-        assert!(entry.contains("none"), "fstab entry mount point must be 'none'");
-        assert!(entry.contains("defaults"), "fstab entry must include 'defaults' options");
+        assert!(
+            entry.contains("none"),
+            "fstab entry mount point must be 'none'"
+        );
+        assert!(
+            entry.contains("defaults"),
+            "fstab entry must include 'defaults' options"
+        );
     }
 
     #[test]

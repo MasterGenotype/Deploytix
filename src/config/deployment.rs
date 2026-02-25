@@ -891,7 +891,6 @@ impl DeploymentConfig {
             )));
         }
 
-
         // Swap file requires btrfs or ext4 filesystem
         if self.disk.swap_type == SwapType::FileZram
             && self.disk.filesystem != Filesystem::Btrfs
@@ -1082,7 +1081,10 @@ mod tests {
             label: None,
             encryption: Some(true),
         };
-        assert!(force_on.is_encrypted(false), "explicit true overrides global false");
+        assert!(
+            force_on.is_encrypted(false),
+            "explicit true overrides global false"
+        );
 
         let force_off = CustomPartitionEntry {
             mount_point: "/data".into(),
@@ -1090,7 +1092,10 @@ mod tests {
             label: None,
             encryption: Some(false),
         };
-        assert!(!force_off.is_encrypted(true), "explicit false overrides global true");
+        assert!(
+            !force_off.is_encrypted(true),
+            "explicit false overrides global true"
+        );
     }
 
     // ── InitSystem methods ───────────────────────────────────────────────────

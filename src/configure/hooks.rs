@@ -399,9 +399,9 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     let mut volume_mounts = String::new();
 
     // Root must always be first
-    let has_root = luks_data_parts.iter().any(|p| {
-        p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT")
-    });
+    let has_root = luks_data_parts
+        .iter()
+        .any(|p| p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT"));
     if has_root {
         volume_mounts.push_str(
             r#"    # Mount root first (required)
@@ -426,9 +426,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
             let mut c = part.name.chars();
             match c.next() {
                 None => String::new(),
-                Some(first) => {
-                    first.to_uppercase().to_string() + &c.as_str().to_lowercase()
-                }
+                Some(first) => first.to_uppercase().to_string() + &c.as_str().to_lowercase(),
             }
         };
         let mapper = format!("Crypt-{}", title);
@@ -465,9 +463,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
                 let mut c = p.name.chars();
                 match c.next() {
                     None => String::new(),
-                    Some(first) => {
-                        first.to_uppercase().to_string() + &c.as_str().to_lowercase()
-                    }
+                    Some(first) => first.to_uppercase().to_string() + &c.as_str().to_lowercase(),
                 }
             };
             format!("#   - Crypt-{} -> {}", title, mp)
@@ -621,9 +617,7 @@ mountcrypt_handler() {{
                 let mut c = p.name.chars();
                 match c.next() {
                     None => return None,
-                    Some(first) => {
-                        first.to_uppercase().to_string() + &c.as_str().to_lowercase()
-                    }
+                    Some(first) => first.to_uppercase().to_string() + &c.as_str().to_lowercase(),
                 }
             };
             Some(format!("Crypt-{}", title))
@@ -685,46 +679,95 @@ mod tests {
         crate::disk::layouts::ComputedLayout {
             partitions: vec![
                 PartitionDef {
-                    number: 1, name: "EFI".into(), size_mib: 512,
-                    type_guid: String::new(), mount_point: Some("/boot/efi".into()),
-                    is_swap: false, is_efi: true, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 1,
+                    name: "EFI".into(),
+                    size_mib: 512,
+                    type_guid: String::new(),
+                    mount_point: Some("/boot/efi".into()),
+                    is_swap: false,
+                    is_efi: true,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 2, name: "BOOT".into(), size_mib: 2048,
-                    type_guid: String::new(), mount_point: Some("/boot".into()),
-                    is_swap: false, is_efi: false, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: true, attributes: None,
+                    number: 2,
+                    name: "BOOT".into(),
+                    size_mib: 2048,
+                    type_guid: String::new(),
+                    mount_point: Some("/boot".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: true,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 3, name: "SWAP".into(), size_mib: 4096,
-                    type_guid: String::new(), mount_point: None,
-                    is_swap: true, is_efi: false, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 3,
+                    name: "SWAP".into(),
+                    size_mib: 4096,
+                    type_guid: String::new(),
+                    mount_point: None,
+                    is_swap: true,
+                    is_efi: false,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 4, name: "ROOT".into(), size_mib: 20480,
-                    type_guid: String::new(), mount_point: Some("/".into()),
-                    is_swap: false, is_efi: false, is_luks: true,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 4,
+                    name: "ROOT".into(),
+                    size_mib: 20480,
+                    type_guid: String::new(),
+                    mount_point: Some("/".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: true,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 5, name: "USR".into(), size_mib: 20480,
-                    type_guid: String::new(), mount_point: Some("/usr".into()),
-                    is_swap: false, is_efi: false, is_luks: true,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 5,
+                    name: "USR".into(),
+                    size_mib: 20480,
+                    type_guid: String::new(),
+                    mount_point: Some("/usr".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: true,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 6, name: "VAR".into(), size_mib: 8192,
-                    type_guid: String::new(), mount_point: Some("/var".into()),
-                    is_swap: false, is_efi: false, is_luks: true,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 6,
+                    name: "VAR".into(),
+                    size_mib: 8192,
+                    type_guid: String::new(),
+                    mount_point: Some("/var".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: true,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 7, name: "HOME".into(), size_mib: 0,
-                    type_guid: String::new(), mount_point: Some("/home".into()),
-                    is_swap: false, is_efi: false, is_luks: true,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 7,
+                    name: "HOME".into(),
+                    size_mib: 0,
+                    type_guid: String::new(),
+                    mount_point: Some("/home".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: true,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
             ],
             total_mib: 100000,
@@ -739,28 +782,56 @@ mod tests {
         crate::disk::layouts::ComputedLayout {
             partitions: vec![
                 PartitionDef {
-                    number: 1, name: "EFI".into(), size_mib: 512,
-                    type_guid: String::new(), mount_point: Some("/boot/efi".into()),
-                    is_swap: false, is_efi: true, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 1,
+                    name: "EFI".into(),
+                    size_mib: 512,
+                    type_guid: String::new(),
+                    mount_point: Some("/boot/efi".into()),
+                    is_swap: false,
+                    is_efi: true,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 2, name: "BOOT".into(), size_mib: 2048,
-                    type_guid: String::new(), mount_point: Some("/boot".into()),
-                    is_swap: false, is_efi: false, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: true, attributes: None,
+                    number: 2,
+                    name: "BOOT".into(),
+                    size_mib: 2048,
+                    type_guid: String::new(),
+                    mount_point: Some("/boot".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: true,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 3, name: "SWAP".into(), size_mib: 4096,
-                    type_guid: String::new(), mount_point: None,
-                    is_swap: true, is_efi: false, is_luks: false,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 3,
+                    name: "SWAP".into(),
+                    size_mib: 4096,
+                    type_guid: String::new(),
+                    mount_point: None,
+                    is_swap: true,
+                    is_efi: false,
+                    is_luks: false,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
                 PartitionDef {
-                    number: 4, name: "ROOT".into(), size_mib: 0,
-                    type_guid: String::new(), mount_point: Some("/".into()),
-                    is_swap: false, is_efi: false, is_luks: true,
-                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                    number: 4,
+                    name: "ROOT".into(),
+                    size_mib: 0,
+                    type_guid: String::new(),
+                    mount_point: Some("/".into()),
+                    is_swap: false,
+                    is_efi: false,
+                    is_luks: true,
+                    is_bios_boot: false,
+                    is_boot_fs: false,
+                    attributes: None,
                 },
             ],
             total_mib: 100000,

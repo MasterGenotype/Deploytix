@@ -151,10 +151,7 @@ pub fn ensure_dependencies(
 
     for bin in required {
         if !binary_exists(bin) {
-            let pkg = bin_to_pkg
-                .get(bin)
-                .copied()
-                .unwrap_or("unknown");
+            let pkg = bin_to_pkg.get(bin).copied().unwrap_or("unknown");
             missing_details.push((bin.to_string(), pkg.to_string()));
             if !missing_packages.contains(&pkg.to_string()) {
                 missing_packages.push(pkg.to_string());

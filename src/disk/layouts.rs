@@ -715,7 +715,12 @@ pub fn compute_layout_from_config(
             let entries = disk_config.custom_partitions.as_deref().ok_or_else(|| {
                 DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
             })?;
-            compute_custom_layout(disk_mib, disk_config.encryption, use_swap_partition, entries)?
+            compute_custom_layout(
+                disk_mib,
+                disk_config.encryption,
+                use_swap_partition,
+                entries,
+            )?
         }
     };
 
@@ -822,12 +827,7 @@ pub fn apply_lvm_thin_to_layout(
     }
 
     // Determine next partition number after system partitions
-    let next_part_num = system_parts
-        .iter()
-        .map(|p| p.number)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let next_part_num = system_parts.iter().map(|p| p.number).max().unwrap_or(0) + 1;
 
     // Add the LVM PV partition (takes remainder of disk)
     system_parts.push(PartitionDef {
@@ -914,7 +914,12 @@ mod tests {
     fn calculate_swap_mib_result_is_always_aligned() {
         for ram in [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
             let swap = calculate_swap_mib(ram);
-            assert_eq!(swap % ALIGN_MIB, 0, "swap for RAM={} must be 4 MiB aligned", ram);
+            assert_eq!(
+                swap % ALIGN_MIB,
+                0,
+                "swap for RAM={} must be 4 MiB aligned",
+                ram
+            );
         }
     }
 
@@ -989,8 +994,14 @@ mod tests {
     fn standard_subvolumes_each_have_non_empty_fields() {
         for sv in standard_subvolumes() {
             assert!(!sv.name.is_empty(), "subvolume name must not be empty");
-            assert!(sv.mount_point.starts_with('/'), "mount_point must start with /");
-            assert!(!sv.mount_options.is_empty(), "mount_options must not be empty");
+            assert!(
+                sv.mount_point.starts_with('/'),
+                "mount_point must start with /"
+            );
+            assert!(
+                !sv.mount_options.is_empty(),
+                "mount_options must not be empty"
+            );
         }
     }
 }
