@@ -528,3 +528,34 @@ pub fn configure_swap(
 pub fn swap_file_fstab_entry() -> String {
     format!("{}    none    swap    defaults    0    0\n", SWAP_FILE_PATH)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── swap_file_fstab_entry ────────────────────────────────────────────────
+
+    #[test]
+    fn swap_file_fstab_entry_uses_correct_swap_file_path() {
+        let entry = swap_file_fstab_entry();
+        assert!(
+            entry.contains(SWAP_FILE_PATH),
+            "fstab entry must reference SWAP_FILE_PATH, got: {}",
+            entry
+        );
+    }
+
+    #[test]
+    fn swap_file_fstab_entry_has_swap_type_and_defaults() {
+        let entry = swap_file_fstab_entry();
+        assert!(entry.contains("swap"), "fstab entry must specify type=swap");
+        assert!(entry.contains("none"), "fstab entry mount point must be 'none'");
+        assert!(entry.contains("defaults"), "fstab entry must include 'defaults' options");
+    }
+
+    #[test]
+    fn swap_file_fstab_entry_ends_with_newline() {
+        let entry = swap_file_fstab_entry();
+        assert!(entry.ends_with('\n'), "fstab entry must end with newline");
+    }
+}

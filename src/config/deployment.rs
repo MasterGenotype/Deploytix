@@ -1007,3 +1007,126 @@ impl DeploymentConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── CustomPartitionEntry::effective_label ────────────────────────────────
+
+    #[test]
+    fn effective_label_uses_explicit_label_when_set() {
+        let p = CustomPartitionEntry {
+            mount_point: "/data".into(),
+            size_mib: 0,
+            label: Some("MYDATA".into()),
+            encryption: None,
+        };
+        assert_eq!(p.effective_label(), "MYDATA");
+    }
+
+    #[test]
+    fn effective_label_root_returns_root_constant() {
+        let p = CustomPartitionEntry {
+            mount_point: "/".into(),
+            size_mib: 0,
+            label: None,
+            encryption: None,
+        };
+        assert_eq!(p.effective_label(), "ROOT");
+    }
+
+    #[test]
+    fn effective_label_derives_uppercase_from_last_path_component() {
+        let cases = [
+            ("/home", "HOME"),
+            ("/var", "VAR"),
+            ("/var/log", "LOG"),
+            ("/opt/data", "DATA"),
+        ];
+        for (mount, expected) in cases {
+            let p = CustomPartitionEntry {
+                mount_point: mount.into(),
+                size_mib: 0,
+                label: None,
+                encryption: None,
+            };
+            assert_eq!(
+                p.effective_label(),
+                expected,
+                "wrong label for mount_point='{}'",
+                mount
+            );
+        }
+    }
+
+    // ── CustomPartitionEntry::is_encrypted ───────────────────────────────────
+
+    #[test]
+    fn is_encrypted_inherits_global_when_none() {
+        let p = CustomPartitionEntry {
+            mount_point: "/data".into(),
+            size_mib: 0,
+            label: None,
+            encryption: None,
+        };
+        assert!(p.is_encrypted(true), "should inherit global=true");
+        assert!(!p.is_encrypted(false), "should inherit global=false");
+    }
+
+    #[test]
+    fn is_encrypted_overrides_global_when_explicitly_set() {
+        let force_on = CustomPartitionEntry {
+            mount_point: "/data".into(),
+            size_mib: 0,
+            label: None,
+            encryption: Some(true),
+        };
+        assert!(force_on.is_encrypted(false), "explicit true overrides global false");
+
+        let force_off = CustomPartitionEntry {
+            mount_point: "/data".into(),
+            size_mib: 0,
+            label: None,
+            encryption: Some(false),
+        };
+        assert!(!force_off.is_encrypted(true), "explicit false overrides global true");
+    }
+
+    // ── InitSystem methods ───────────────────────────────────────────────────
+
+    #[test]
+    fn init_system_base_package_returns_correct_package() {
+        assert_eq!(InitSystem::Runit.base_package(), "runit");
+        assert_eq!(InitSystem::OpenRC.base_package(), "openrc");
+        assert_eq!(InitSystem::S6.base_package(), "s6-base");
+        assert_eq!(InitSystem::Dinit.base_package(), "dinit");
+    }
+
+    #[test]
+    fn init_system_service_dir_returns_correct_path() {
+        assert_eq!(InitSystem::Runit.service_dir(), "/etc/runit/sv");
+        assert_eq!(InitSystem::OpenRC.service_dir(), "/etc/init.d");
+        assert_eq!(InitSystem::S6.service_dir(), "/etc/s6/sv");
+        assert_eq!(InitSystem::Dinit.service_dir(), "/etc/dinit.d");
+    }
+
+    #[test]
+    fn init_system_enabled_dir_returns_correct_path() {
+        assert_eq!(InitSystem::Runit.enabled_dir(), "/run/runit/service");
+        assert_eq!(InitSystem::OpenRC.enabled_dir(), "/etc/runlevels/default");
+        assert_eq!(InitSystem::S6.enabled_dir(), "/etc/s6/rc/compiled");
+        assert_eq!(InitSystem::Dinit.enabled_dir(), "/etc/dinit.d/boot.d");
+    }
+
+    // NOTE: DeploymentConfig::validate() cannot currently be unit-tested in
+    // isolation because it checks block device existence as its very first
+    // step, before any of the pure business-logic rules (username, password,
+    // encryption constraints, custom layout rules, etc.).  The business rules
+    // are all correct and well-defined, but they are only reachable when a
+    // real block device is present.
+    //
+    // Recommended future improvement: extract the pure rule checks into a
+    // separate `validate_config_rules()` helper so they can be unit-tested
+    // without hardware.  See the test-coverage proposal document for details.
+}

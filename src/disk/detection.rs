@@ -241,3 +241,56 @@ pub fn get_ram_mib() -> u64 {
     // Fallback: 8GB
     8192
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── partition_prefix ─────────────────────────────────────────────────────
+
+    #[test]
+    fn partition_prefix_appends_p_for_nvme_device() {
+        assert_eq!(partition_prefix("/dev/nvme0n1"), "/dev/nvme0n1p");
+        assert_eq!(partition_prefix("/dev/nvme1n2"), "/dev/nvme1n2p");
+    }
+
+    #[test]
+    fn partition_prefix_appends_p_for_mmcblk_device() {
+        assert_eq!(partition_prefix("/dev/mmcblk0"), "/dev/mmcblk0p");
+    }
+
+    #[test]
+    fn partition_prefix_appends_p_for_loop_device() {
+        assert_eq!(partition_prefix("/dev/loop0"), "/dev/loop0p");
+    }
+
+    #[test]
+    fn partition_prefix_no_suffix_for_sata_drive() {
+        assert_eq!(partition_prefix("/dev/sda"), "/dev/sda");
+        assert_eq!(partition_prefix("/dev/sdb"), "/dev/sdb");
+    }
+
+    #[test]
+    fn partition_prefix_no_suffix_for_virtio_drive() {
+        assert_eq!(partition_prefix("/dev/vda"), "/dev/vda");
+    }
+
+    // ── partition_path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn partition_path_sata_uses_direct_numbering() {
+        assert_eq!(partition_path("/dev/sda", 1), "/dev/sda1");
+        assert_eq!(partition_path("/dev/sda", 3), "/dev/sda3");
+    }
+
+    #[test]
+    fn partition_path_nvme_uses_p_separator() {
+        assert_eq!(partition_path("/dev/nvme0n1", 1), "/dev/nvme0n1p1");
+        assert_eq!(partition_path("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
+    }
+
+    #[test]
+    fn partition_path_mmcblk_uses_p_separator() {
+        assert_eq!(partition_path("/dev/mmcblk0", 1), "/dev/mmcblk0p1");
+    }
+}

@@ -587,3 +587,40 @@ pub fn close_multi_luks(cmd: &CommandRunner, containers: &[LuksContainer]) -> Re
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── to_title_case ────────────────────────────────────────────────────────
+
+    #[test]
+    fn to_title_case_capitalizes_first_letter_lowercase_rest() {
+        assert_eq!(to_title_case("root"), "Root");
+        assert_eq!(to_title_case("home"), "Home");
+        assert_eq!(to_title_case("usr"), "Usr");
+    }
+
+    #[test]
+    fn to_title_case_handles_already_uppercase_input() {
+        assert_eq!(to_title_case("ROOT"), "Root");
+        assert_eq!(to_title_case("HOME"), "Home");
+    }
+
+    #[test]
+    fn to_title_case_handles_mixed_case_input() {
+        assert_eq!(to_title_case("rOoT"), "Root");
+        assert_eq!(to_title_case("HoMe"), "Home");
+    }
+
+    #[test]
+    fn to_title_case_returns_empty_string_for_empty_input() {
+        assert_eq!(to_title_case(""), "");
+    }
+
+    #[test]
+    fn to_title_case_handles_single_character() {
+        assert_eq!(to_title_case("a"), "A");
+        assert_eq!(to_title_case("Z"), "Z");
+    }
+}
