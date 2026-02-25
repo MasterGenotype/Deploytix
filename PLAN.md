@@ -465,7 +465,6 @@ validity_days = 3650
 #### 5c. Validation in `validate()`
 - SecureBoot requires UEFI (EFI partition must exist — always true for current layouts)
 - Shim mode is incompatible with CryptoSubvolume+boot_encryption (shim needs unencrypted ESP)
-- Warn if systemd-boot is selected (limited SecureBoot support on Artix)
 
 **Files modified:** `src/config/deployment.rs`
 

@@ -30,7 +30,6 @@ pub fn install_bootloader(
 ) -> Result<()> {
     match config.system.bootloader {
         Bootloader::Grub => install_grub(cmd, config, device, install_root),
-        Bootloader::SystemdBoot => install_systemd_boot(cmd, config, device, install_root),
     }
 }
 
@@ -44,7 +43,6 @@ pub fn install_bootloader_with_layout(
 ) -> Result<()> {
     match config.system.bootloader {
         Bootloader::Grub => install_grub_with_layout(cmd, config, device, layout, install_root),
-        Bootloader::SystemdBoot => install_systemd_boot(cmd, config, device, install_root),
     }
 }
 
@@ -514,73 +512,5 @@ GRUB_CMDLINE_LINUX_DEFAULT="{}"
     fs::write(&grub_default_path, content)?;
 
     info!("GRUB defaults (LvmThin) written to /etc/default/grub");
-    Ok(())
-}
-
-/// Install systemd-boot
-fn install_systemd_boot(
-    cmd: &CommandRunner,
-    config: &DeploymentConfig,
-    device: &str,
-    install_root: &str,
-) -> Result<()> {
-    info!("Installing systemd-boot");
-
-    // Note: systemd-boot requires systemd, which is not the default on Artix
-    // This is included for completeness but may not work on pure Artix
-
-    // Get root partition dynamically based on layout
-    // Encrypted systems should use GRUB instead
-    if config.disk.encryption {
-        return Err(crate::utils::error::DeploytixError::ConfigError(
-            "systemd-boot is not supported with encrypted layouts (use GRUB)".to_string(),
-        ));
-    }
-
-    let root_partition_num = 4;
-
-    let root_part = partition_path(device, root_partition_num);
-    let root_uuid = if cmd.is_dry_run() {
-        "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
-    } else {
-        get_partition_uuid(&root_part)?
-    };
-
-    if cmd.is_dry_run() {
-        println!("  [dry-run] bootctl install");
-        println!(
-            "  [dry-run] Would create loader.conf and artix.conf with UUID={}",
-            root_uuid
-        );
-        return Ok(());
-    }
-
-    cmd.run_in_chroot(install_root, "bootctl install")?;
-
-    // Create loader.conf
-    let loader_conf = format!("{}/boot/loader/loader.conf", install_root);
-    let loader_content = r#"default artix.conf
-timeout 3
-console-mode max
-editor no
-"#;
-    fs::create_dir_all(format!("{}/boot/loader", install_root))?;
-    fs::write(&loader_conf, loader_content)?;
-
-    // Create entry with actual UUID (fixes P0 placeholder bug)
-    let entries_dir = format!("{}/boot/loader/entries", install_root);
-    fs::create_dir_all(&entries_dir)?;
-
-    let entry_content = format!(
-        r#"title   Artix Linux
-linux   /vmlinuz-linux-zen
-initrd  /initramfs-linux-zen.img
-options root=UUID={} rw
-"#,
-        root_uuid
-    );
-    fs::write(format!("{}/artix.conf", entries_dir), entry_content)?;
-
-    info!("systemd-boot installation complete");
     Ok(())
 }

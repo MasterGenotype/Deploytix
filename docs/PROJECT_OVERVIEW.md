@@ -19,7 +19,7 @@ Deploytix is a portable Rust CLI application for **automated deployment of Artix
 |----------|---------|
 | **Init Systems** | runit, OpenRC, s6, dinit |
 | **Filesystems** | ext4, btrfs, xfs, f2fs |
-| **Bootloaders** | GRUB, systemd-boot |
+| **Bootloaders** | GRUB |
 | **Desktop Environments** | KDE Plasma, GNOME, XFCE, headless/server |
 | **Network Backends** | iwd, NetworkManager, ConnMan |
 | **DNS** | dnscrypt-proxy (optional) |
@@ -70,11 +70,7 @@ These issues must be resolved before any production use:
    - Currently assumes partition 4 is root (only valid for standard layout)
    - Minimal layout has root at partition 3, causing unbootable systems
 
-3. **Fix systemd-boot UUID Placeholder** (`src/configure/bootloader.rs`)
-   - `<ROOT_UUID>` literal string is never replaced with actual UUID
-   - Systems installed with systemd-boot will not boot
-
-4. **Address Encryption No-Op** (`src/configure/encryption.rs`)
+3. **Address Encryption No-Op** (`src/configure/encryption.rs`)
    - Users can enable encryption, but the feature does nothing
    - Either implement LUKS support or return an explicit error
 

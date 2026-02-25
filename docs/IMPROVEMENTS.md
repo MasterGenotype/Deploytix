@@ -235,19 +235,7 @@ deployment targets use legacy BIOS.
 partition layouts (add BIOS boot partition) and GRUB install commands
 accordingly. Detect the host boot mode with `[ -d /sys/firmware/efi ]`.
 
-### 17. systemd-boot entry hardcodes `linux-zen` kernel
-
-**File:** `src/configure/bootloader.rs:296-298`
-
-The systemd-boot entry references `vmlinuz-linux-zen` and
-`initramfs-linux-zen.img`. If a user installs a different kernel, the system
-will not boot.
-
-**Recommendation:** Derive the kernel name from `config.system.kernel` (add
-field if missing) or detect installed kernels by listing
-`/boot/vmlinuz-linux-*` in the chroot.
-
-### 18. `once_cell` dependency is unnecessary on Rust 2021+
+### 17. `once_cell` dependency is unnecessary on Rust 2021+
 
 **File:** `Cargo.toml:39`
 

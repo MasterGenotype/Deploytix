@@ -1,6 +1,8 @@
 # Deploytix
 
-A portable Rust CLI and GUI application for automated deployment of Artix Linux (and generally Arch-based distributions) to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional multi-volume LUKS2 encryption.
+A portable Rust CLI and GUI application for automated deployment of **Artix Linux** to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional LUKS2 encryption.
+
+> **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap`, `artix-chroot`, `artools`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
 
 ## Features
 
@@ -9,12 +11,17 @@ A portable Rust CLI and GUI application for automated deployment of Artix Linux 
 - **Configuration-Driven**: TOML-based configs for reproducible, unattended installations
 - **Proportional Partitioning**: Automatically sizes partitions using a weighted proportion relative to total disk capacity — larger disks get proportionally larger partitions for each mount point
 - **Multiple Init Systems**: runit, OpenRC, s6, dinit
-- **Filesystem Choice**: ext4, btrfs, xfs, f2fs
+- **Filesystem Choice**: btrfs (default), ext4, xfs, f2fs
 - **Desktop Environments**: KDE Plasma, GNOME, XFCE, or headless/server
-- **Network Backends**: iwd, NetworkManager, or ConnMan with optional dnscrypt-proxy
-- **LUKS2 Encryption**: Multi-volume encrypted partitions with keyfile-based automatic unlocking
-- **Bootloaders**: GRUB or systemd-boot
+- **Network Backends**: iwd (standalone) or NetworkManager + iwd
+- **LUKS2 Encryption**: Optional encryption layer on any layout with keyfile-based automatic unlocking
+- **LVM Thin Provisioning**: Space-efficient overprovisioned layout with LUKS + LVM
+- **Bootloader**: GRUB (only officially supported bootloader)
+- **Secure Boot**: Optional signing via sbctl, shim (MOK), or manual keys
+- **Swap Options**: Traditional partition, swap file + ZRAM, or ZRAM-only
+- **Btrfs Subvolumes**: Automatic subvolume creation (@, @home, @var, @log, @snapshots) when using btrfs
 - **mkinitcpio Hook Constructor**: Automatically generates correct initramfs hooks based on configuration
+- **Automatic Dependency Checking**: Detects and installs missing host packages before proceeding
 - **Dry-Run Mode**: Preview all operations without making changes
 
 ## Installation
@@ -35,22 +42,33 @@ cargo build --release
 
 ### With GUI Support
 
+The GUI is built as a separate binary using egui (glow backend with X11/Wayland support):
+
 ```bash
 cargo build --release --features gui
 
-# Binaries: target/release/deploytix and target/release/deploytix-gui
+# Binaries: target/release/deploytix (CLI) and target/release/deploytix-gui (GUI)
 ```
+
+GUI build requires system libraries: `libxcb`, `libxkbcommon`, `libwayland`, `libGL`.
 
 ### Static Binary (Portable)
 
+Builds a fully statically-linked binary with musl — zero runtime dependencies, runs on any x86_64 Linux:
+
 ```bash
+# Prerequisites
 rustup target add x86_64-unknown-linux-musl
+# On Debian/Ubuntu: sudo apt install musl-tools
+# On Artix/Arch: sudo pacman -S musl
 
 cargo build --release --target x86_64-unknown-linux-musl
 # Or shorthand: cargo portable
 
 # Binary: target/x86_64-unknown-linux-musl/release/deploytix
 ```
+
+> **Note**: The GUI binary cannot be built with musl due to X11/Wayland library dependencies. The portable build produces the CLI binary only.
 
 ## Usage
 
@@ -108,16 +126,18 @@ Example `deploytix.toml`:
 [disk]
 device = "/dev/sda"
 layout = "standard"       # standard, minimal, lvmthin, custom
-filesystem = "btrfs"
+filesystem = "btrfs"      # btrfs, ext4, xfs, f2fs
 encryption = false
+swap_type = "partition"   # partition, filezram, zramonly
 
 [system]
 init = "runit"            # runit, openrc, s6, dinit
-bootloader = "grub"       # grub, systemd-boot
+bootloader = "grub"       # grub (only supported option)
 timezone = "America/New_York"
 locale = "en_US.UTF-8"
 keymap = "us"
 hostname = "artix"
+secureboot = false        # optional Secure Boot signing
 
 [user]
 name = "user"
@@ -125,8 +145,7 @@ password = "changeme"
 groups = ["wheel", "video", "audio", "network", "log"]
 
 [network]
-backend = "iwd"           # iwd, networkmanager, connman
-dns = "dnscrypt-proxy"
+backend = "iwd"           # iwd, networkmanager
 
 [desktop]
 environment = "kde"       # kde, gnome, xfce, none
@@ -138,37 +157,32 @@ After allocating fixed-size partitions (EFI, Boot, Swap), the remaining disk spa
 
 ### Standard (7-partition)
 
-| Partition | Size | Mount |
-|-----------|------|-------|
-| EFI | 512 MiB | /boot/efi |
-| Boot | 2 GiB | /boot |
-| Swap | 2×RAM (4–20 GiB) | — |
-| Root | 6.4% of remaining | / |
-| Usr | 26.8% of remaining | /usr |
-| Var | 5.4% of remaining | /var |
-| Home | Remainder | /home |
+- **EFI** — 512 MiB → `/boot/efi`
+- **Boot** — 2 GiB → `/boot` (LegacyBIOSBootable)
+- **Swap** — 2×RAM, clamped 4–20 GiB
+- **Root** — 6.4% of remaining → `/`
+- **Usr** — 26.8% of remaining → `/usr`
+- **Var** — 5.4% of remaining → `/var`
+- **Home** — remainder → `/home`
 
-### Minimal (3-partition)
+Supports optional LUKS2 encryption on data partitions (Root, Usr, Var, Home). When enabled, each encrypted partition uses a separate LUKS2 container — Root is unlocked with a passphrase and remaining volumes unlock automatically via keyfiles stored in the initramfs.
 
-| Partition | Size | Mount |
-|-----------|------|-------|
-| EFI | 512 MiB | /boot/efi |
-| Swap | 2×RAM (4–20 GiB) | — |
-| Root | Remainder | / |
+### Minimal (4-partition)
 
-### CryptoSubvolume (multi-volume LUKS2)
+- **EFI** — 512 MiB → `/boot/efi`
+- **Boot** — 2 GiB → `/boot` (LegacyBIOSBootable)
+- **Swap** — 2×RAM, clamped 4–20 GiB
+- **Root** — remainder → `/`
 
-| Partition | Size | Encryption | Mount |
-|-----------|------|------------|-------|
-| EFI | 512 MiB | None | /boot/efi |
-| Boot | 2 GiB | None | /boot |
-| Swap | 2×RAM (4–20 GiB) | LUKS2 | — |
-| Root | 6.4% of remaining | LUKS2 | / |
-| Usr | 26.8% of remaining | LUKS2 | /usr |
-| Var | 5.4% of remaining | LUKS2 | /var |
-| Home | Remainder | LUKS2 | /home |
+Supports both UEFI and Legacy BIOS boot. When using btrfs, subvolumes (@, @home, @var, @log, @snapshots) are created automatically.
 
-Each encrypted partition uses a separate LUKS2 container. Root is unlocked with a passphrase; remaining volumes unlock automatically via keyfiles stored in the initramfs.
+### LVM Thin (LUKS + LVM thin provisioning)
+
+- **EFI** — 512 MiB → `/boot/efi`
+- **Boot** — 2 GiB → `/boot`
+- **Swap** — optional
+- **LVM PV** — remainder → LUKS2-encrypted physical volume
+  - Thin volumes: root, usr, var, home (space-efficient overprovisioning)
 
 ### Custom (user-defined partitions)
 
@@ -205,47 +219,64 @@ size_mib = 0          # Consumes all remaining space
 ```
 src/
 ├── main.rs              # CLI entry point (clap)
-├── gui_main.rs          # GUI entry point (egui)
+├── gui_main.rs          # GUI entry point (egui, requires --features gui)
+├── lib.rs               # Library root (re-exports for GUI binary)
 ├── config/              # TOML config parsing, interactive wizard
 ├── disk/                # Disk detection, partition layout computation, formatting
-├── install/             # basestrap, chroot, fstab/crypttab generation
-├── configure/           # Bootloader, encryption, users, locale, services, hooks
+├── install/             # Installer orchestrator, basestrap, chroot, fstab/crypttab
+├── configure/           # Bootloader, encryption, users, locale, services, hooks, swap
 ├── desktop/             # Desktop environment package lists and setup
 ├── cleanup/             # Unmount and optional wipe
 ├── gui/                 # egui wizard panels and app state
-└── utils/               # Command runner (with dry-run), error types, prompts
+├── resources/           # Embedded resources and templates
+└── utils/               # CommandRunner (dry-run aware), error types, dependency checker
 ```
 
-All system commands execute through a `CommandRunner` abstraction that respects dry-run mode, allowing safe previews of every operation.
+All system commands execute through a `CommandRunner` abstraction that respects dry-run mode, allowing safe previews of every operation. Missing host dependencies are detected automatically and can be installed via pacman before the installation begins.
 
 ## Requirements
 
-**Host system (running the installer):**
+**Host system (Artix Linux only):**
 
-- `basestrap` (from artools)
-- `pacman`
-- `sfdisk`
-- `mkfs.*` utilities
-- `grub-install` / `grub-mkconfig` (if using GRUB)
-- `cryptsetup` (if using encryption)
+- `basestrap` and `artix-chroot` (from `artools`) — Artix-specific; not available on Arch
+- `pacman` — package manager
+- `sfdisk` — partition table creation (from `util-linux`)
+- `mkfs.vfat` (`dosfstools`), `mkfs.ext4` (`e2fsprogs`), and filesystem-specific tools (`btrfs-progs`, `xfsprogs`, `f2fs-tools`)
+- `grub-install` / `grub-mkconfig` (if using GRUB bootloader)
+- `cryptsetup` (if using LUKS2 encryption)
+- `pvcreate` / `vgcreate` / `lvcreate` from `lvm2` (if using LVM Thin layout)
 - Root privileges
+
+Deploytix will check for missing dependencies at startup and offer to install them automatically via `pacman`.
 
 **Minimum disk size:**
 
-- Standard / CryptoSubvolume layout: ~75 GiB
+- Standard / LVM Thin layout: ~75 GiB
 - Minimal layout: ~25 GiB
 
 ## Development
 
 ```bash
-# Build
+# Development build
 cargo build
+
+# Release build
+cargo build --release
+
+# GUI build
+cargo build --release --features gui
+
+# Portable static binary (musl)
+cargo portable
 
 # Lint
 cargo clippy -- -D warnings
 
 # Format check
 cargo fmt -- --check
+
+# Run tests
+cargo test
 ```
 
 ## License

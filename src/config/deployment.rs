@@ -358,14 +358,12 @@ impl InitSystem {
 pub enum Bootloader {
     #[default]
     Grub,
-    SystemdBoot,
 }
 
 impl std::fmt::Display for Bootloader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Grub => write!(f, "GRUB"),
-            Self::SystemdBoot => write!(f, "systemd-boot"),
         }
     }
 }
@@ -666,10 +664,8 @@ impl DeploymentConfig {
         let init_idx = prompt_select("Init system", &init_systems, 0)?;
         let init = init_systems[init_idx].clone();
 
-        // Bootloader
-        let bootloaders = [Bootloader::Grub, Bootloader::SystemdBoot];
-        let boot_idx = prompt_select("Bootloader", &bootloaders, 0)?;
-        let bootloader = bootloaders[boot_idx].clone();
+        // Bootloader (GRUB is the only supported bootloader on Artix)
+        let bootloader = Bootloader::Grub;
 
         // Locale settings
         let timezone = prompt_input("Timezone", Some("UTC"))?;

@@ -386,14 +386,9 @@ pub fn system_config_panel(
         });
     ui.add_space(8.0);
 
-    // Bootloader
+    // Bootloader (GRUB is the only supported bootloader on Artix)
     ui.label("Bootloader:");
-    egui::ComboBox::from_id_salt("bootloader")
-        .selected_text(format!("{}", bootloader))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(bootloader, Bootloader::Grub, "GRUB");
-            ui.selectable_value(bootloader, Bootloader::SystemdBoot, "systemd-boot");
-        });
+    ui.label(format!("  {}", bootloader));
     ui.add_space(8.0);
 
     // SecureBoot

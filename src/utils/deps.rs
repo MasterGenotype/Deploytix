@@ -33,7 +33,6 @@ fn binary_to_package() -> HashMap<&'static str, &'static str> {
     // Bootloaders
     map.insert("grub-install", "grub");
     map.insert("grub-mkconfig", "grub");
-    map.insert("bootctl", "systemd");
 
     // Artix tools
     map.insert("basestrap", "artools");
@@ -95,9 +94,6 @@ pub fn required_binaries(
         Bootloader::Grub => {
             bins.push("grub-install");
             bins.push("grub-mkconfig");
-        }
-        Bootloader::SystemdBoot => {
-            bins.push("bootctl");
         }
     }
 
