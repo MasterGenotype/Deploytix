@@ -38,7 +38,7 @@ pub fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
         .with_prompt(prompt)
         .default(default)
         .interact_opt()
-        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| DeploytixError::Io(std::io::Error::other(e.to_string())))?
         .ok_or(DeploytixError::UserCancelled)
 }
 
@@ -50,7 +50,7 @@ pub fn prompt_select<T: ToString>(prompt: &str, items: &[T], default: usize) -> 
         .items(items)
         .default(default)
         .interact_opt()
-        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| DeploytixError::Io(std::io::Error::other(e.to_string())))?
         .ok_or(DeploytixError::UserCancelled)
 }
 
@@ -62,7 +62,7 @@ pub fn prompt_fuzzy_select<T: ToString>(prompt: &str, items: &[T]) -> Result<usi
         .with_prompt(prompt)
         .items(items)
         .interact_opt()
-        .map_err(|e| DeploytixError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| DeploytixError::Io(std::io::Error::other(e.to_string())))?
         .ok_or(DeploytixError::UserCancelled)
 }
 

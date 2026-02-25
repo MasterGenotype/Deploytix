@@ -77,6 +77,8 @@ pub fn disk_config_panel(
     integrity: &mut bool,
     swap_type: &mut SwapType,
     zram_percent: &mut u8,
+    use_subvolumes: &mut bool,
+    use_lvm_thin: &mut bool,
     lvm_vg_name: &mut String,
     lvm_thin_pool_name: &mut String,
     lvm_thin_pool_percent: &mut u8,
@@ -89,7 +91,6 @@ pub fn disk_config_panel(
     ui.add_space(8.0);
 
     // Partition Layout
-    let prev_layout = layout.clone();
     ui.label("Partition Layout:");
     egui::ComboBox::from_id_salt("layout")
         .selected_text(format!("{}", layout))
@@ -106,46 +107,22 @@ pub fn disk_config_panel(
             );
             ui.selectable_value(
                 layout,
-                PartitionLayout::LvmThin,
-                "LVM Thin (EFI, Boot, LUKS + LVM thin provisioning)",
-            );
-            ui.selectable_value(
-                layout,
                 PartitionLayout::Custom,
                 "Custom (define your own partitions)",
             );
         });
     ui.add_space(8.0);
 
-    // LvmThin requires encryption and btrfs — enforce automatically
-    if *layout == PartitionLayout::LvmThin {
-        *encryption = true;
-        *filesystem = Filesystem::Btrfs;
-    }
-
-    // When switching away from LvmThin, clear the encryption state that was
-    // force-enabled by LvmThin so it doesn't bleed into Standard/Minimal.
-    if prev_layout == PartitionLayout::LvmThin && *layout != PartitionLayout::LvmThin {
-        *encryption = false;
-    }
-
     // Filesystem
     ui.label("Filesystem:");
-    if *layout == PartitionLayout::LvmThin {
-        // LvmThin requires btrfs, show as read-only
-        ui.label(
-            RichText::new("btrfs (required by LVM Thin layout)").color(egui::Color32::LIGHT_GRAY),
-        );
-    } else {
-        egui::ComboBox::from_id_salt("filesystem")
-            .selected_text(format!("{}", filesystem))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
-                ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
-                ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
-                ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
-            });
-    }
+    egui::ComboBox::from_id_salt("filesystem")
+        .selected_text(format!("{}", filesystem))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
+            ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
+            ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
+            ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
+        });
     ui.add_space(8.0);
 
     // Swap Configuration
@@ -168,20 +145,17 @@ pub fn disk_config_panel(
         ui.add_space(8.0);
     }
 
-    // Encryption
-    if *layout == PartitionLayout::LvmThin {
-        // LvmThin always requires encryption — show as informational
-        ui.label(
-            RichText::new("LUKS encryption: enabled (required by LVM Thin layout)")
-                .color(egui::Color32::LIGHT_GRAY),
-        );
-        ui.add_space(8.0);
-    } else if *layout == PartitionLayout::Standard || *layout == PartitionLayout::Custom {
-        ui.checkbox(encryption, "Enable LUKS encryption on data partitions");
+    // Subvolumes (btrfs only)
+    if *filesystem == Filesystem::Btrfs {
+        ui.checkbox(use_subvolumes, "Use btrfs subvolumes (@, @home, @var, ...)");
         ui.add_space(8.0);
     } else {
-        *encryption = false;
+        *use_subvolumes = false;
     }
+
+    // Encryption (available on all layouts)
+    ui.checkbox(encryption, "Enable LUKS encryption on data partitions");
+    ui.add_space(8.0);
 
     // Encryption password and integrity options
     if *encryption {
@@ -202,29 +176,26 @@ pub fn disk_config_panel(
         ui.add_space(8.0);
 
         // Boot encryption uses LUKS1 (integrity is automatically disabled for boot)
-        // Available for Standard and LvmThin layouts
-        if *layout == PartitionLayout::Standard || *layout == PartitionLayout::LvmThin {
-            ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
-            if *integrity && *boot_encryption {
-                ui.label(
-                    RichText::new("Note: /boot uses LUKS1 without integrity (LUKS1 does not support dm-integrity)")
-                        .weak(),
-                );
-            }
-            ui.add_space(8.0);
-        } else {
-            *boot_encryption = false;
+        ui.checkbox(boot_encryption, "Encrypt /boot partition (LUKS1)");
+        if *integrity && *boot_encryption {
+            ui.label(
+                RichText::new("Note: /boot uses LUKS1 without integrity (LUKS1 does not support dm-integrity)")
+                    .weak(),
+            );
         }
+        ui.add_space(8.0);
     } else {
         *boot_encryption = false;
         *integrity = false;
     }
 
-    // LVM Thin Provisioning settings
-    if *layout == PartitionLayout::LvmThin {
-        ui.separator();
-        ui.add_space(8.0);
-        ui.label(RichText::new("LVM Thin Provisioning Settings").strong());
+    // LVM Thin Provisioning feature toggle (available on all layouts)
+    ui.checkbox(use_lvm_thin, "Enable LVM thin provisioning");
+    if *use_lvm_thin {
+        ui.label(
+            RichText::new("Data partitions are collapsed into a single LVM PV with thin volumes.")
+                .weak(),
+        );
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
@@ -248,8 +219,8 @@ pub fn disk_config_panel(
         ui.label(
             RichText::new("Thin volumes: root (50G), usr (50G), var (30G), home (200G)").weak(),
         );
-        ui.add_space(8.0);
     }
+    ui.add_space(8.0);
 
     // Custom Partition settings
     if *layout == PartitionLayout::Custom {
@@ -356,12 +327,12 @@ pub fn disk_config_panel(
         return false;
     }
 
-    if *layout == PartitionLayout::LvmThin && lvm_vg_name.is_empty() {
+    if *use_lvm_thin && lvm_vg_name.is_empty() {
         ui.label(RichText::new("⚠ Volume group name cannot be empty").color(egui::Color32::RED));
         return false;
     }
 
-    if *layout == PartitionLayout::LvmThin && lvm_thin_pool_name.is_empty() {
+    if *use_lvm_thin && lvm_thin_pool_name.is_empty() {
         ui.label(RichText::new("⚠ Thin pool name cannot be empty").color(egui::Color32::RED));
         return false;
     }

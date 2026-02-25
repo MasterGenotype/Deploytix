@@ -1,8 +1,11 @@
 //! Partition layout definitions and sizing calculations
 //!
 //! Ported from Disk-Populater.sh
+//!
+//! Layouts define the *partition table* only. Storage features (encryption,
+//! LVM thin, subvolumes) are applied as layers by the installer pipeline.
 
-use crate::config::{CustomPartitionEntry, PartitionLayout};
+use crate::config::{CustomPartitionEntry, DiskConfig, PartitionLayout, SwapType};
 use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
 
@@ -90,19 +93,42 @@ pub struct PartitionDef {
     pub attributes: Option<String>,
 }
 
+/// Planned thin volume definition (saved when LVM thin collapses partitions)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PlannedThinVolume {
+    /// Volume name (e.g., "root", "home")
+    pub name: String,
+    /// Virtual size string for lvcreate (e.g., "50G")
+    pub virtual_size: String,
+    /// Mount point (e.g., "/", "/home")
+    pub mount_point: String,
+}
+
 /// Computed partition layout for a specific disk
 #[derive(Debug, Clone)]
 pub struct ComputedLayout {
     pub partitions: Vec<PartitionDef>,
     pub total_mib: u64,
-    /// Btrfs subvolumes (None for layouts with separate partitions)
+    /// Btrfs subvolumes (None for layouts without subvolumes)
     pub subvolumes: Option<Vec<SubvolumeDef>>,
+    /// When LVM thin is applied, the data partitions are collapsed into a
+    /// single LVM PV partition and the original volumes are stored here
+    /// as planned thin volumes.
+    #[allow(dead_code)]
+    pub planned_thin_volumes: Option<Vec<PlannedThinVolume>>,
 }
 
 impl ComputedLayout {
     /// Check if this layout uses btrfs subvolumes
     pub fn uses_subvolumes(&self) -> bool {
         self.subvolumes.is_some() && !self.subvolumes.as_ref().unwrap().is_empty()
+    }
+
+    /// Check if this layout has LVM thin provisioning
+    #[allow(dead_code)]
+    pub fn uses_lvm_thin(&self) -> bool {
+        self.planned_thin_volumes.is_some()
     }
 }
 
@@ -152,8 +178,9 @@ fn calculate_swap_mib(ram_mib: u64) -> u64 {
 /// Compute the standard 7-partition layout
 ///
 /// Layout: EFI, Boot, Swap, Root, Usr, Var, Home
-/// When encryption is enabled, Root/Usr/Var/Home partitions are marked as LUKS containers.
-fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLayout> {
+/// Partitions are created without encryption flags; encryption is applied
+/// as a layer by the installer pipeline.
+fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
     let swap_mib = calculate_swap_mib(ram_mib);
 
@@ -290,7 +317,7 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
             mount_point: Some("/".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: encryption,
+            is_luks: false,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -303,7 +330,7 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
             mount_point: Some("/usr".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: encryption,
+            is_luks: false,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -316,7 +343,7 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
             mount_point: Some("/var".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: encryption,
+            is_luks: false,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -329,7 +356,7 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
             mount_point: Some("/home".to_string()),
             is_swap: false,
             is_efi: false,
-            is_luks: encryption,
+            is_luks: false,
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
@@ -340,13 +367,15 @@ fn compute_standard_layout(disk_mib: u64, encryption: bool) -> Result<ComputedLa
         partitions,
         total_mib: disk_mib,
         subvolumes: None,
+        planned_thin_volumes: None,
     })
 }
 
-/// Compute the minimal 4-partition layout with btrfs subvolumes
+/// Compute the minimal 4-partition layout
 ///
-/// Layout: EFI, Boot, Swap, Root (with @, @home, @var, @log, @snapshots subvolumes)
+/// Layout: EFI, Boot, Swap, Root
 /// This layout supports both UEFI and Legacy BIOS boot.
+/// Subvolumes are applied separately by the installer if use_subvolumes is enabled.
 fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     let ram_mib = get_ram_mib();
     let swap_mib = calculate_swap_mib(ram_mib);
@@ -405,8 +434,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             name: "ROOT".to_string(),
             size_mib: 0, // Remainder
             type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
-            // Note: mount_point is None because we mount subvolumes, not the raw partition
-            mount_point: None,
+            mount_point: Some("/".to_string()),
             is_swap: false,
             is_efi: false,
             is_luks: false,
@@ -419,8 +447,8 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        // Use standard btrfs subvolumes for the Minimal layout
-        subvolumes: Some(standard_subvolumes()),
+        subvolumes: None,
+        planned_thin_volumes: None,
     })
 }
 
@@ -520,7 +548,8 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        subvolumes: None, // LVM thin uses LVs, not btrfs subvolumes
+        subvolumes: None,
+        planned_thin_volumes: None,
     })
 }
 
@@ -655,14 +684,71 @@ fn compute_custom_layout(
     Ok(ComputedLayout {
         partitions,
         total_mib: disk_mib,
-        subvolumes: None, // Custom layout uses separate partitions
+        subvolumes: None,
+        planned_thin_volumes: None,
     })
 }
 
-/// Compute partition layout for a disk
+/// Compute partition layout for a disk from a `DiskConfig`.
 ///
-/// For Standard layout, pass `encryption` flag to enable LUKS on data partitions.
-/// For Custom layout, pass `custom_partitions` with user-defined partition entries.
+/// The layout defines the partition table only. Encryption flags (`is_luks`)
+/// are applied as a post-processing step so that the same layout function
+/// works regardless of whether encryption is enabled.
+///
+/// When `use_lvm_thin` is true, `apply_lvm_thin_to_layout` is called
+/// automatically to collapse data partitions into a single LVM PV.
+pub fn compute_layout_from_config(
+    disk_config: &DiskConfig,
+    disk_mib: u64,
+) -> Result<ComputedLayout> {
+    let use_swap_partition = disk_config.swap_type == SwapType::Partition;
+
+    let mut layout = match disk_config.layout {
+        PartitionLayout::Standard => compute_standard_layout(disk_mib)?,
+        PartitionLayout::Minimal => compute_minimal_layout(disk_mib)?,
+        PartitionLayout::LvmThin => {
+            // Legacy compat: should have been normalized to Standard + use_lvm_thin
+            // by DeploymentConfig::normalize_legacy_lvmthin(). Handle here as safety net.
+            compute_standard_layout(disk_mib)?
+        }
+        PartitionLayout::Custom => {
+            let entries = disk_config.custom_partitions.as_deref().ok_or_else(|| {
+                DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
+            })?;
+            compute_custom_layout(disk_mib, disk_config.encryption, use_swap_partition, entries)?
+        }
+    };
+
+    // Apply encryption flags to data partitions.
+    // When LVM thin is active, encryption is applied to the single LVM PV
+    // partition by apply_lvm_thin_to_layout, not to individual data partitions.
+    if disk_config.encryption && !disk_config.use_lvm_thin {
+        apply_encryption_flags(&mut layout);
+    }
+
+    // Apply subvolumes if requested.
+    // When subvolumes are active, the raw ROOT partition is not mounted directly;
+    // clear its mount_point so that subvolumes are mounted instead.
+    if disk_config.use_subvolumes {
+        layout.subvolumes = Some(standard_subvolumes());
+        for part in &mut layout.partitions {
+            if part.mount_point.as_deref() == Some("/") && !part.is_efi && !part.is_boot_fs {
+                part.mount_point = None;
+            }
+        }
+    }
+
+    // Apply LVM thin: collapse data partitions into a single LVM PV
+    if disk_config.use_lvm_thin {
+        layout = apply_lvm_thin_to_layout(layout, disk_config.encryption)?;
+    }
+
+    Ok(layout)
+}
+
+/// Legacy wrapper — kept for backward compatibility with existing call sites.
+/// Prefer `compute_layout_from_config`.
+#[allow(dead_code)]
 pub fn compute_layout(
     layout: &PartitionLayout,
     disk_mib: u64,
@@ -670,17 +756,100 @@ pub fn compute_layout(
     use_swap_partition: bool,
     custom_partitions: Option<&[CustomPartitionEntry]>,
 ) -> Result<ComputedLayout> {
-    match layout {
-        PartitionLayout::Standard => compute_standard_layout(disk_mib, encryption),
-        PartitionLayout::Minimal => compute_minimal_layout(disk_mib),
-        PartitionLayout::LvmThin => compute_lvm_thin_layout(disk_mib, use_swap_partition),
+    let mut computed = match layout {
+        PartitionLayout::Standard | PartitionLayout::LvmThin => {
+            // LvmThin normalised to Standard; compute as standard.
+            compute_standard_layout(disk_mib)?
+        }
+        PartitionLayout::Minimal => compute_minimal_layout(disk_mib)?,
         PartitionLayout::Custom => {
             let entries = custom_partitions.ok_or_else(|| {
                 DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
             })?;
-            compute_custom_layout(disk_mib, encryption, use_swap_partition, entries)
+            compute_custom_layout(disk_mib, encryption, use_swap_partition, entries)?
+        }
+    };
+
+    if encryption {
+        apply_encryption_flags(&mut computed);
+    }
+
+    Ok(computed)
+}
+
+/// Mark data partitions (non-EFI, non-boot, non-swap) as LUKS containers.
+fn apply_encryption_flags(layout: &mut ComputedLayout) {
+    for part in &mut layout.partitions {
+        if !part.is_efi && !part.is_boot_fs && !part.is_swap && !part.is_bios_boot {
+            part.is_luks = true;
         }
     }
+}
+
+/// Transform a layout by collapsing data partitions into a single LVM PV partition.
+///
+/// System partitions (EFI, Boot, Swap) are preserved. Data partitions are
+/// removed from the partition table and recorded as `planned_thin_volumes`
+/// to be created as thin LVs inside the LVM PV.
+pub fn apply_lvm_thin_to_layout(
+    layout: ComputedLayout,
+    encryption: bool,
+) -> Result<ComputedLayout> {
+    // Separate system partitions from data partitions
+    let mut system_parts: Vec<PartitionDef> = Vec::new();
+    let mut planned_volumes: Vec<PlannedThinVolume> = Vec::new();
+
+    for part in layout.partitions {
+        if part.is_efi || part.is_boot_fs || part.is_swap || part.is_bios_boot {
+            system_parts.push(part);
+        } else if let Some(ref mp) = part.mount_point {
+            // Convert data partition sizes to virtual thin volume sizes
+            let virtual_size = if part.size_mib == 0 {
+                // Remainder partition gets a generous virtual size
+                "200G".to_string()
+            } else if part.size_mib >= 1024 {
+                format!("{}G", part.size_mib / 1024)
+            } else {
+                format!("{}M", part.size_mib)
+            };
+
+            planned_volumes.push(PlannedThinVolume {
+                name: part.name.to_lowercase(),
+                virtual_size,
+                mount_point: mp.clone(),
+            });
+        }
+    }
+
+    // Determine next partition number after system partitions
+    let next_part_num = system_parts
+        .iter()
+        .map(|p| p.number)
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    // Add the LVM PV partition (takes remainder of disk)
+    system_parts.push(PartitionDef {
+        number: next_part_num,
+        name: "LVM".to_string(),
+        size_mib: 0, // Remainder
+        type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+        mount_point: None,
+        is_swap: false,
+        is_efi: false,
+        is_luks: encryption, // Only LUKS-encrypted when encryption is enabled
+        is_bios_boot: false,
+        is_boot_fs: false,
+        attributes: None,
+    });
+
+    Ok(ComputedLayout {
+        partitions: system_parts,
+        total_mib: layout.total_mib,
+        subvolumes: layout.subvolumes,
+        planned_thin_volumes: Some(planned_volumes),
+    })
 }
 
 /// Compute LVM thin layout with swap type consideration

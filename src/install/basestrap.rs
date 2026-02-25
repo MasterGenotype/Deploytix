@@ -120,12 +120,15 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Encryption tools (if enabled)
     if config.disk.encryption {
         packages.push("cryptsetup".to_string());
-        // lvm2 provides device-mapper, required by mkinitcpio encrypt/lvm2 hooks
+    }
+
+    // lvm2 provides device-mapper, required by mkinitcpio encrypt/lvm2 hooks
+    if config.disk.encryption || config.disk.use_lvm_thin {
         packages.push("lvm2".to_string());
     }
 
-    // thin-provisioning-tools for LVM thin provisioning
-    if config.disk.layout == crate::config::PartitionLayout::LvmThin {
+    // thin-provisioning-tools for LVM thin provisioning (feature-driven)
+    if config.disk.use_lvm_thin {
         packages.push("thin-provisioning-tools".to_string());
     }
 

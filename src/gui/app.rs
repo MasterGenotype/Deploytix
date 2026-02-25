@@ -92,7 +92,10 @@ pub struct DeploytixGui {
     // Swap configuration
     swap_type: SwapType,
     zram_percent: u8,
+    // Btrfs subvolumes
+    use_subvolumes: bool,
     // LVM thin provisioning
+    use_lvm_thin: bool,
     lvm_vg_name: String,
     lvm_thin_pool_name: String,
     lvm_thin_pool_percent: u8,
@@ -153,6 +156,8 @@ impl Default for DeploytixGui {
             integrity: false,
             swap_type: SwapType::Partition,
             zram_percent: 50,
+            use_subvolumes: false,
+            use_lvm_thin: false,
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),
             lvm_thin_pool_percent: 95,
@@ -240,9 +245,9 @@ impl DeploytixGui {
                 keyfile_path: None,
                 integrity: self.integrity,
                 keyfile_enabled: self.encryption,
-                use_subvolumes: self.partition_layout == PartitionLayout::Minimal,
+                use_subvolumes: self.use_subvolumes,
                 // LVM thin provisioning
-                use_lvm_thin: self.partition_layout == PartitionLayout::LvmThin,
+                use_lvm_thin: self.use_lvm_thin,
                 lvm_vg_name: self.lvm_vg_name.clone(),
                 lvm_thin_pool_name: self.lvm_thin_pool_name.clone(),
                 lvm_thin_pool_percent: self.lvm_thin_pool_percent,
@@ -519,6 +524,8 @@ impl eframe::App for DeploytixGui {
                     &mut self.integrity,
                     &mut self.swap_type,
                     &mut self.zram_percent,
+                    &mut self.use_subvolumes,
+                    &mut self.use_lvm_thin,
                     &mut self.lvm_vg_name,
                     &mut self.lvm_thin_pool_name,
                     &mut self.lvm_thin_pool_percent,

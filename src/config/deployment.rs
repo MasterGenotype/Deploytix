@@ -469,10 +469,15 @@ fn default_true() -> bool {
 }
 
 impl DeploymentConfig {
-    /// Load configuration from a TOML file
+    /// Load configuration from a TOML file.
+    ///
+    /// If the config uses the legacy `layout = "lvmthin"`, it is transparently
+    /// mapped to `layout = "standard"` with `use_lvm_thin = true` and
+    /// `encryption = true` to preserve backward compatibility.
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: DeploymentConfig = toml::from_str(&content)?;
+        let mut config: DeploymentConfig = toml::from_str(&content)?;
+        config.normalize_legacy_lvmthin();
         Ok(config)
     }
 
@@ -505,11 +510,11 @@ impl DeploymentConfig {
             devices[idx].path.clone()
         };
 
-        // Partition layout
+        // Partition layout (LvmThin is no longer a layout option;
+        // LVM thin provisioning is offered as a feature toggle later)
         let layouts = [
             PartitionLayout::Standard,
             PartitionLayout::Minimal,
-            PartitionLayout::LvmThin,
             PartitionLayout::Custom,
         ];
         let layout_idx = prompt_select("Partition layout", &layouts, 0)?;
@@ -607,38 +612,25 @@ impl DeploymentConfig {
             None
         };
 
-        // Filesystem (LvmThin requires btrfs)
-        let filesystem = if layout == PartitionLayout::LvmThin {
-            println!("  LvmThin layout uses btrfs filesystem.");
-            Filesystem::Btrfs
-        } else {
-            let filesystems = [
-                Filesystem::Btrfs,
-                Filesystem::Ext4,
-                Filesystem::Xfs,
-                Filesystem::F2fs,
-            ];
-            let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
-            filesystems[fs_idx].clone()
-        };
+        // Filesystem
+        let filesystems = [
+            Filesystem::Btrfs,
+            Filesystem::Ext4,
+            Filesystem::Xfs,
+            Filesystem::F2fs,
+        ];
+        let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
+        let filesystem = filesystems[fs_idx].clone();
 
-        // Encryption option (required for LvmThin, optional for Standard and Custom)
-        let encryption = if layout == PartitionLayout::LvmThin {
-            println!("  LvmThin layout uses LUKS encryption.");
-            true
-        } else if layout == PartitionLayout::Standard || layout == PartitionLayout::Custom {
-            prompt_confirm("Enable LUKS encryption on data partitions?", false)?
-        } else {
-            false // Minimal layout doesn't support encryption currently
-        };
+        // Encryption option (available on all layouts)
+        let encryption = prompt_confirm("Enable LUKS encryption on data partitions?", false)?;
 
-        // Subvolumes option (for Standard layout with btrfs)
-        let use_subvolumes =
-            if layout == PartitionLayout::Standard && filesystem == Filesystem::Btrfs {
-                prompt_confirm("Use btrfs subvolumes within partitions?", false)?
-            } else {
-                layout == PartitionLayout::Minimal // Minimal always uses subvolumes
-            };
+        // Subvolumes option (available on any layout with btrfs)
+        let use_subvolumes = if filesystem == Filesystem::Btrfs {
+            prompt_confirm("Use btrfs subvolumes within partitions?", false)?
+        } else {
+            false
+        };
 
         // Integrity (dm-integrity alongside LUKS2 encryption)
         let integrity = if encryption {
@@ -652,9 +644,7 @@ impl DeploymentConfig {
 
         // Boot encryption (LUKS1 on separate /boot partition)
         // When integrity is enabled, boot uses LUKS1 without integrity (LUKS1 doesn't support it)
-        let boot_encryption = if encryption
-            && (layout == PartitionLayout::Standard || layout == PartitionLayout::LvmThin)
-        {
+        let boot_encryption = if encryption {
             prompt_confirm("Enable LUKS1 encryption on /boot partition?", true)?
         } else {
             false
@@ -712,8 +702,8 @@ impl DeploymentConfig {
         let swap_idx = prompt_select("Swap configuration", &swap_types, 0)?;
         let swap_type = swap_types[swap_idx].clone();
 
-        // LVM thin provisioning (for LvmThin layout)
-        let use_lvm_thin = layout == PartitionLayout::LvmThin;
+        // LVM thin provisioning (available on all layouts)
+        let use_lvm_thin = prompt_confirm("Enable LVM thin provisioning?", false)?;
 
         // SecureBoot option
         let secureboot = prompt_confirm("Enable SecureBoot signing?", false)?;
@@ -879,17 +869,6 @@ impl DeploymentConfig {
             ));
         }
 
-        // Encryption supported on Standard, LvmThin, and Custom layouts
-        if self.disk.encryption
-            && self.disk.layout != PartitionLayout::Standard
-            && self.disk.layout != PartitionLayout::LvmThin
-            && self.disk.layout != PartitionLayout::Custom
-        {
-            return Err(DeploytixError::ValidationError(
-                "Encryption is only supported on Standard, LvmThin, and Custom layouts".to_string(),
-            ));
-        }
-
         // Integrity requires encryption
         if self.disk.integrity && !self.disk.encryption {
             return Err(DeploytixError::ValidationError(
@@ -897,26 +876,10 @@ impl DeploymentConfig {
             ));
         }
 
-        // Boot encryption requires Standard or LvmThin layout with encryption enabled
-        if self.disk.boot_encryption {
-            if self.disk.layout != PartitionLayout::Standard
-                && self.disk.layout != PartitionLayout::LvmThin
-            {
-                return Err(DeploytixError::ValidationError(
-                    "Boot encryption requires Standard or LvmThin layout".to_string(),
-                ));
-            }
-            if !self.disk.encryption {
-                return Err(DeploytixError::ValidationError(
-                    "Boot encryption requires disk encryption to be enabled".to_string(),
-                ));
-            }
-        }
-
-        // LvmThin layout requires encryption
-        if self.disk.layout == PartitionLayout::LvmThin && !self.disk.encryption {
+        // Boot encryption requires encryption to be enabled
+        if self.disk.boot_encryption && !self.disk.encryption {
             return Err(DeploytixError::ValidationError(
-                "LvmThin layout requires encryption to be enabled".to_string(),
+                "Boot encryption requires disk encryption to be enabled".to_string(),
             ));
         }
 
@@ -928,13 +891,6 @@ impl DeploymentConfig {
             )));
         }
 
-        // LvmThin layout requires btrfs filesystem
-        if self.disk.layout == PartitionLayout::LvmThin && self.disk.filesystem != Filesystem::Btrfs
-        {
-            return Err(DeploytixError::ValidationError(
-                "LvmThin layout requires btrfs filesystem".to_string(),
-            ));
-        }
 
         // Swap file requires btrfs or ext4 filesystem
         if self.disk.swap_type == SwapType::FileZram
@@ -1030,5 +986,24 @@ impl DeploymentConfig {
         }
 
         Ok(())
+    }
+
+    /// Transparently map the legacy `layout = "lvmthin"` to
+    /// `layout = "standard"` + `use_lvm_thin = true` + `encryption = true`.
+    ///
+    /// This preserves backward compatibility with existing TOML configs.
+    fn normalize_legacy_lvmthin(&mut self) {
+        if self.disk.layout == PartitionLayout::LvmThin {
+            eprintln!(
+                "⚠ Deprecation warning: layout = \"lvmthin\" is deprecated. \
+                 Use layout = \"standard\" with use_lvm_thin = true instead. \
+                 Automatically remapping for backward compatibility."
+            );
+            self.disk.layout = PartitionLayout::Standard;
+            self.disk.use_lvm_thin = true;
+            if !self.disk.encryption {
+                self.disk.encryption = true;
+            }
+        }
     }
 }

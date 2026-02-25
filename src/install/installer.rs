@@ -1,6 +1,6 @@
 //! Main installation orchestrator
 
-use crate::config::{DeploymentConfig, PartitionLayout, SwapType};
+use crate::config::{DeploymentConfig, SwapType};
 use crate::configure;
 use crate::configure::encryption::{
     close_multi_luks, setup_multi_volume_encryption, LuksContainer,
@@ -12,7 +12,7 @@ use crate::disk::formatting::{
     create_btrfs_filesystem, format_all_partitions, format_boot, format_efi, format_swap,
 };
 use crate::disk::layouts::{
-    compute_layout, get_luks_partitions, print_layout_summary, ComputedLayout,
+    compute_layout_from_config, get_luks_partitions, print_layout_summary, ComputedLayout,
 };
 use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
@@ -121,24 +121,27 @@ impl Installer {
 
     /// Run all installation phases after preparation.
     /// Separated from `run()` so that `emergency_cleanup()` can be called on failure.
+    ///
+    /// The pipeline is feature-driven rather than layout-driven:
+    /// each step checks its own feature flag and is a no-op if disabled.
     fn run_phases(&mut self) -> Result<()> {
-        // Phase 2: Disk operations
+        let uses_lvm_thin = self.config.disk.use_lvm_thin;
+        let uses_encryption = self.config.disk.encryption;
+        let uses_multi_luks = uses_encryption && !uses_lvm_thin;
+
+        // Phase 2: Partition disk
         self.report_progress(0.10, "Partitioning disk...");
         self.partition_disk()?;
 
-        // Phase 2.5: LUKS + LVM/multi-volume setup
-        if self.config.disk.layout == PartitionLayout::LvmThin {
-            // LVM Thin Provisioning layout with LUKS encryption
+        // Phase 2.5: Encryption layer (if enabled)
+        if uses_lvm_thin {
             self.report_progress(0.15, "Setting up LVM thin provisioning...");
             self.setup_lvm_thin()?;
             self.report_progress(0.22, "Formatting LVM volumes...");
             self.format_lvm_volumes()?;
             self.report_progress(0.28, "Mounting LVM volumes...");
             self.mount_lvm_volumes()?;
-        } else if self.config.disk.encryption
-            && self.config.disk.layout == PartitionLayout::Standard
-        {
-            // Multi-volume encryption: separate LUKS containers for root, usr, var, home
+        } else if uses_multi_luks {
             self.report_progress(0.15, "Setting up encryption...");
             self.setup_multi_volume_encryption()?;
             self.report_progress(0.22, "Formatting encrypted partitions...");
@@ -156,28 +159,25 @@ impl Installer {
         self.report_progress(0.30, "Installing base system (this may take a while)...");
         self.install_base_system()?;
 
-        // Phase 3.5: Generate fstab (different method for each layout)
+        // Phase 3.5: Generate fstab
         self.report_progress(0.55, "Generating fstab...");
-        if self.config.disk.layout == PartitionLayout::LvmThin {
+        if uses_lvm_thin {
             self.generate_fstab_lvm_thin()?;
-        } else if self.config.disk.encryption
-            && self.config.disk.layout == PartitionLayout::Standard
-        {
+        } else if uses_multi_luks {
             self.generate_fstab_multi_volume()?;
         } else {
             self.generate_fstab()?;
-            // Add swap file entry if using FileZram
             if self.config.disk.swap_type == SwapType::FileZram {
                 append_swap_file_entry(INSTALL_ROOT)?;
             }
         }
 
         // Phase 3.6: Crypttab and keyfiles (for encrypted systems)
-        if self.config.disk.encryption && self.config.disk.layout == PartitionLayout::Standard {
+        if uses_multi_luks {
             self.report_progress(0.60, "Setting up keyfiles and crypttab...");
             self.setup_keyfiles()?;
             self.generate_crypttab_multi_volume()?;
-        } else if self.config.disk.layout == PartitionLayout::LvmThin {
+        } else if uses_lvm_thin {
             self.report_progress(0.60, "Setting up LVM crypttab...");
             if self.config.disk.boot_encryption {
                 self.setup_lvm_thin_keyfiles()?;
@@ -196,10 +196,7 @@ impl Installer {
         self.configure_system()?;
 
         // Phase 4.5: Custom hooks (for encrypted systems)
-        if self.config.disk.encryption
-            && (self.config.disk.layout == PartitionLayout::Standard
-                || self.config.disk.layout == PartitionLayout::LvmThin)
-        {
+        if uses_encryption {
             self.report_progress(0.75, "Installing custom hooks...");
             self.install_custom_hooks()?;
         }
@@ -265,7 +262,7 @@ impl Installer {
         }
 
         // 2. Deactivate LVM volume group if it was created
-        if self.config.disk.layout == PartitionLayout::LvmThin {
+        if self.config.disk.use_lvm_thin {
             let vg_name = &self.config.disk.lvm_vg_name;
             info!("Emergency cleanup: deactivating VG {}", vg_name);
             if let Err(e) = lvm::deactivate_vg(&self.cmd, vg_name) {
@@ -314,9 +311,9 @@ impl Installer {
         self.report_progress(0.02, "Checking host dependencies...");
         ensure_dependencies(
             &self.cmd,
-            &self.config.disk.layout,
             &self.config.disk.filesystem,
             self.config.disk.encryption,
+            self.config.disk.use_lvm_thin,
             &self.config.system.bootloader,
         )?;
 
@@ -331,15 +328,8 @@ impl Installer {
             disk_mib
         );
 
-        // Compute partition layout
-        let use_swap_partition = self.config.disk.swap_type == SwapType::Partition;
-        let layout = compute_layout(
-            &self.config.disk.layout,
-            disk_mib,
-            self.config.disk.encryption,
-            use_swap_partition,
-            self.config.disk.custom_partitions.as_deref(),
-        )?;
+        // Compute partition layout (features are applied as layers)
+        let layout = compute_layout_from_config(&self.config.disk, disk_mib)?;
         print_layout_summary(&layout);
         self.layout = Some(layout);
 
@@ -434,11 +424,8 @@ impl Installer {
         // mkinitcpio
         configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &self.config, INSTALL_ROOT)?;
 
-        // Bootloader (use layout-aware version for encrypted systems)
-        if self.config.disk.encryption
-            && (self.config.disk.layout == PartitionLayout::Standard
-                || self.config.disk.layout == PartitionLayout::LvmThin)
-        {
+        // Bootloader (use layout-aware version when encryption or LVM thin is active)
+        if self.config.disk.encryption || self.config.disk.use_lvm_thin {
             let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader_with_layout(
                 &self.cmd,
@@ -845,8 +832,26 @@ impl Installer {
         // Create thin pool
         lvm::create_thin_pool(&self.cmd, vg_name, pool_name, pool_percent)?;
 
-        // Create thin volumes using the batch function
-        let thin_volumes = lvm::default_thin_volumes();
+        // Create thin volumes from the layout's planned_thin_volumes (which
+        // reflect the actual partitions that were collapsed into the LVM PV).
+        // Falls back to default_thin_volumes() for legacy layouts that don't
+        // populate planned_thin_volumes.
+        let thin_volumes = if let Some(ref planned) = layout.planned_thin_volumes {
+            if planned.is_empty() {
+                lvm::default_thin_volumes()
+            } else {
+                planned
+                    .iter()
+                    .map(|pv| lvm::ThinVolumeDef {
+                        name: pv.name.clone(),
+                        virtual_size: pv.virtual_size.clone(),
+                        mount_point: pv.mount_point.clone(),
+                    })
+                    .collect()
+            }
+        } else {
+            lvm::default_thin_volumes()
+        };
         lvm::create_all_thin_volumes(&self.cmd, vg_name, pool_name, &thin_volumes)?;
 
         // Activate VG to make LVs available

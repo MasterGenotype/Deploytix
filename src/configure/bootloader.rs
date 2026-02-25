@@ -1,6 +1,6 @@
 //! Bootloader installation and configuration
 
-use crate::config::{Bootloader, DeploymentConfig, PartitionLayout, SecureBootMethod};
+use crate::config::{Bootloader, DeploymentConfig, SecureBootMethod};
 use crate::configure::encryption::get_luks_uuid;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::get_partition_uuid;
@@ -57,25 +57,14 @@ fn install_grub(
 ) -> Result<()> {
     info!("Installing GRUB bootloader to {} (x86_64-efi)", device);
 
-    // Get root partition - find it dynamically based on layout
-    // For encrypted Standard layout, should use install_grub_with_layout
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+    // If encryption or LVM thin is active, should use install_grub_with_layout
+    if config.disk.encryption || config.disk.use_lvm_thin {
         return Err(crate::utils::error::DeploytixError::ConfigError(
-            "Encrypted Standard layout requires install_bootloader_with_layout".to_string(),
+            "Encrypted or LVM thin systems require install_bootloader_with_layout".to_string(),
         ));
     }
 
-    let root_partition_num = match config.disk.layout {
-        PartitionLayout::Standard => 4, // Root is partition 4 in standard layout
-        PartitionLayout::Minimal => 4, // Root is partition 4 in minimal layout (EFI, Boot, Swap, Root)
-        PartitionLayout::LvmThin => {
-            // LvmThin should use install_bootloader_with_layout
-            return Err(crate::utils::error::DeploytixError::ConfigError(
-                "LvmThin layout requires install_bootloader_with_layout".to_string(),
-            ));
-        }
-        PartitionLayout::Custom => 4, // Assume standard for custom
-    };
+    let root_partition_num = 4;
 
     let root_part = partition_path(device, root_partition_num);
     let root_uuid = if cmd.is_dry_run() {
@@ -84,10 +73,8 @@ fn install_grub(
         get_partition_uuid(&root_part)?
     };
 
-    // Configure GRUB defaults (no subvolumes for non-layout-aware path)
-    // Note: This path is used for non-encrypted systems; Minimal layout with
-    // subvolumes should use install_bootloader_with_layout instead
-    let uses_subvolumes = config.disk.layout == PartitionLayout::Minimal;
+    // Configure GRUB defaults
+    let uses_subvolumes = config.disk.use_subvolumes;
     configure_grub_defaults(cmd, config, &root_uuid, None, uses_subvolumes, install_root)?;
 
     run_grub_install(cmd, device, install_root)?;
@@ -112,32 +99,56 @@ fn install_grub_with_layout(
     // Find LUKS partition from layout
     let luks_part = layout.partitions.iter().find(|p| p.is_luks);
 
-    if let Some(luks) = luks_part {
-        // Encrypted system
+    if config.disk.use_lvm_thin && config.disk.encryption {
+        // LVM thin + encryption: encrypt hook needs cryptdevice= parameter,
+        // root is on an LVM LV, not a mapper device
+        let luks = luks_part.ok_or_else(|| {
+            crate::utils::error::DeploytixError::ConfigError(
+                "LVM thin + encryption: no LUKS partition found in layout".to_string(),
+            )
+        })?;
         let luks_device = partition_path(device, luks.number);
         let luks_uuid = if cmd.is_dry_run() {
             "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
         } else {
             get_luks_uuid(&luks_device)?
         };
-
-        if config.disk.layout == PartitionLayout::LvmThin {
-            // LvmThin: encrypt hook needs cryptdevice= parameter,
-            // root is on an LVM LV, not a mapper device
-            configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root)?;
+        configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root)?;
+    } else if config.disk.use_lvm_thin {
+        // LVM thin without encryption: root is on an LVM LV
+        let vg_name = &config.disk.lvm_vg_name;
+        let root_lv = lvm::lv_path(vg_name, "root");
+        let root_uuid = if cmd.is_dry_run() {
+            "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
         } else {
-            // Standard layout: configure with mapper name for root
-            configure_grub_defaults(
-                cmd,
-                config,
-                &luks_uuid,
-                Some(&config.disk.luks_mapper_name),
-                layout.uses_subvolumes(),
-                install_root,
-            )?;
-        }
+            get_partition_uuid(&root_lv)?
+        };
+        configure_grub_defaults(
+            cmd,
+            config,
+            &root_uuid,
+            None,
+            layout.uses_subvolumes(),
+            install_root,
+        )?;
+    } else if let Some(luks) = luks_part {
+        // Multi-LUKS: configure with mapper name for root
+        let luks_device = partition_path(device, luks.number);
+        let luks_uuid = if cmd.is_dry_run() {
+            "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
+        } else {
+            get_luks_uuid(&luks_device)?
+        };
+        configure_grub_defaults(
+            cmd,
+            config,
+            &luks_uuid,
+            Some(&config.disk.luks_mapper_name),
+            layout.uses_subvolumes(),
+            install_root,
+        )?;
     } else {
-        // Fall back to non-encrypted
+        // No LUKS, no LVM thin — should not reach here from install_bootloader_with_layout
         return install_grub(cmd, config, device, install_root);
     }
 
@@ -526,17 +537,7 @@ fn install_systemd_boot(
         ));
     }
 
-    let root_partition_num = match config.disk.layout {
-        PartitionLayout::Standard => 4,
-        PartitionLayout::Minimal => 4, // Root is partition 4 (EFI, Boot, Swap, Root)
-        PartitionLayout::LvmThin => {
-            // LvmThin requires encryption which uses GRUB, so this shouldn't be reached
-            return Err(crate::utils::error::DeploytixError::ConfigError(
-                "systemd-boot is not supported with LvmThin layout (use GRUB)".to_string(),
-            ));
-        }
-        PartitionLayout::Custom => 4,
-    };
+    let root_partition_num = 4;
 
     let root_part = partition_path(device, root_partition_num);
     let root_uuid = if cmd.is_dry_run() {

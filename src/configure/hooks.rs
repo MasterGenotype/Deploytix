@@ -1,6 +1,6 @@
 //! Custom mkinitcpio hook generation
 
-use crate::config::{DeploymentConfig, PartitionLayout};
+use crate::config::DeploymentConfig;
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -63,25 +63,31 @@ pub fn install_custom_hooks(
     Ok(())
 }
 
-/// Generate hooks based on configuration
+/// Generate hooks based on configuration.
+///
+/// Hook generation is feature-driven, not layout-driven:
+/// - Multi-LUKS (encryption without LVM thin): crypttab-unlock + mountcrypt
+/// - LVM thin with boot encryption: crypttab-unlock
+/// - Single-LUKS (LVM thin with encryption, no boot encryption): standard `encrypt` hook suffices
 fn generate_hooks(
     config: &DeploymentConfig,
     layout: &ComputedLayout,
 ) -> Result<Vec<GeneratedHook>> {
+    let uses_lvm_thin = config.disk.use_lvm_thin;
+    let uses_multi_luks = config.disk.encryption && !uses_lvm_thin;
+
     let mut hooks = Vec::new();
 
-    // Custom hooks are only needed for encrypted Standard layout which uses
-    // separate LUKS containers for Root, Usr, Var, Home.  Other layouts
-    // rely on the standard `encrypt` hook for a single LUKS volume.
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+    // Multi-LUKS: separate LUKS containers for each data partition.
+    // Needs crypttab-unlock to open all containers, and mountcrypt to mount them.
+    if uses_multi_luks {
         hooks.push(generate_crypttab_unlock_hook());
         hooks.push(generate_mountcrypt_hook(config, layout));
     }
 
-    // For LvmThin with boot encryption, install the crypttab-unlock hook to
-    // unlock the LUKS1 /boot container. The encrypt hook handles the main
-    // Crypt-LVM container; crypttab-unlock handles Crypt-Boot separately.
-    if config.disk.boot_encryption && config.disk.layout == PartitionLayout::LvmThin {
+    // LVM thin with boot encryption: crypttab-unlock opens the LUKS1 /boot
+    // container. The main Crypt-LVM container is handled by the encrypt hook.
+    if uses_lvm_thin && config.disk.boot_encryption {
         hooks.push(generate_crypttab_unlock_hook());
     }
 
@@ -348,12 +354,20 @@ build() {
     }
 }
 
-/// Generate the mountcrypt hook for multi-volume encrypted system
+/// Generate the mountcrypt hook for multi-volume encrypted system.
 ///
-/// Mounts separate encrypted partitions (Crypt-Root, Crypt-Usr, Crypt-Var, Crypt-Home)
-/// instead of btrfs subvolumes.
-fn generate_mountcrypt_hook(config: &DeploymentConfig, _layout: &ComputedLayout) -> GeneratedHook {
+/// Dynamically generates mount entries based on the actual LUKS partitions
+/// in the layout, so it works for Standard (Root, Usr, Var, Home), Minimal
+/// (Root only), and Custom layouts.
+fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) -> GeneratedHook {
     let boot_mapper_name = &config.disk.luks_boot_mapper_name;
+
+    // Collect encrypted data partitions from layout (non-EFI, non-boot, non-swap, is_luks)
+    let luks_data_parts: Vec<&crate::disk::layouts::PartitionDef> = layout
+        .partitions
+        .iter()
+        .filter(|p| p.is_luks && !p.is_efi && !p.is_boot_fs && !p.is_swap && !p.is_bios_boot)
+        .collect();
 
     // Generate /boot mount section depending on boot encryption
     let boot_mount_section = if config.disk.boot_encryption {
@@ -380,16 +394,94 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, _layout: &ComputedLayout)
         )
     };
 
+    // Build the dynamic volume mount section from layout partitions.
+    // Root is mounted first (fatal on failure). Other volumes are best-effort.
+    let mut volume_mounts = String::new();
+
+    // Root must always be first
+    let has_root = luks_data_parts.iter().any(|p| {
+        p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT")
+    });
+    if has_root {
+        volume_mounts.push_str(
+            r#"    # Mount root first (required)
+    echo "[mountcrypt] === Mounting root ==="
+    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root"; then
+        echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
+        return 1
+    fi
+"#,
+        );
+    }
+
+    // Remaining encrypted volumes
+    for part in &luks_data_parts {
+        let mp = match part.mount_point.as_deref() {
+            Some("/") => continue, // Already handled above
+            Some(mp) => mp,
+            None => continue,
+        };
+        // Title-case the partition name for the mapper device
+        let title = {
+            let mut c = part.name.chars();
+            match c.next() {
+                None => String::new(),
+                Some(first) => {
+                    first.to_uppercase().to_string() + &c.as_str().to_lowercase()
+                }
+            }
+        };
+        let mapper = format!("Crypt-{}", title);
+        // /usr failure is a hard error; everything else is a warning
+        let severity = if mp == "/usr" { "ERROR" } else { "WARNING" };
+        let fail_action = if mp == "/usr" {
+            "        ret=1".to_string()
+        } else {
+            String::new()
+        };
+        volume_mounts.push_str(&format!(
+            r#"
+    # Mount {mp}
+    echo "[mountcrypt] === Mounting {mp} ==="
+    if ! mount_volume "/dev/mapper/{mapper}" "$new_root{mp}" "{name}"; then
+        echo "[mountcrypt] {severity}: Failed to mount {mp}" >&2
+{fail_action}
+    fi
+"#,
+            mp = mp,
+            mapper = mapper,
+            name = part.name.to_lowercase(),
+            severity = severity,
+            fail_action = fail_action,
+        ));
+    }
+
+    // Build description comment listing actual volumes
+    let volume_list: Vec<String> = luks_data_parts
+        .iter()
+        .map(|p| {
+            let mp = p.mount_point.as_deref().unwrap_or("-");
+            let title = {
+                let mut c = p.name.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(first) => {
+                        first.to_uppercase().to_string() + &c.as_str().to_lowercase()
+                    }
+                }
+            };
+            format!("#   - Crypt-{} -> {}", title, mp)
+        })
+        .collect();
+    let volume_comment = volume_list.join("\n");
+
     let hook_content = format!(
         r#"#!/usr/bin/ash
 # mountcrypt: Mount multi-volume encrypted system
 # Generated by Deploytix
 #
 # Mounts separate LUKS-encrypted partitions:
-#   - Crypt-Root -> /
-#   - Crypt-Usr  -> /usr
-#   - Crypt-Var  -> /var
-#   - Crypt-Home -> /home
+{volume_comment}
 #
 # This hook runs AFTER crypttab-unlock has unlocked all volumes.
 
@@ -474,32 +566,7 @@ mountcrypt_handler() {{
     echo "[mountcrypt] Available /dev/mapper devices:"
     ls -la /dev/mapper/ 2>/dev/null || echo "[mountcrypt] No mapper devices found"
 
-    # Mount root first (required)
-    echo "[mountcrypt] === Mounting root ==="
-    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root"; then
-        echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
-        return 1
-    fi
-
-    # Mount /usr (required for most systems)
-    echo "[mountcrypt] === Mounting /usr ==="
-    if ! mount_volume "/dev/mapper/Crypt-Usr" "$new_root/usr" "usr"; then
-        echo "[mountcrypt] ERROR: Failed to mount /usr" >&2
-        ret=1
-    fi
-
-    # Mount /var
-    echo "[mountcrypt] === Mounting /var ==="
-    if ! mount_volume "/dev/mapper/Crypt-Var" "$new_root/var" "var"; then
-        echo "[mountcrypt] WARNING: Failed to mount /var" >&2
-    fi
-
-    # Mount /home
-    echo "[mountcrypt] === Mounting /home ==="
-    if ! mount_volume "/dev/mapper/Crypt-Home" "$new_root/home" "home"; then
-        echo "[mountcrypt] WARNING: Failed to mount /home" >&2
-    fi
-
+{volume_mounts}
     # Mount /boot
     echo "[mountcrypt] === Mounting /boot ==="
 {boot_mount}
@@ -542,22 +609,43 @@ mountcrypt_handler() {{
     return $ret
 }}
 "#,
+        volume_comment = volume_comment,
+        volume_mounts = volume_mounts,
         boot_mount = boot_mount_section
     );
 
-    let install_content = r#"#!/bin/bash
-build() {
+    let help_volumes: Vec<String> = luks_data_parts
+        .iter()
+        .filter_map(|p| {
+            let title = {
+                let mut c = p.name.chars();
+                match c.next() {
+                    None => return None,
+                    Some(first) => {
+                        first.to_uppercase().to_string() + &c.as_str().to_lowercase()
+                    }
+                }
+            };
+            Some(format!("Crypt-{}", title))
+        })
+        .collect();
+
+    let install_content = format!(
+        r#"#!/bin/bash
+build() {{
     # blkid is needed for EFI partition detection fallback
     add_binary 'blkid'
     # mountpoint is used to check if root is already mounted
     add_binary 'mountpoint'
     add_runscript
-}
+}}
 
-help() {
-    echo "mountcrypt: Mount multi-volume encrypted system (Crypt-Root, Crypt-Usr, Crypt-Var, Crypt-Home)"
-}
-"#.to_string();
+help() {{
+    echo "mountcrypt: Mount multi-volume encrypted system ({})"
+}}
+"#,
+        help_volumes.join(", ")
+    );
 
     GeneratedHook {
         name: "mountcrypt".to_string(),
@@ -569,7 +657,7 @@ help() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DeploymentConfig;
+    use crate::config::{DeploymentConfig, PartitionLayout};
 
     /// Helper: build a config with the given layout and encryption flag
     fn config_with(layout: crate::config::PartitionLayout, encryption: bool) -> DeploymentConfig {
@@ -587,6 +675,97 @@ mod tests {
             partitions: vec![],
             total_mib: 0,
             subvolumes: None,
+            planned_thin_volumes: None,
+        }
+    }
+
+    /// Layout resembling Standard with 4 encrypted data partitions
+    fn standard_encrypted_layout() -> crate::disk::layouts::ComputedLayout {
+        use crate::disk::layouts::PartitionDef;
+        crate::disk::layouts::ComputedLayout {
+            partitions: vec![
+                PartitionDef {
+                    number: 1, name: "EFI".into(), size_mib: 512,
+                    type_guid: String::new(), mount_point: Some("/boot/efi".into()),
+                    is_swap: false, is_efi: true, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 2, name: "BOOT".into(), size_mib: 2048,
+                    type_guid: String::new(), mount_point: Some("/boot".into()),
+                    is_swap: false, is_efi: false, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: true, attributes: None,
+                },
+                PartitionDef {
+                    number: 3, name: "SWAP".into(), size_mib: 4096,
+                    type_guid: String::new(), mount_point: None,
+                    is_swap: true, is_efi: false, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 4, name: "ROOT".into(), size_mib: 20480,
+                    type_guid: String::new(), mount_point: Some("/".into()),
+                    is_swap: false, is_efi: false, is_luks: true,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 5, name: "USR".into(), size_mib: 20480,
+                    type_guid: String::new(), mount_point: Some("/usr".into()),
+                    is_swap: false, is_efi: false, is_luks: true,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 6, name: "VAR".into(), size_mib: 8192,
+                    type_guid: String::new(), mount_point: Some("/var".into()),
+                    is_swap: false, is_efi: false, is_luks: true,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 7, name: "HOME".into(), size_mib: 0,
+                    type_guid: String::new(), mount_point: Some("/home".into()),
+                    is_swap: false, is_efi: false, is_luks: true,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+            ],
+            total_mib: 100000,
+            subvolumes: None,
+            planned_thin_volumes: None,
+        }
+    }
+
+    /// Layout resembling Minimal with only Root encrypted
+    fn minimal_encrypted_layout() -> crate::disk::layouts::ComputedLayout {
+        use crate::disk::layouts::PartitionDef;
+        crate::disk::layouts::ComputedLayout {
+            partitions: vec![
+                PartitionDef {
+                    number: 1, name: "EFI".into(), size_mib: 512,
+                    type_guid: String::new(), mount_point: Some("/boot/efi".into()),
+                    is_swap: false, is_efi: true, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 2, name: "BOOT".into(), size_mib: 2048,
+                    type_guid: String::new(), mount_point: Some("/boot".into()),
+                    is_swap: false, is_efi: false, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: true, attributes: None,
+                },
+                PartitionDef {
+                    number: 3, name: "SWAP".into(), size_mib: 4096,
+                    type_guid: String::new(), mount_point: None,
+                    is_swap: true, is_efi: false, is_luks: false,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+                PartitionDef {
+                    number: 4, name: "ROOT".into(), size_mib: 0,
+                    type_guid: String::new(), mount_point: Some("/".into()),
+                    is_swap: false, is_efi: false, is_luks: true,
+                    is_bios_boot: false, is_boot_fs: false, attributes: None,
+                },
+            ],
+            total_mib: 100000,
+            subvolumes: None,
+            planned_thin_volumes: None,
         }
     }
 
@@ -646,7 +825,7 @@ mod tests {
     #[test]
     fn mountcrypt_hook_mounts_all_encrypted_partitions() {
         let cfg = config_with(PartitionLayout::Standard, true);
-        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Root"));
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Usr"));
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Var"));
@@ -654,10 +833,28 @@ mod tests {
     }
 
     #[test]
+    fn mountcrypt_hook_minimal_only_mounts_root() {
+        let cfg = config_with(PartitionLayout::Minimal, true);
+        let hook = generate_mountcrypt_hook(&cfg, &minimal_encrypted_layout());
+        assert!(
+            hook.hook_content.contains("/dev/mapper/Crypt-Root"),
+            "Minimal encrypted must mount Crypt-Root"
+        );
+        assert!(
+            !hook.hook_content.contains("/dev/mapper/Crypt-Usr"),
+            "Minimal encrypted must NOT reference Crypt-Usr"
+        );
+        assert!(
+            !hook.hook_content.contains("/dev/mapper/Crypt-Home"),
+            "Minimal encrypted must NOT reference Crypt-Home"
+        );
+    }
+
+    #[test]
     fn mountcrypt_hook_encrypted_boot() {
         let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.boot_encryption = true;
-        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(
             hook.hook_content.contains("/dev/mapper/Crypt-Boot"),
             "With boot_encryption, mountcrypt must mount encrypted /boot"
@@ -672,7 +869,7 @@ mod tests {
     fn mountcrypt_hook_unencrypted_boot() {
         let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.boot_encryption = false;
-        let hook = generate_mountcrypt_hook(&cfg, &dummy_layout());
+        let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(
             hook.hook_content.contains("LABEL=BOOT"),
             "Without boot_encryption, mountcrypt must auto-detect unencrypted boot"
@@ -685,26 +882,26 @@ mod tests {
 
     #[test]
     fn lvm_thin_boot_encryption_generates_crypttab_unlock_hook() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
         assert_eq!(
             hooks.len(),
             1,
-            "LvmThin boot encryption should generate 1 hook"
+            "LVM thin + boot encryption should generate 1 hook"
         );
         assert_eq!(hooks[0].name, "crypttab-unlock");
     }
 
     #[test]
     fn lvm_thin_no_boot_encryption_no_hooks() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
         assert!(
             hooks.is_empty(),
-            "LvmThin without boot encryption should not generate custom hooks"
+            "LVM thin without boot encryption should not generate custom hooks"
         );
     }
 

@@ -6,7 +6,7 @@ use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
 
-/// Construct the MODULES array based on configuration
+/// Construct MODULES array based on configuration
 pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
     let mut modules = Vec::new();
 
@@ -36,16 +36,26 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // LVM thin provisioning modules
-    if config.disk.layout == PartitionLayout::LvmThin {
+    // LVM thin provisioning modules (feature-driven)
+    if config.disk.use_lvm_thin {
         modules.extend(["dm_thin_pool".to_string()]);
     }
 
     modules
 }
 
-/// Construct the HOOKS array based on configuration
+/// Construct the HOOKS array based on configuration.
+///
+/// Hook selection is feature-driven, not layout-driven:
+/// - `encryption` → `lvm2` + either `encrypt` (single LUKS) or `crypttab-unlock` + `mountcrypt` (multi-LUKS)
+/// - `use_lvm_thin` → `lvm2` hook (already added by encryption or standalone)
+/// - `boot_encryption` → `crypttab-unlock` (if not already added)
+/// - `btrfs` → `btrfs` hook
 pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
+    let uses_lvm_thin = config.disk.use_lvm_thin;
+    let uses_encryption = config.disk.encryption;
+    let uses_multi_luks = uses_encryption && !uses_lvm_thin;
+
     let mut hooks = vec![
         "base".to_string(),
         "udev".to_string(),
@@ -62,32 +72,28 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
     ]);
 
     // lvm2 hook provides device-mapper support required by encryption and LVM
-    if config.disk.encryption || config.disk.layout == PartitionLayout::LvmThin {
+    if uses_encryption || uses_lvm_thin {
         hooks.push("lvm2".to_string());
     }
 
-    // For encrypted Standard layout, use custom hooks
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
-        // Custom hooks handle encryption and mounting
+    if uses_multi_luks {
+        // Multi-LUKS: custom hooks handle encryption and mounting
         hooks.push("crypttab-unlock".to_string());
         hooks.push("mountcrypt".to_string());
         // Note: filesystems hook is NOT needed when using mountcrypt
         // as mountcrypt handles all mounting
-    } else if config.disk.layout == PartitionLayout::LvmThin {
-        // LVM Thin layout: LUKS unlock, then LVM activates, then filesystems
-        if config.disk.encryption {
+    } else if uses_lvm_thin {
+        // LVM Thin: LUKS unlock (single container), then LVM activates, then filesystems
+        if uses_encryption {
             hooks.push("encrypt".to_string());
         }
 
-        // When boot encryption is enabled, add crypttab-unlock hook to unlock
-        // the LUKS1 /boot container via /etc/crypttab. The encrypt hook handles
-        // the main Crypt-LVM container; crypttab-unlock handles Crypt-Boot and
-        // skips Crypt-LVM (already unlocked).
+        // When boot encryption is enabled, add crypttab-unlock to unlock
+        // the LUKS1 /boot container. The encrypt hook handles the main
+        // Crypt-LVM container; crypttab-unlock handles Crypt-Boot.
         if config.disk.boot_encryption {
             hooks.push("crypttab-unlock".to_string());
         }
-
-        // lvm2 hook is already added above
 
         // Filesystem-specific hooks
         if config.disk.filesystem == Filesystem::Btrfs {
@@ -97,11 +103,10 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("filesystems".to_string());
         hooks.push("fsck".to_string());
 
-        // LvmThin has a separate /usr thin volume that must be mounted before init.
-        // The usr hook reads /new_root/etc/fstab and mounts /usr early.
+        // LVM thin has a separate /usr thin volume that must be mounted before init.
         hooks.push("usr".to_string());
 
-        // Resume hook for hibernation (for swap partition or swap file)
+        // Resume hook for hibernation
         if config.system.hibernation {
             let filesystems_idx = hooks
                 .iter()
@@ -110,23 +115,21 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             hooks.insert(filesystems_idx, "resume".to_string());
         }
     } else {
-        // Filesystem-specific hooks
+        // No encryption, no LVM thin: standard hooks
         if config.disk.filesystem == Filesystem::Btrfs {
             hooks.push("btrfs".to_string());
         }
 
-        // Core hooks
         hooks.push("filesystems".to_string());
         hooks.push("fsck".to_string());
 
-        // Separate /usr partition hook (Standard layout has separate partitions)
+        // Separate /usr partition hook (Standard layout has separate /usr)
         if config.disk.layout == PartitionLayout::Standard {
             hooks.push("usr".to_string());
         }
 
         // Resume hook for hibernation
         if config.system.hibernation {
-            // Insert resume before filesystems
             let filesystems_idx = hooks
                 .iter()
                 .position(|h| h == "filesystems")
@@ -143,36 +146,32 @@ pub fn construct_binaries(_config: &DeploymentConfig) -> Vec<String> {
     vec!["lsblk".to_string()]
 }
 
-/// Construct FILES array
+/// Construct FILES array.
+///
+/// Includes crypttab and keyfiles in the initramfs whenever encryption is enabled,
+/// regardless of the chosen layout.
 pub fn construct_files(config: &DeploymentConfig) -> Vec<String> {
+    let uses_lvm_thin = config.disk.use_lvm_thin;
+    let uses_multi_luks = config.disk.encryption && !uses_lvm_thin;
+
     let mut files = Vec::new();
 
-    // Include /etc/crypttab in the initramfs so the crypttab-unlock hook can
-    // parse it at early boot and open LUKS containers.
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+    // Multi-LUKS: include crypttab and per-volume keyfiles
+    if uses_multi_luks {
         files.push("/etc/crypttab".to_string());
 
-        // Include keyfiles for automatic unlocking during initramfs
-        // These are referenced by /etc/crypttab entries
         files.push("/etc/cryptsetup-keys.d/cryptroot.key".to_string());
         files.push("/etc/cryptsetup-keys.d/cryptusr.key".to_string());
         files.push("/etc/cryptsetup-keys.d/cryptvar.key".to_string());
         files.push("/etc/cryptsetup-keys.d/crypthome.key".to_string());
 
-        // Include boot keyfile when boot encryption is enabled
         if config.disk.boot_encryption {
             files.push("/etc/cryptsetup-keys.d/cryptboot.key".to_string());
         }
     }
 
-    // For LvmThin layout with encryption and boot_encryption, include keyfiles
-    // so the initramfs can automatically unlock both LUKS containers.
-    // cryptlvm.key is only generated when boot_encryption is enabled
-    // (setup_lvm_thin_keyfiles runs only in that path), so only include it then.
-    if config.disk.encryption
-        && config.disk.layout == PartitionLayout::LvmThin
-        && config.disk.boot_encryption
-    {
+    // LVM thin with encryption + boot encryption: include LVM and boot keyfiles
+    if uses_lvm_thin && config.disk.encryption && config.disk.boot_encryption {
         files.push("/etc/cryptsetup-keys.d/cryptlvm.key".to_string());
         files.push("/etc/crypttab".to_string());
         files.push("/etc/cryptsetup-keys.d/cryptboot.key".to_string());
@@ -190,7 +189,7 @@ pub fn construct_files_with_keyfiles(
     let mut files = Vec::new();
 
     // Include /etc/crypttab in the initramfs
-    if config.disk.encryption && config.disk.layout == PartitionLayout::Standard {
+    if config.disk.encryption {
         files.push("/etc/crypttab".to_string());
 
         // Include all provided keyfiles
@@ -388,62 +387,62 @@ mod tests {
 
     #[test]
     fn lvm_thin_encrypted_uses_encrypt_hook() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         let hooks = construct_hooks(&cfg);
         assert!(
             hooks.contains(&"encrypt".to_string()),
-            "LvmThin encrypted must include encrypt hook"
+            "LVM thin encrypted must include encrypt hook"
         );
         assert!(
             hooks.contains(&"lvm2".to_string()),
-            "LvmThin must include lvm2 hook"
+            "LVM thin must include lvm2 hook"
         );
         assert!(
             !hooks.contains(&"crypttab-unlock".to_string()),
-            "LvmThin without boot encryption should not include crypttab-unlock"
+            "LVM thin without boot encryption should not include crypttab-unlock"
         );
     }
 
     #[test]
     fn lvm_thin_boot_encryption_adds_crypttab_unlock_hook() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let hooks = construct_hooks(&cfg);
         assert!(
             hooks.contains(&"encrypt".to_string()),
-            "LvmThin with boot encryption must still include encrypt hook"
+            "LVM thin with boot encryption must still include encrypt hook"
         );
         assert!(
             hooks.contains(&"crypttab-unlock".to_string()),
-            "LvmThin with boot encryption must include crypttab-unlock hook"
+            "LVM thin with boot encryption must include crypttab-unlock hook"
         );
     }
 
     #[test]
     fn lvm_thin_boot_encryption_includes_crypttab_and_keyfiles() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let files = construct_files(&cfg);
         assert!(
             files.contains(&"/etc/cryptsetup-keys.d/cryptlvm.key".to_string()),
-            "LvmThin must include LVM keyfile"
+            "LVM thin must include LVM keyfile"
         );
         assert!(
             files.contains(&"/etc/crypttab".to_string()),
-            "LvmThin with boot encryption must include crypttab"
+            "LVM thin with boot encryption must include crypttab"
         );
         assert!(
             files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
-            "LvmThin with boot encryption must include boot keyfile"
+            "LVM thin with boot encryption must include boot keyfile"
         );
     }
 
     #[test]
     fn lvm_thin_without_boot_encryption_no_files_in_initramfs() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         let files = construct_files(&cfg);
         // Without boot_encryption, cryptlvm.key is never generated by
@@ -451,26 +450,26 @@ mod tests {
         // (mkinitcpio would fail if the file doesn't exist on disk).
         assert!(
             !files.contains(&"/etc/cryptsetup-keys.d/cryptlvm.key".to_string()),
-            "LvmThin without boot encryption must not embed non-existent cryptlvm.key"
+            "LVM thin without boot encryption must not embed non-existent cryptlvm.key"
         );
         assert!(
             !files.contains(&"/etc/crypttab".to_string()),
-            "LvmThin without boot encryption should not include crypttab in initramfs"
+            "LVM thin without boot encryption should not include crypttab in initramfs"
         );
         assert!(
             !files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
-            "LvmThin without boot encryption should not include boot keyfile"
+            "LVM thin without boot encryption should not include boot keyfile"
         );
     }
 
     #[test]
     fn lvm_thin_includes_usr_hook() {
-        let mut cfg = config_with(PartitionLayout::LvmThin, true);
+        let mut cfg = config_with(PartitionLayout::Standard, true);
         cfg.disk.use_lvm_thin = true;
         let hooks = construct_hooks(&cfg);
         assert!(
             hooks.contains(&"usr".to_string()),
-            "LvmThin must include usr hook to mount /usr before init"
+            "LVM thin must include usr hook to mount /usr before init"
         );
         // usr hook must come after filesystems
         let filesystems_pos = hooks.iter().position(|h| h == "filesystems").unwrap();
