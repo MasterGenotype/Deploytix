@@ -1,0 +1,46 @@
+---
+
+live-session:
+  user: artix
+  password: artix
+  autologin: true
+  use-xlibre: false
+  services:
+    - acpid
+    - bluetoothd
+    - cronie
+    - cupsd
+    - syslog-ng
+    - NetworkManager
+  user-services:
+    - dbus
+rootfs:
+  packages:
+    - mkinitcpio-nfs-utils
+    - squashfs-tools
+    - artix-grub-live
+  packages-init:
+    dinit:
+      - dinit-user-spawn
+      - syslog-ng-dinit
+      - networkmanager-dinit
+      - cups-dinit
+      - artix-live-dinit
+    openrc:
+      - syslog-ng-openrc
+      - networkmanager-openrc
+      - cups-openrc
+      - artix-live-openrc
+    runit:
+      - syslog-ng-runit
+      - networkmanager-runit
+      - cups-runit
+      - artix-live-runit
+    s6:
+      - syslog-ng-s6
+      - networkmanager-s6
+      - cups-s6
+      - artix-live-s6
+livefs:
+  packages:
+    - deploytix-git
