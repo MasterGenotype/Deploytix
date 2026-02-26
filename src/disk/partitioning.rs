@@ -56,9 +56,19 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> Result<S
             part_path, current_sector, size_sectors, part.type_guid, part_uuid, part.name
         );
 
-        // Add attributes if present
-        if let Some(ref attrs) = part.attributes {
-            line.push_str(&format!(", attrs=\"{}\"", attrs));
+        // Add GPT attributes.
+        // is_bios_boot maps to the LegacyBIOSBootable GPT attribute bit — the
+        // same flag toggled by fdisk's expert-mode "Bootable" option, which
+        // tells GRUB where the /boot filesystem lives on legacy BIOS systems.
+        let mut attrs: Vec<String> = Vec::new();
+        if part.is_bios_boot {
+            attrs.push("LegacyBIOSBootable".to_string());
+        }
+        if let Some(ref extra) = part.attributes {
+            attrs.push(extra.clone());
+        }
+        if !attrs.is_empty() {
+            line.push_str(&format!(", attrs=\"{}\"", attrs.join(",")));
         }
 
         script.push_str(&line);

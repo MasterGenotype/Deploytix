@@ -67,9 +67,13 @@ pub struct DiskConfig {
     /// Partition layout preset
     #[serde(default)]
     pub layout: PartitionLayout,
-    /// Filesystem type
+    /// Filesystem type for data partitions
     #[serde(default)]
     pub filesystem: Filesystem,
+    /// Filesystem type for the /boot partition (ext4, btrfs, xfs, zfs, f2fs).
+    /// Defaults to ext4 for maximum GRUB compatibility.
+    #[serde(default = "default_boot_filesystem")]
+    pub boot_filesystem: Filesystem,
     /// Enable LUKS encryption on data partitions (Root, Usr, Var, Home for Standard layout)
     #[serde(default)]
     pub encryption: bool,
@@ -288,6 +292,7 @@ pub enum Filesystem {
     Btrfs,
     Ext4,
     Xfs,
+    Zfs,
     F2fs,
 }
 
@@ -297,6 +302,7 @@ impl std::fmt::Display for Filesystem {
             Self::Btrfs => write!(f, "btrfs"),
             Self::Ext4 => write!(f, "ext4"),
             Self::Xfs => write!(f, "xfs"),
+            Self::Zfs => write!(f, "zfs"),
             Self::F2fs => write!(f, "f2fs"),
         }
     }
@@ -465,6 +471,10 @@ fn default_groups() -> Vec<String> {
     ]
 }
 
+fn default_boot_filesystem() -> Filesystem {
+    Filesystem::Ext4
+}
+
 fn default_true() -> bool {
     true
 }
@@ -613,15 +623,31 @@ impl DeploymentConfig {
             None
         };
 
-        // Filesystem
+        // Data filesystem
         let filesystems = [
             Filesystem::Btrfs,
             Filesystem::Ext4,
             Filesystem::Xfs,
+            Filesystem::Zfs,
             Filesystem::F2fs,
         ];
-        let fs_idx = prompt_select("Filesystem", &filesystems, 0)?;
+        let fs_idx = prompt_select("Data filesystem", &filesystems, 0)?;
         let filesystem = filesystems[fs_idx].clone();
+
+        // Boot filesystem (/boot partition - where kernel, initramfs, and grub config live)
+        let boot_filesystems = [
+            Filesystem::Ext4,
+            Filesystem::Btrfs,
+            Filesystem::Xfs,
+            Filesystem::Zfs,
+            Filesystem::F2fs,
+        ];
+        let boot_fs_idx = prompt_select(
+            "Boot filesystem (/boot - ext4 recommended for widest GRUB support)",
+            &boot_filesystems,
+            0,
+        )?;
+        let boot_filesystem = boot_filesystems[boot_fs_idx].clone();
 
         // Encryption option (available on all layouts)
         let encryption = prompt_confirm("Enable LUKS encryption on data partitions?", false)?;
@@ -727,6 +753,7 @@ impl DeploymentConfig {
                 device,
                 layout: layout.clone(),
                 filesystem,
+                boot_filesystem,
                 encryption,
                 encryption_password,
                 luks_mapper_name: default_luks_mapper_name(),
@@ -780,6 +807,7 @@ impl DeploymentConfig {
                 device: "/dev/sda".to_string(),
                 layout: PartitionLayout::Standard,
                 filesystem: Filesystem::Btrfs,
+                boot_filesystem: Filesystem::Ext4,
                 encryption: false,
                 encryption_password: None,
                 luks_mapper_name: default_luks_mapper_name(),
@@ -871,6 +899,14 @@ impl DeploymentConfig {
         if self.disk.use_subvolumes && self.disk.filesystem != Filesystem::Btrfs {
             return Err(DeploytixError::ValidationError(
                 "Subvolumes require btrfs filesystem".to_string(),
+            ));
+        }
+
+        // boot_encryption is LUKS1 only - boot_filesystem must not be ZFS
+        // (ZFS on /boot with LUKS1 is unsupported)
+        if self.disk.boot_encryption && self.disk.boot_filesystem == Filesystem::Zfs {
+            return Err(DeploytixError::ValidationError(
+                "ZFS is not supported as the boot filesystem when boot encryption (LUKS1) is enabled".to_string(),
             ));
         }
 

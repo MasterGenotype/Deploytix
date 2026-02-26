@@ -292,9 +292,12 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            // is_bios_boot = true sets the GPT LegacyBIOSBootable attribute bit
+            // (the "bootable" flag in fdisk/sfdisk expert mode), enabling GRUB
+            // to locate this partition on legacy BIOS systems.
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
         PartitionDef {
             number: 3,
@@ -412,9 +415,9 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
         PartitionDef {
             number: 3,
@@ -504,9 +507,9 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
     ];
 
@@ -617,9 +620,9 @@ fn compute_custom_layout(
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
     ];
 
