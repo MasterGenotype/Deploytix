@@ -4,7 +4,7 @@ use crate::config::{Filesystem, SwapType};
 use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
-use crate::disk::formatting::get_partition_uuid;
+use crate::disk::formatting::{get_partition_uuid, ZFS_BOOT_DATASET, ZFS_DATASETS};
 use crate::disk::layouts::{ComputedLayout, SubvolumeDef};
 use crate::disk::lvm::{lv_path, ThinVolumeDef};
 use crate::utils::command::CommandRunner;
@@ -12,6 +12,40 @@ use crate::utils::error::Result;
 use std::fs;
 use std::io::Write;
 use tracing::info;
+
+/// Return the fstab filesystem type string and default mount options for a boot partition.
+fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static str) {
+    match boot_filesystem {
+        Filesystem::Ext4 => ("ext4", "defaults,noatime"),
+        Filesystem::Btrfs => ("btrfs", "defaults,noatime"),
+        Filesystem::Xfs => ("xfs", "defaults,noatime"),
+        Filesystem::F2fs => ("f2fs", "defaults,noatime"),
+        Filesystem::Zfs => ("zfs", "zfsutil,defaults,noatime"),
+    }
+}
+
+/// Append standard ZFS dataset fstab entries.
+///
+/// ZFS datasets with `mountpoint=legacy` are referenced by dataset name
+/// (e.g., `rpool/ROOT`) rather than by UUID.
+fn append_zfs_dataset_entries(content: &mut String) {
+    for (ds, mp) in ZFS_DATASETS {
+        let pass = 0; // ZFS handles its own fsck; pass is always 0
+        content.push_str(&format!(
+            "{}  {}  zfs  zfsutil,defaults,noatime  0  {}\n",
+            ds, mp, pass
+        ));
+    }
+}
+
+/// Append the ZFS boot dataset fstab entry.
+fn append_zfs_boot_entry(content: &mut String) {
+    content.push_str(&format!(
+        "\n# Boot dataset (ZFS)\n\
+         {}  /boot  zfs  zfsutil,defaults,noatime  0  0\n",
+        ZFS_BOOT_DATASET
+    ));
+}
 
 /// Generate fstab using UUIDs
 /// Handles both regular partitions and btrfs subvolume layouts
@@ -51,34 +85,56 @@ pub fn generate_fstab(
     fstab_content.push_str("#\n");
     fstab_content.push_str("# <file system> <mount point> <type> <options> <dump> <pass>\n\n");
 
-    for part in &layout.partitions {
-        let part_path = partition_path(device, part.number);
-        let uuid = get_partition_uuid(&part_path)?;
+    // ZFS data filesystem: use dataset names instead of partition UUIDs
+    if *filesystem == Filesystem::Zfs {
+        append_zfs_dataset_entries(&mut fstab_content);
 
-        if part.is_swap {
-            fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
-        } else if let Some(ref mount_point) = part.mount_point {
-            // Determine filesystem type and options based on configuration
-            let fstype;
-            let options;
-            let pass;
+        // EFI and swap still use UUIDs
+        for part in &layout.partitions {
+            let part_path = partition_path(device, part.number);
             if part.is_efi {
-                fstype = "vfat".to_string();
-                options = "defaults,noatime".to_string();
-                pass = 2;
-            } else {
-                fstype = filesystem.to_string();
-                options = match filesystem {
-                    Filesystem::Btrfs => "defaults,noatime,compress=zstd".to_string(),
-                    _ => "defaults,noatime".to_string(),
-                };
-                pass = if mount_point == "/" { 1 } else { 2 };
+                let uuid = get_partition_uuid(&part_path)?;
+                fstab_content.push_str(&format!(
+                    "UUID={}\t/boot/efi\tvfat\tdefaults,noatime\t0\t2\n", uuid
+                ));
+            } else if part.is_swap {
+                let uuid = get_partition_uuid(&part_path)?;
+                fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
+            } else if part.is_boot_fs {
+                // Boot entry handled separately based on boot_filesystem
+                // (caller must append boot entry if not ZFS boot pool)
             }
+        }
+    } else {
+        for part in &layout.partitions {
+            let part_path = partition_path(device, part.number);
+            let uuid = get_partition_uuid(&part_path)?;
 
-            fstab_content.push_str(&format!(
-                "UUID={}\t{}\t{}\t{}\t0\t{}\n",
-                uuid, mount_point, fstype, options, pass
-            ));
+            if part.is_swap {
+                fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
+            } else if let Some(ref mount_point) = part.mount_point {
+                // Determine filesystem type and options based on configuration
+                let fstype;
+                let options;
+                let pass;
+                if part.is_efi {
+                    fstype = "vfat".to_string();
+                    options = "defaults,noatime".to_string();
+                    pass = 2;
+                } else {
+                    fstype = filesystem.to_string();
+                    options = match filesystem {
+                        Filesystem::Btrfs => "defaults,noatime,compress=zstd".to_string(),
+                        _ => "defaults,noatime".to_string(),
+                    };
+                    pass = if mount_point == "/" { 1 } else { 2 };
+                }
+
+                fstab_content.push_str(&format!(
+                    "UUID={}\t{}\t{}\t{}\t0\t{}\n",
+                    uuid, mount_point, fstype, options, pass
+                ));
+            }
         }
     }
 
@@ -294,6 +350,7 @@ pub fn generate_fstab_multi_volume(
     containers: &[LuksContainer],
     device: &str,
     layout: &ComputedLayout,
+    boot_filesystem: &Filesystem,
     install_root: &str,
 ) -> Result<()> {
     info!(
@@ -336,9 +393,11 @@ pub fn generate_fstab_multi_volume(
 
         let pass = if mount_point == "/" { 1 } else { 2 };
 
-        // Get UUID of the btrfs filesystem on the mapped device
+        // Get UUID of the filesystem on the mapped device
         let fs_uuid = get_partition_uuid(&container.mapped_path)?;
 
+        // Note: ZFS is blocked with multi-volume encryption at validation
+        // time, so this path always uses a traditional filesystem.
         content.push_str(&format!(
             "# {} partition (LUKS encrypted)\n\
              UUID={}  {}  btrfs  defaults,noatime,compress=zstd  0  {}\n\n",
@@ -363,10 +422,11 @@ pub fn generate_fstab_multi_volume(
     if let Some(boot) = boot_part {
         let boot_device = partition_path(device, boot.number);
         let boot_uuid = get_partition_uuid(&boot_device)?;
+        let (boot_fstype, boot_opts) = boot_fs_fstab_entry(boot_filesystem);
         content.push_str(&format!(
             "# Boot partition\n\
-             UUID={}  /boot  btrfs  defaults,noatime  0  2\n\n",
-            boot_uuid
+             UUID={}  /boot  {}  {}  0  2\n\n",
+            boot_uuid, boot_fstype, boot_opts
         ));
     }
 
@@ -403,6 +463,7 @@ pub struct LvmThinFstabParams<'a> {
     pub layout: &'a ComputedLayout,
     pub swap_type: &'a SwapType,
     pub boot_mapped_device: Option<&'a str>,
+    pub boot_filesystem: &'a Filesystem,
     pub install_root: &'a str,
 }
 
@@ -487,23 +548,29 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
 
     // Add BOOT partition
     // When boot is encrypted, use the mapped device path for the filesystem UUID
-    if let Some(mapped_dev) = boot_mapped_device {
-        let boot_uuid = get_partition_uuid(mapped_dev)?;
-        content.push_str(&format!(
-            "# Boot partition (LUKS1 encrypted)\n\
-             UUID={}  /boot  btrfs  defaults,noatime  0  2\n\n",
-            boot_uuid
-        ));
+    // When boot is ZFS, use the boot dataset name instead of UUID
+    if *params.boot_filesystem == Filesystem::Zfs {
+        append_zfs_boot_entry(&mut content);
     } else {
-        let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
-        if let Some(boot) = boot_part {
-            let boot_device = partition_path(device, boot.number);
-            let boot_uuid = get_partition_uuid(&boot_device)?;
+        let (boot_fstype, boot_opts) = boot_fs_fstab_entry(params.boot_filesystem);
+        if let Some(mapped_dev) = boot_mapped_device {
+            let boot_uuid = get_partition_uuid(mapped_dev)?;
             content.push_str(&format!(
-                "# Boot partition\n\
-                 UUID={}  /boot  btrfs  defaults,noatime  0  2\n\n",
-                boot_uuid
+                "# Boot partition (LUKS1 encrypted)\n\
+                 UUID={}  /boot  {}  {}  0  2\n\n",
+                boot_uuid, boot_fstype, boot_opts
             ));
+        } else {
+            let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
+            if let Some(boot) = boot_part {
+                let boot_device = partition_path(device, boot.number);
+                let boot_uuid = get_partition_uuid(&boot_device)?;
+                content.push_str(&format!(
+                    "# Boot partition\n\
+                     UUID={}  /boot  {}  {}  0  2\n\n",
+                    boot_uuid, boot_fstype, boot_opts
+                ));
+            }
         }
     }
 

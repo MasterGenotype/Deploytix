@@ -47,6 +47,9 @@ pub enum DeploytixError {
     #[error("User cancelled operation")]
     UserCancelled,
 
+    #[error("Installation interrupted by signal")]
+    Interrupted,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

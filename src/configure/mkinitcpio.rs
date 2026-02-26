@@ -113,9 +113,11 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             hooks.push("crypttab-unlock".to_string());
         }
 
-        // Filesystem-specific hooks
+    // Filesystem-specific hooks
         if config.disk.filesystem == Filesystem::Btrfs {
             hooks.push("btrfs".to_string());
+        } else if config.disk.filesystem == Filesystem::Zfs {
+            hooks.push("zfs".to_string());
         }
 
         hooks.push("filesystems".to_string());
@@ -136,6 +138,8 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         // No encryption, no LVM thin: standard hooks
         if config.disk.filesystem == Filesystem::Btrfs {
             hooks.push("btrfs".to_string());
+        } else if config.disk.filesystem == Filesystem::Zfs {
+            hooks.push("zfs".to_string());
         }
 
         hooks.push("filesystems".to_string());

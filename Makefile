@@ -1,4 +1,4 @@
-PREFIX     ?= $(HOME)/.local
+PREFIX     ?= /usr
 BINDIR     := $(PREFIX)/bin
 APPDIR     := $(PREFIX)/share/applications
 POLKITDIR  := /usr/share/polkit-1/actions
@@ -38,12 +38,13 @@ portable:
 	@echo "Portable binary: $(PORTABLE_BIN)"
 	@file $(PORTABLE_BIN)
 
-## Install GUI binary to $(BINDIR)  [default: ~/.local/bin]
+## Install GUI binary to $(BINDIR)  [default: /usr/bin]
 install: build gui
-	@mkdir -p $(BINDIR) $(APPDIR)
-	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
-	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output $(APPDIR)/$(DESKTOP_FILE)
-	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
+	sudo mkdir -p $(BINDIR) $(APPDIR)
+	sudo install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
+	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output /tmp/$(DESKTOP_FILE)
+	sudo install -m 644 /tmp/$(DESKTOP_FILE) $(APPDIR)/$(DESKTOP_FILE)
+	@rm -f /tmp/$(DESKTOP_FILE)
 	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
 	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)
 	@echo "Installed deploytix-gui -> $(BINDIR)/deploytix-gui"
@@ -52,17 +53,18 @@ install: build gui
 
 ## Install CLI binary to $(BINDIR)
 install-cli: build
-	@mkdir -p $(BINDIR)
-	install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
+	sudo mkdir -p $(BINDIR)
+	sudo install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
 	@echo "Installed deploytix -> $(BINDIR)/deploytix"
 
 ## Install both CLI and GUI binaries to $(BINDIR)
 install-all: build gui
-	@mkdir -p $(BINDIR) $(APPDIR)
-	install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
-	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
-	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output $(APPDIR)/$(DESKTOP_FILE)
-	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
+	sudo mkdir -p $(BINDIR) $(APPDIR)
+	sudo install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
+	sudo install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
+	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output /tmp/$(DESKTOP_FILE)
+	sudo install -m 644 /tmp/$(DESKTOP_FILE) $(APPDIR)/$(DESKTOP_FILE)
+	@rm -f /tmp/$(DESKTOP_FILE)
 	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
 	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)
 	@echo "Installed deploytix      -> $(BINDIR)/deploytix"
@@ -72,14 +74,14 @@ install-all: build gui
 
 ## Install GCC CLI binary to $(BINDIR)
 install-gcc: gcc
-	@mkdir -p $(BINDIR)
-	install -m 755 $(GCC_BIN) $(BINDIR)/deploytix
+	sudo mkdir -p $(BINDIR)
+	sudo install -m 755 $(GCC_BIN) $(BINDIR)/deploytix
 	@echo "Installed gcc deploytix -> $(BINDIR)/deploytix"
 
 ## Install portable (musl) CLI binary to $(BINDIR)
 install-portable: portable
-	@mkdir -p $(BINDIR)
-	install -m 755 $(PORTABLE_BIN) $(BINDIR)/deploytix
+	sudo mkdir -p $(BINDIR)
+	sudo install -m 755 $(PORTABLE_BIN) $(BINDIR)/deploytix
 	@echo "Installed portable deploytix -> $(BINDIR)/deploytix"
 
 ## Remove installed binaries and desktop entry

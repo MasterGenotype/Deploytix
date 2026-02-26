@@ -233,6 +233,7 @@ impl DeploytixGui {
                 device: device_path,
                 layout: self.partition_layout.clone(),
                 filesystem: self.filesystem.clone(),
+                boot_filesystem: crate::config::default_boot_filesystem(),
                 encryption: self.encryption,
                 encryption_password: if self.encryption {
                     Some(self.encryption_password.clone())

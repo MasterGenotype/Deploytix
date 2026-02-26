@@ -95,6 +95,9 @@ impl CommandRunner {
     }
 
     pub fn run(&self, program: &str, args: &[&str]) -> Result<Option<Output>> {
+        if crate::utils::signal::is_interrupted() {
+            return Err(DeploytixError::Interrupted);
+        }
         if self.dry_run {
             log_dry_run(program, args);
             Ok(None)
@@ -114,11 +117,25 @@ impl CommandRunner {
     }
 
     pub fn run_in_chroot(&self, chroot_path: &str, command: &str) -> Result<Option<Output>> {
+        if crate::utils::signal::is_interrupted() {
+            return Err(DeploytixError::Interrupted);
+        }
         if self.dry_run {
             println!("  [dry-run] chroot {} bash -c '{}'", chroot_path, command);
             Ok(None)
         } else {
             run_in_artix_chroot(chroot_path, command).map(Some)
+        }
+    }
+
+    /// Run a command regardless of interrupt state.
+    /// Used for cleanup operations that must execute even after a signal.
+    pub fn force_run(&self, program: &str, args: &[&str]) -> Result<Option<Output>> {
+        if self.dry_run {
+            log_dry_run(program, args);
+            Ok(None)
+        } else {
+            run_command(program, args).map(Some)
         }
     }
 

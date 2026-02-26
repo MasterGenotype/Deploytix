@@ -560,6 +560,7 @@ dependencies = [
  "eframe",
  "egui",
  "indicatif",
+ "libc",
  "nix",
  "once_cell",
  "regex",

@@ -21,11 +21,14 @@ use crate::install::fstab::{
     append_swap_file_entry, generate_fstab_lvm_thin, generate_fstab_multi_volume,
     LvmThinFstabParams,
 };
-use crate::install::{generate_fstab, mount_partitions, run_basestrap, unmount_all};
+use crate::install::{
+    generate_fstab, mount_partitions, mount_partitions_zfs, run_basestrap, unmount_all,
+};
 use crate::utils::command::CommandRunner;
 use crate::utils::deps::ensure_dependencies;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
+use crate::utils::signal;
 use std::fs;
 use tracing::info;
 
@@ -98,6 +101,10 @@ impl Installer {
 
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
+        // Install signal handlers so SIGINT/SIGTERM trigger cleanup
+        // instead of immediate termination.
+        signal::install_signal_handlers();
+
         info!(
             "Starting Deploytix installation on {} ({} layout, {} init)",
             self.config.disk.device, self.config.disk.layout, self.config.system.init
@@ -110,10 +117,19 @@ impl Installer {
         // Run all remaining phases with cleanup guard
         let result = self.run_phases();
 
-        if let Err(ref err) = result {
-            eprintln!("\n✗ Installation failed: {}", err);
+        // Run emergency cleanup on any error or if interrupted
+        if result.is_err() || signal::is_interrupted() {
+            if let Err(ref err) = result {
+                eprintln!("\n✗ Installation failed: {}", err);
+            }
             eprintln!("  Performing emergency cleanup...");
             self.emergency_cleanup();
+        }
+
+        // Re-raise the caught signal so the parent shell sees the
+        // correct exit status (e.g. 128 + signal number).
+        if signal::is_interrupted() {
+            signal::reraise();
         }
 
         result
@@ -148,6 +164,13 @@ impl Installer {
             self.format_multi_volume_partitions()?;
             self.report_progress(0.28, "Mounting encrypted partitions...");
             self.mount_multi_volume_partitions()?;
+        } else if self.config.disk.filesystem == crate::config::Filesystem::Zfs {
+            // ZFS: format non-ZFS partitions (EFI, swap, boot if non-ZFS),
+            // then create pools/datasets and mount everything.
+            self.report_progress(0.20, "Formatting partitions and creating ZFS pools...");
+            self.format_partitions()?;
+            self.report_progress(0.25, "Creating ZFS datasets and mounting...");
+            self.mount_partitions_zfs()?;
         } else {
             self.report_progress(0.20, "Formatting partitions...");
             self.format_partitions()?;
@@ -226,9 +249,13 @@ impl Installer {
         Ok(())
     }
 
-    /// Best-effort emergency cleanup when installation fails.
-    /// Unmounts filesystems, deactivates LVM, and closes LUKS devices.
-    /// All errors are logged but otherwise ignored to ensure maximum cleanup.
+    /// Best-effort emergency cleanup when installation fails or is interrupted.
+    /// Unmounts filesystems, deactivates LVM, kills orphaned cryptsetup
+    /// processes, and closes LUKS devices (including temporary ones left
+    /// behind by interrupted `cryptsetup luksFormat` operations).
+    ///
+    /// Uses `force_run()` so commands execute even when the interrupt flag
+    /// is set.  All errors are logged but otherwise ignored.
     fn emergency_cleanup(&self) {
         use tracing::warn;
 
@@ -255,9 +282,9 @@ impl Installer {
 
             for mp in mount_points {
                 info!("Emergency cleanup: unmounting {}", mp);
-                if self.cmd.run("umount", &[mp]).is_err() {
+                if self.cmd.force_run("umount", &[mp]).is_err() {
                     // Try lazy unmount as fallback
-                    if let Err(e) = self.cmd.run("umount", &["-l", mp]) {
+                    if let Err(e) = self.cmd.force_run("umount", &["-l", mp]) {
                         warn!("Emergency cleanup: failed to unmount {}: {}", mp, e);
                     }
                 }
@@ -268,7 +295,7 @@ impl Installer {
         if self.config.disk.use_lvm_thin {
             let vg_name = &self.config.disk.lvm_vg_name;
             info!("Emergency cleanup: deactivating VG {}", vg_name);
-            if let Err(e) = lvm::deactivate_vg(&self.cmd, vg_name) {
+            if let Err(e) = self.cmd.force_run("vgchange", &["-an", vg_name]) {
                 warn!(
                     "Emergency cleanup: failed to deactivate VG {}: {}",
                     vg_name, e
@@ -276,14 +303,22 @@ impl Installer {
             }
         }
 
-        // 3. Close all LUKS containers (enumerate /dev/mapper/Crypt-*)
+        // 3. Kill any orphaned cryptsetup processes (e.g. luksFormat with
+        //    integrity still writing tags).  These hold dm mappings open.
+        Self::kill_orphaned_cryptsetup();
+
+        // 4. Close all LUKS and temporary-cryptsetup dm mappings.
+        //    Enumerate /dev/mapper for both Crypt-* (deploytix-created)
+        //    and temporary-cryptsetup-* (cryptsetup internal).
         let mapper_dir = std::path::Path::new("/dev/mapper");
         if let Ok(entries) = fs::read_dir(mapper_dir) {
             let mut names: Vec<String> = entries
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-") {
+                    if name.starts_with("Crypt-")
+                        || name.starts_with("temporary-cryptsetup-")
+                    {
                         Some(name)
                     } else {
                         None
@@ -291,19 +326,85 @@ impl Installer {
                 })
                 .collect();
 
-            // Sort reverse so deeper volumes (e.g. Crypt-LVM) close before outer (Crypt-LVM_dif)
+            // Sort reverse so inner volumes close before outer ones
+            // (e.g. Crypt-LVM before Crypt-LVM_dif, temp before temp_dif)
             names.sort();
             names.reverse();
 
             for name in names {
-                info!("Emergency cleanup: closing LUKS {}", name);
-                if let Err(e) = self.cmd.run("cryptsetup", &["close", &name]) {
+                info!("Emergency cleanup: closing {}", name);
+                if let Err(e) = self.cmd.force_run("cryptsetup", &["close", &name]) {
                     warn!("Emergency cleanup: failed to close {}: {}", name, e);
                 }
             }
         }
 
         info!("Emergency cleanup complete");
+    }
+
+    /// Kill orphaned `cryptsetup` processes (e.g. a `luksFormat --integrity`
+    /// that is still writing wipe-tags after the parent was interrupted).
+    /// These processes prevent dm mappings from being closed.
+    fn kill_orphaned_cryptsetup() {
+        use tracing::warn;
+
+        // Read /proc to find cryptsetup processes whose parent is init (PPID=1),
+        // indicating they were orphaned when deploytix was interrupted.
+        let Ok(proc_entries) = fs::read_dir("/proc") else {
+            return;
+        };
+
+        for entry in proc_entries.filter_map(|e| e.ok()) {
+            let pid_str = entry.file_name().to_string_lossy().to_string();
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+
+            // Read the command line
+            let cmdline_path = format!("/proc/{}/cmdline", pid);
+            let Ok(cmdline) = fs::read_to_string(&cmdline_path) else {
+                continue;
+            };
+
+            // Check if this is a cryptsetup process (cmdline is NUL-separated)
+            if !cmdline.starts_with("cryptsetup\0") && !cmdline.starts_with("cryptsetup ") {
+                continue;
+            }
+
+            // Check if orphaned (PPID == 1)
+            let stat_path = format!("/proc/{}/stat", pid);
+            let Ok(stat) = fs::read_to_string(&stat_path) else {
+                continue;
+            };
+            // Format: pid (comm) state ppid ...
+            // Find PPID after the closing paren of comm
+            if let Some(after_comm) = stat.rfind(')') {
+                let fields: Vec<&str> = stat[after_comm + 1..].split_whitespace().collect();
+                // fields[0] = state, fields[1] = ppid
+                if fields.len() >= 2 && fields[1] == "1" {
+                    info!(
+                        "Emergency cleanup: killing orphaned cryptsetup process (PID {})",
+                        pid
+                    );
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGTERM);
+                    }
+                    // Give it a moment to exit
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    // Force-kill if still alive
+                    if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                        warn!(
+                            "Emergency cleanup: SIGTERM failed, sending SIGKILL to PID {}",
+                            pid
+                        );
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        }
     }
 
     /// Prepare for installation
@@ -400,6 +501,23 @@ impl Installer {
         Ok(())
     }
 
+    /// Create ZFS pools/datasets and mount everything
+    fn mount_partitions_zfs(&self) -> Result<()> {
+        info!("[Phase 2/6] Creating ZFS pools/datasets and mounting to {}", INSTALL_ROOT);
+
+        let layout = self.layout.as_ref().unwrap();
+        mount_partitions_zfs(
+            &self.cmd,
+            &self.config.disk.device,
+            layout,
+            &self.config.disk.filesystem,
+            &self.config.disk.boot_filesystem,
+            INSTALL_ROOT,
+        )?;
+
+        Ok(())
+    }
+
     /// Install base system using basestrap
     fn install_base_system(&self) -> Result<()> {
         info!("[Phase 3/6] Installing base system via basestrap");
@@ -452,10 +570,12 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
         } else {
+            let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader(
                 &self.cmd,
                 &self.config,
                 &self.config.disk.device,
+                layout,
                 INSTALL_ROOT,
             )?;
         }
@@ -506,6 +626,13 @@ impl Installer {
 
         // Unmount all partitions
         unmount_all(&self.cmd, INSTALL_ROOT)?;
+
+        // Export ZFS pools if ZFS was used
+        if self.config.disk.filesystem == crate::config::Filesystem::Zfs
+            || self.config.disk.boot_filesystem == crate::config::Filesystem::Zfs
+        {
+            crate::disk::formatting::export_zfs_pools(&self.cmd)?;
+        }
 
         // Close LUKS boot container if opened (close before root volumes)
         if let Some(ref boot_container) = self.luks_boot_container {
@@ -759,6 +886,7 @@ impl Installer {
             &self.luks_containers,
             &self.config.disk.device,
             layout,
+            &self.config.disk.boot_filesystem,
             INSTALL_ROOT,
         )
     }
@@ -826,6 +954,7 @@ impl Installer {
                 })?;
 
             let container = if self.config.disk.integrity {
+                self.report_progress(0.16, "Setting up encrypted LVM partition with dm-integrity...");
                 configure::encryption::setup_single_luks_with_integrity(
                     &self.cmd,
                     &lvm_device,
@@ -834,6 +963,7 @@ impl Installer {
                     "Lvm",
                 )?
             } else {
+                self.report_progress(0.16, "Setting up encrypted LVM partition...");
                 configure::encryption::setup_single_luks(
                     &self.cmd,
                     &lvm_device,
@@ -844,6 +974,7 @@ impl Installer {
             };
 
             // Create PV on the LUKS container
+            self.report_progress(0.18, "Creating LVM physical volume and volume group...");
             lvm::create_pv(&self.cmd, &container.mapped_path)?;
             lvm::create_vg(&self.cmd, vg_name, &container.mapped_path)?;
 
@@ -855,6 +986,7 @@ impl Installer {
         }
 
         // Create thin pool
+        self.report_progress(0.19, "Creating LVM thin pool and volumes...");
         lvm::create_thin_pool(&self.cmd, vg_name, pool_name, pool_percent)?;
 
         // Create thin volumes from the layout's planned_thin_volumes (which
@@ -886,6 +1018,7 @@ impl Installer {
 
         // Setup LUKS1 encryption on /boot partition if enabled
         if self.config.disk.boot_encryption {
+            self.report_progress(0.20, "Encrypting /boot partition (LUKS1)...");
             let boot_part = layout
                 .partitions
                 .iter()
@@ -1062,6 +1195,7 @@ impl Installer {
             layout,
             swap_type: &self.config.disk.swap_type,
             boot_mapped_device: boot_mapped,
+            boot_filesystem: &self.config.disk.boot_filesystem,
             install_root: INSTALL_ROOT,
         })
     }

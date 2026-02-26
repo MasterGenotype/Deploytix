@@ -97,16 +97,37 @@ fn determine_device_type(device: &str) -> String {
     "disk".to_string()
 }
 
+/// Check if a block device name represents a physical whole-disk.
+///
+/// Only known real disk types are accepted: SCSI/SATA/USB (`sd*`),
+/// NVMe (`nvme*`), MMC/SD (`mmcblk*`), virtio (`vd*`), Xen (`xvd*`),
+/// and IDE (`hd*`).  Everything else — device-mapper (`dm-*`), ZRAM,
+/// loop, software RAID (`md*`), optical (`sr*`), network block devices
+/// (`nbd*`) — returns `false`.
+fn is_physical_disk(name: &str) -> bool {
+    name.starts_with("sd")
+        || name.starts_with("nvme")
+        || name.starts_with("mmcblk")
+        || name.starts_with("vd")
+        || name.starts_with("xvd")
+        || name.starts_with("hd")
+}
+
 /// Check if a device is mounted
 fn is_device_mounted(device: &str) -> bool {
     let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    mounts.lines().any(|line| line.starts_with(device))
+    mounts.lines().any(|line| {
+        line.split_whitespace()
+            .next() == Some(device)
+    })
 }
 
 /// List available block devices
 ///
-/// If `all` is false, filters to only show suitable installation targets
-/// (excludes mounted devices, read-only devices, loop devices, etc.)
+/// If `all` is false, filters to only show suitable installation targets:
+/// physical whole-disks (SCSI/SATA/USB, NVMe, MMC/SD, virtio, Xen, IDE).
+/// Device-mapper devices (dm-crypt, LVM), ZRAM, loop, software RAID, optical
+/// drives, and other virtual block devices are excluded.
 pub fn list_block_devices(all: bool) -> Result<Vec<BlockDevice>> {
     let mut devices = Vec::new();
 
@@ -119,13 +140,16 @@ pub fn list_block_devices(all: bool) -> Result<Vec<BlockDevice>> {
             continue;
         }
 
-        // Get device info
-        let device_type = determine_device_type(&name);
-
-        // Skip loop devices unless showing all
-        if !all && device_type == "loop" {
+        // When filtering for installation targets, only include physical
+        // whole-disks.  This excludes device-mapper (dm-*), ZRAM, loop,
+        // software RAID (md*), optical drives (sr*), network block
+        // devices (nbd*), and any other virtual block device.
+        if !all && !is_physical_disk(&name) {
             continue;
         }
+
+        // Get device info
+        let device_type = determine_device_type(&name);
 
         // Get size
         let size_sectors = read_sysfs_u64(&name, "size").unwrap_or(0);
@@ -292,5 +316,31 @@ mod tests {
     #[test]
     fn partition_path_mmcblk_uses_p_separator() {
         assert_eq!(partition_path("/dev/mmcblk0", 1), "/dev/mmcblk0p1");
+    }
+
+    // ── is_physical_disk ──────────────────────────────────────────────────────
+
+    #[test]
+    fn physical_disk_accepts_real_disk_types() {
+        assert!(is_physical_disk("sda"));
+        assert!(is_physical_disk("sdb"));
+        assert!(is_physical_disk("nvme0n1"));
+        assert!(is_physical_disk("mmcblk0"));
+        assert!(is_physical_disk("vda"));
+        assert!(is_physical_disk("xvda"));
+        assert!(is_physical_disk("hda"));
+    }
+
+    #[test]
+    fn physical_disk_rejects_virtual_devices() {
+        assert!(!is_physical_disk("dm-0"));
+        assert!(!is_physical_disk("dm-1"));
+        assert!(!is_physical_disk("loop0"));
+        assert!(!is_physical_disk("loop1"));
+        assert!(!is_physical_disk("zram0"));
+        assert!(!is_physical_disk("md0"));
+        assert!(!is_physical_disk("sr0"));
+        assert!(!is_physical_disk("nbd0"));
+        assert!(!is_physical_disk("ram0"));
     }
 }

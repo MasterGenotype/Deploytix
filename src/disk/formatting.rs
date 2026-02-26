@@ -90,6 +90,9 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
 /// which carries no filesystem and must never be formatted.
 /// In standalone GRUB mode the .efi binary is placed on the EFI (FAT32)
 /// partition; the /boot partition is still needed for kernel/initramfs files.
+///
+/// When `boot_filesystem` is ZFS, a dedicated boot pool (`bpool`) is created
+/// with a restricted feature set that GRUB can read.
 pub fn format_boot_partition(
     cmd: &CommandRunner,
     partition: &str,
@@ -99,6 +102,9 @@ pub fn format_boot_partition(
         "Formatting {} as {} (BOOT)",
         partition, boot_filesystem
     );
+    if *boot_filesystem == Filesystem::Zfs {
+        return create_zfs_boot_pool(cmd, partition);
+    }
     format_partition(cmd, partition, boot_filesystem, Some("BOOT"))
         .map_err(|e| {
             DeploytixError::FilesystemError(format!("Failed to format BOOT partition: {}", e))
@@ -124,9 +130,13 @@ pub fn format_swap(cmd: &CommandRunner, partition: &str, label: Option<&str>) ->
 ///
 /// `filesystem` applies to data partitions; `boot_filesystem` applies to the
 /// /boot partition (`is_boot_fs`).  The EFI partition is always FAT32.
-/// Partitions flagged `is_bios_boot` only receive the GPT LegacyBIOSBootable
-/// attribute (set by the sfdisk script); they are formatted according to
-/// `is_boot_fs` — not skipped or overridden.
+///
+/// `is_bios_boot` is purely a GPT attribute (LegacyBIOSBootable, the
+/// "Bootable" flag in fdisk/sfdisk expert mode) and has NO effect on
+/// formatting.  The /boot partition carries *both* `is_bios_boot` and
+/// `is_boot_fs`; its filesystem is determined by `boot_filesystem`.
+/// A standalone `is_bios_boot` partition (without `is_boot_fs`) is raw
+/// storage for GRUB core.img and is never formatted.
 pub fn format_all_partitions(
     cmd: &CommandRunner,
     device: &str,
@@ -147,6 +157,14 @@ pub fn format_all_partitions(
 
         if part.is_efi {
             format_efi(cmd, &part_path)?;
+        } else if part.is_bios_boot && !part.is_boot_fs {
+            // Standalone BIOS Boot partition: raw area for GRUB core.img.
+            // Only the GPT LegacyBIOSBootable attribute is set (by sfdisk);
+            // no filesystem is ever applied.
+            info!(
+                "Skipping {} (BIOS Boot partition, raw — no filesystem)",
+                part_path
+            );
         } else if part.is_swap {
             format_swap(cmd, &part_path, Some(&part.name))?;
         } else if part.is_luks {
@@ -208,6 +226,202 @@ pub fn get_all_uuids(
     }
 
     Ok(results)
+}
+
+/// Default ZFS data pool name.
+pub const ZFS_RPOOL_NAME: &str = "rpool";
+/// Default ZFS boot pool name.
+pub const ZFS_BPOOL_NAME: &str = "bpool";
+/// Default root dataset under the data pool.
+pub const ZFS_ROOT_DATASET: &str = "rpool/ROOT";
+/// Default boot dataset under the boot pool.
+pub const ZFS_BOOT_DATASET: &str = "bpool/BOOT";
+
+/// Create a ZFS data pool (`rpool`) on a device with production-ready defaults.
+///
+/// The pool is created with `mountpoint=none` so that all mounts are handled
+/// via legacy mountpoints in fstab. Datasets are created separately by
+/// [`create_zfs_datasets`].
+pub fn create_zfs_pool(cmd: &CommandRunner, device: &str) -> Result<()> {
+    info!("Creating ZFS data pool ({}) on {}", ZFS_RPOOL_NAME, device);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] zpool create -f -o ashift=12 -O mountpoint=none -O atime=off -O compression=zstd -O xattr=sa -O acltype=posixacl {} {}",
+            ZFS_RPOOL_NAME, device);
+        return Ok(());
+    }
+
+    cmd.run(
+        "zpool",
+        &[
+            "create", "-f",
+            "-o", "ashift=12",
+            "-O", "mountpoint=none",
+            "-O", "atime=off",
+            "-O", "compression=zstd",
+            "-O", "xattr=sa",
+            "-O", "acltype=posixacl",
+            ZFS_RPOOL_NAME, device,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        DeploytixError::FilesystemError(format!("Failed to create ZFS pool {}: {}", ZFS_RPOOL_NAME, e))
+    })
+}
+
+/// Create a ZFS boot pool (`bpool`) with a GRUB-compatible feature set.
+///
+/// GRUB's ZFS driver supports only a subset of pool features. The boot pool
+/// restricts features to those GRUB can read, ensuring the kernel and
+/// initramfs are always accessible at early boot.
+fn create_zfs_boot_pool(cmd: &CommandRunner, device: &str) -> Result<()> {
+    info!("Creating ZFS boot pool ({}) on {}", ZFS_BPOOL_NAME, device);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] zpool create -f -d -o ashift=12 -o feature@... -O mountpoint=none -O compression=lz4 {} {}",
+            ZFS_BPOOL_NAME, device);
+        return Ok(());
+    }
+
+    // GRUB-compatible feature flags — enable only the features GRUB's ZFS
+    // driver can handle. Everything else stays disabled so the boot pool
+    // remains readable by the bootloader.
+    cmd.run(
+        "zpool",
+        &[
+            "create", "-f", "-d",
+            "-o", "ashift=12",
+            "-o", "feature@async_destroy=enabled",
+            "-o", "feature@bookmarks=enabled",
+            "-o", "feature@embedded_data=enabled",
+            "-o", "feature@empty_bpobj=enabled",
+            "-o", "feature@enabled_txg=enabled",
+            "-o", "feature@extensible_dataset=enabled",
+            "-o", "feature@filesystem_limits=enabled",
+            "-o", "feature@hole_birth=enabled",
+            "-o", "feature@large_blocks=enabled",
+            "-o", "feature@lz4_compress=enabled",
+            "-o", "feature@spacemap_histogram=enabled",
+            "-O", "mountpoint=none",
+            "-O", "compression=lz4",
+            "-O", "atime=off",
+            ZFS_BPOOL_NAME, device,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        DeploytixError::FilesystemError(format!("Failed to create ZFS boot pool: {}", e))
+    })?;
+
+    // Create the boot dataset with legacy mountpoint
+    cmd.run(
+        "zfs",
+        &["create", "-o", "mountpoint=legacy", ZFS_BOOT_DATASET],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        DeploytixError::FilesystemError(format!("Failed to create ZFS boot dataset: {}", e))
+    })
+}
+
+/// Standard ZFS dataset layout for a system installation.
+///
+/// All datasets use `mountpoint=legacy` so they can be managed via fstab.
+pub const ZFS_DATASETS: &[(&str, &str)] = &[
+    ("rpool/ROOT",     "/"),
+    ("rpool/home",     "/home"),
+    ("rpool/var",      "/var"),
+    ("rpool/var/log",  "/var/log"),
+];
+
+/// Create the standard ZFS dataset hierarchy under an existing data pool.
+pub fn create_zfs_datasets(cmd: &CommandRunner) -> Result<()> {
+    info!("Creating ZFS datasets under {}", ZFS_RPOOL_NAME);
+
+    if cmd.is_dry_run() {
+        for (ds, mp) in ZFS_DATASETS {
+            println!("  [dry-run] zfs create -o mountpoint=legacy {} (→ {})", ds, mp);
+        }
+        return Ok(());
+    }
+
+    for (ds, mp) in ZFS_DATASETS {
+        cmd.run(
+            "zfs",
+            &["create", "-o", "mountpoint=legacy", ds],
+        )
+        .map(|_| ())
+        .map_err(|e| {
+            DeploytixError::FilesystemError(format!(
+                "Failed to create ZFS dataset {} ({}): {}", ds, mp, e
+            ))
+        })?;
+        info!("Created dataset {} → {}", ds, mp);
+    }
+
+    Ok(())
+}
+
+/// Mount all ZFS datasets under the given install root (shallowest first).
+pub fn mount_zfs_datasets(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("Mounting ZFS datasets to {}", install_root);
+
+    // ZFS_DATASETS is already ordered shallowest-first
+    for (ds, mp) in ZFS_DATASETS {
+        let target = if *mp == "/" {
+            install_root.to_string()
+        } else {
+            format!("{}{}", install_root, mp)
+        };
+
+        if !cmd.is_dry_run() {
+            fs::create_dir_all(&target)?;
+        }
+
+        if cmd.is_dry_run() {
+            println!("  [dry-run] mount -t zfs {} {}", ds, target);
+        } else {
+            cmd.run("mount", &["-t", "zfs", ds, &target]).map_err(|e| {
+                DeploytixError::FilesystemError(format!(
+                    "Failed to mount ZFS dataset {}: {}", ds, e
+                ))
+            })?;
+            info!("Mounted {} to {}", ds, target);
+        }
+    }
+
+    Ok(())
+}
+
+/// Mount the ZFS boot dataset at `<install_root>/boot`.
+pub fn mount_zfs_boot(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    let target = format!("{}/boot", install_root);
+    info!("Mounting ZFS boot dataset {} to {}", ZFS_BOOT_DATASET, target);
+
+    if !cmd.is_dry_run() {
+        fs::create_dir_all(&target)?;
+    }
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] mount -t zfs {} {}", ZFS_BOOT_DATASET, target);
+        return Ok(());
+    }
+
+    cmd.run("mount", &["-t", "zfs", ZFS_BOOT_DATASET, &target])
+        .map(|_| ())
+        .map_err(|e| {
+            DeploytixError::FilesystemError(format!("Failed to mount ZFS boot dataset: {}", e))
+        })
+}
+
+/// Export (unmount) ZFS pools during cleanup.
+pub fn export_zfs_pools(cmd: &CommandRunner) -> Result<()> {
+    info!("Exporting ZFS pools");
+    // Export boot pool first, then data pool
+    let _ = cmd.run("zpool", &["export", ZFS_BPOOL_NAME]);
+    let _ = cmd.run("zpool", &["export", ZFS_RPOOL_NAME]);
+    Ok(())
 }
 
 /// Create btrfs filesystem on a device (typically a LUKS-mapped device)

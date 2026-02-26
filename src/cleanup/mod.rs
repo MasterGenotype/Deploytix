@@ -85,11 +85,17 @@ impl Cleaner {
 
     /// Close any open LUKS encrypted volumes
     ///
-    /// Dynamically enumerates `/dev/mapper/Crypt-*` entries so that both
+    /// Dynamically enumerates `/dev/mapper/Crypt-*` and
+    /// `/dev/mapper/temporary-cryptsetup-*` entries so that both
     /// canonical names (e.g. `Crypt-Root`) and disambiguated names
-    /// (e.g. `Crypt-Root-1`) are closed.
+    /// (e.g. `Crypt-Root-1`) are closed, as well as any temporary
+    /// dm mappings left behind by interrupted `cryptsetup luksFormat`
+    /// operations.
     fn close_encrypted_volumes(&self) -> Result<()> {
         info!("Closing any open LUKS encrypted volumes");
+
+        // Kill orphaned cryptsetup processes first (they hold dm mappings open)
+        self.kill_orphaned_cryptsetup();
 
         let mapper_dir = std::path::Path::new("/dev/mapper");
         if let Ok(entries) = fs::read_dir(mapper_dir) {
@@ -98,7 +104,9 @@ impl Cleaner {
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-") {
+                    if name.starts_with("Crypt-")
+                        || name.starts_with("temporary-cryptsetup-")
+                    {
                         Some(name)
                     } else {
                         None
@@ -115,6 +123,65 @@ impl Cleaner {
         }
 
         Ok(())
+    }
+
+    /// Kill orphaned `cryptsetup` processes (PPID == 1) that may be holding
+    /// dm mappings open (e.g. integrity wipe from an interrupted luksFormat).
+    fn kill_orphaned_cryptsetup(&self) {
+        use tracing::warn;
+
+        let Ok(proc_entries) = fs::read_dir("/proc") else {
+            return;
+        };
+
+        for entry in proc_entries.filter_map(|e| e.ok()) {
+            let pid_str = entry.file_name().to_string_lossy().to_string();
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+
+            let cmdline_path = format!("/proc/{}/cmdline", pid);
+            let Ok(cmdline) = fs::read_to_string(&cmdline_path) else {
+                continue;
+            };
+
+            if !cmdline.starts_with("cryptsetup\0")
+                && !cmdline.starts_with("cryptsetup ")
+            {
+                continue;
+            }
+
+            // Check if orphaned (PPID == 1)
+            let stat_path = format!("/proc/{}/stat", pid);
+            let Ok(stat) = fs::read_to_string(&stat_path) else {
+                continue;
+            };
+            if let Some(after_comm) = stat.rfind(')') {
+                let fields: Vec<&str> =
+                    stat[after_comm + 1..].split_whitespace().collect();
+                if fields.len() >= 2 && fields[1] == "1" {
+                    info!(
+                        "Killing orphaned cryptsetup process (PID {})",
+                        pid
+                    );
+                    if self.cmd.is_dry_run() {
+                        println!("  [dry-run] Would kill PID {}", pid);
+                        continue;
+                    }
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGTERM);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                        warn!("SIGTERM failed, sending SIGKILL to PID {}", pid);
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        }
     }
 
     /// Prompt user for device to wipe

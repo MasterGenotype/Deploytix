@@ -228,7 +228,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
         .saturating_sub(var_mib);
 
     // If home is too small, reduce other partitions deterministically
-    if home_mib == 0 || home_mib > disk_mib {
+    if home_mib == 0 {
         let mut deficit =
             (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib).saturating_sub(disk_mib);
 
@@ -810,7 +810,22 @@ pub fn apply_lvm_thin_to_layout(
     for part in layout.partitions {
         if part.is_efi || part.is_boot_fs || part.is_swap || part.is_bios_boot {
             system_parts.push(part);
-        } else if let Some(ref mp) = part.mount_point {
+        } else {
+            // Data partition: convert to a planned thin volume.
+            // mount_point may be Some("/home") or None (cleared by subvolumes
+            // for the ROOT partition).  Derive the mount point from the name
+            // when it has been cleared.
+            let mount_point = part
+                .mount_point
+                .clone()
+                .unwrap_or_else(|| {
+                    if part.name.eq_ignore_ascii_case("ROOT") {
+                        "/".to_string()
+                    } else {
+                        format!("/{}", part.name.to_lowercase())
+                    }
+                });
+
             // Convert data partition sizes to virtual thin volume sizes
             let virtual_size = if part.size_mib == 0 {
                 // Remainder partition gets a generous virtual size
@@ -824,7 +839,7 @@ pub fn apply_lvm_thin_to_layout(
             planned_volumes.push(PlannedThinVolume {
                 name: part.name.to_lowercase(),
                 virtual_size,
-                mount_point: mp.clone(),
+                mount_point,
             });
         }
     }

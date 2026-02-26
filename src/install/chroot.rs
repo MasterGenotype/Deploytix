@@ -1,14 +1,18 @@
 //! Chroot and mount operations
 
+use crate::config::Filesystem;
 use crate::disk::detection::partition_path;
-use crate::disk::formatting::{create_btrfs_subvolumes, mount_btrfs_subvolumes};
+use crate::disk::formatting::{
+    create_btrfs_subvolumes, create_zfs_datasets, create_zfs_pool, mount_btrfs_subvolumes,
+    mount_zfs_boot, mount_zfs_datasets,
+};
 use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use tracing::{info, warn};
 
 /// Mount all partitions according to the layout
-/// Handles both regular partitions and btrfs subvolume layouts
+/// Handles regular partitions, btrfs subvolume layouts, and ZFS dataset layouts
 pub fn mount_partitions(
     cmd: &CommandRunner,
     device: &str,
@@ -61,6 +65,82 @@ pub fn mount_partitions(
     }
 
     // Enable swap partitions
+    for part in &layout.partitions {
+        if part.is_swap {
+            let part_path = partition_path(device, part.number);
+            info!("Enabling swap on {}", part_path);
+            cmd.run("swapon", &[&part_path])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Format and mount a ZFS layout.
+///
+/// Creates the data pool and datasets, mounts them via legacy mountpoints,
+/// then mounts EFI, boot, and swap normally.
+pub fn mount_partitions_zfs(
+    cmd: &CommandRunner,
+    device: &str,
+    layout: &ComputedLayout,
+    _filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
+    install_root: &str,
+) -> Result<()> {
+    info!("Setting up ZFS pools and datasets on {}", device);
+
+    // Find the ROOT partition to create the data pool on
+    let root_part = layout
+        .partitions
+        .iter()
+        .find(|p| p.mount_point.as_deref() == Some("/") || p.name == "ROOT")
+        .ok_or_else(|| {
+            crate::utils::error::DeploytixError::ConfigError(
+                "No ROOT partition found for ZFS layout".to_string(),
+            )
+        })?;
+    let root_path = partition_path(device, root_part.number);
+
+    // Create the data pool and datasets
+    create_zfs_pool(cmd, &root_path)?;
+    create_zfs_datasets(cmd)?;
+
+    // Mount datasets to install root
+    if !cmd.is_dry_run() {
+        std::fs::create_dir_all(install_root)?;
+    }
+    mount_zfs_datasets(cmd, install_root)?;
+
+    // Mount boot partition
+    if *boot_filesystem == Filesystem::Zfs {
+        // Boot pool was already created by format_boot_partition()
+        mount_zfs_boot(cmd, install_root)?;
+    } else {
+        // Non-ZFS boot: mount the partition normally
+        let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
+        if let Some(boot) = boot_part {
+            let boot_dev = partition_path(device, boot.number);
+            let boot_mount = format!("{}/boot", install_root);
+            if !cmd.is_dry_run() {
+                std::fs::create_dir_all(&boot_mount)?;
+            }
+            cmd.run("mount", &[&boot_dev, &boot_mount])?;
+        }
+    }
+
+    // Mount EFI partition
+    let efi_part = layout.partitions.iter().find(|p| p.is_efi);
+    if let Some(efi) = efi_part {
+        let efi_dev = partition_path(device, efi.number);
+        let efi_mount = format!("{}/boot/efi", install_root);
+        if !cmd.is_dry_run() {
+            std::fs::create_dir_all(&efi_mount)?;
+        }
+        cmd.run("mount", &[&efi_dev, &efi_mount])?;
+    }
+
+    // Enable swap
     for part in &layout.partitions {
         if part.is_swap {
             let part_path = partition_path(device, part.number);

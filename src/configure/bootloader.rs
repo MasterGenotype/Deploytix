@@ -19,17 +19,18 @@ const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile
     lsefi lsefimmap lsefisystab lssal memdisk minicmd normal ntfs part_apple \
     part_msdos part_gpt password_pbkdf2 png probe reboot regexp search \
     search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
-    video xfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
+    video xfs zfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
 
 /// Install and configure the bootloader
 pub fn install_bootloader(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     device: &str,
+    layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
     match config.system.bootloader {
-        Bootloader::Grub => install_grub(cmd, config, device, install_root),
+        Bootloader::Grub => install_grub(cmd, config, device, layout, install_root),
     }
 }
 
@@ -51,6 +52,7 @@ fn install_grub(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     device: &str,
+    layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
     info!("Installing GRUB bootloader to {} (x86_64-efi)", device);
@@ -62,9 +64,18 @@ fn install_grub(
         ));
     }
 
-    let root_partition_num = 4;
+    // Find root partition from layout instead of hardcoding partition number
+    let root_part_def = layout
+        .partitions
+        .iter()
+        .find(|p| p.mount_point.as_deref() == Some("/"))
+        .ok_or_else(|| {
+            crate::utils::error::DeploytixError::ConfigError(
+                "No root partition found in layout".to_string(),
+            )
+        })?;
 
-    let root_part = partition_path(device, root_partition_num);
+    let root_part = partition_path(device, root_part_def.number);
     let root_uuid = if cmd.is_dry_run() {
         "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
     } else {
@@ -73,7 +84,7 @@ fn install_grub(
 
     // Configure GRUB defaults
     let uses_subvolumes = config.disk.use_subvolumes;
-    configure_grub_defaults(cmd, config, &root_uuid, None, uses_subvolumes, install_root)?;
+    configure_grub_defaults(cmd, config, &root_uuid, None, uses_subvolumes, false, install_root)?;
 
     run_grub_install(cmd, device, install_root)?;
 
@@ -127,6 +138,7 @@ fn install_grub_with_layout(
             &root_uuid,
             None,
             layout.uses_subvolumes(),
+            false,
             install_root,
         )?;
     } else if let Some(luks) = luks_part {
@@ -143,11 +155,12 @@ fn install_grub_with_layout(
             &luks_uuid,
             Some(&config.disk.luks_mapper_name),
             layout.uses_subvolumes(),
+            config.disk.boot_encryption,
             install_root,
         )?;
     } else {
         // No LUKS, no LVM thin — should not reach here from install_bootloader_with_layout
-        return install_grub(cmd, config, device, install_root);
+        return install_grub(cmd, config, device, layout, install_root);
     }
 
     // Use SecureBoot-aware install if SecureBoot is enabled
@@ -369,6 +382,7 @@ fn configure_grub_defaults(
     root_or_luks_uuid: &str,
     mapper_name: Option<&str>,
     uses_subvolumes: bool,
+    boot_encryption: bool,
     install_root: &str,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
@@ -394,6 +408,10 @@ fn configure_grub_defaults(
         // The mountcrypt hook's mount_handler handles all mounting.
         // Set root= to the mapper device so mkinitcpio knows what to pass to mount_handler.
         cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
+        cmdline_parts.push("rw".to_string());
+    } else if config.disk.filesystem == crate::config::Filesystem::Zfs {
+        // ZFS root: the zfs hook reads the root dataset from the kernel cmdline
+        cmdline_parts.push(format!("root=ZFS={}", crate::disk::formatting::ZFS_ROOT_DATASET));
         cmdline_parts.push("rw".to_string());
     } else {
         // Non-encrypted system
@@ -426,8 +444,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="{}"
         cmdline
     );
 
-    // Add cryptodisk support for encrypted systems
-    if mapper_name.is_some() {
+    // Add cryptodisk support — only needed when /boot itself is encrypted
+    // (LUKS1), so GRUB must decrypt the boot partition at early boot stage.
+    if boot_encryption {
         content.push_str("GRUB_ENABLE_CRYPTODISK=y\n");
     }
 

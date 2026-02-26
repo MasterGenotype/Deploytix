@@ -43,7 +43,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         Filesystem::Ext4 => packages.push("e2fsprogs".to_string()),
         Filesystem::Xfs => packages.push("xfsprogs".to_string()),
         Filesystem::F2fs => packages.push("f2fs-tools".to_string()),
-        Filesystem::Zfs => packages.push("zfs-utils".to_string()),
+        Filesystem::Zfs => {
+            packages.push("zfs-utils".to_string());
+            // Kernel module is separate from userspace tools
+            packages.push("zfs-linux-zen".to_string());
+        }
         Filesystem::Btrfs => {} // Already added above
     }
     // Boot filesystem tools (if different from data filesystem)
@@ -59,6 +63,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         }
         Filesystem::Zfs if config.disk.filesystem != Filesystem::Zfs => {
             packages.push("zfs-utils".to_string());
+            packages.push("zfs-linux-zen".to_string());
         }
         _ => {} // same as data filesystem or btrfs (already added)
     }

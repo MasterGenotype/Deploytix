@@ -471,7 +471,7 @@ fn default_groups() -> Vec<String> {
     ]
 }
 
-fn default_boot_filesystem() -> Filesystem {
+pub fn default_boot_filesystem() -> Filesystem {
     Filesystem::Ext4
 }
 
@@ -895,10 +895,18 @@ impl DeploymentConfig {
             ));
         }
 
-        // Subvolumes require btrfs filesystem
+        // Subvolumes require btrfs filesystem (ZFS uses datasets, not subvolumes)
         if self.disk.use_subvolumes && self.disk.filesystem != Filesystem::Btrfs {
             return Err(DeploytixError::ValidationError(
-                "Subvolumes require btrfs filesystem".to_string(),
+                "Subvolumes require btrfs filesystem (ZFS uses datasets instead)".to_string(),
+            ));
+        }
+
+        // ZFS manages its own volumes; LVM thin provisioning is redundant and
+        // unsupported when the data filesystem is ZFS.
+        if self.disk.use_lvm_thin && self.disk.filesystem == Filesystem::Zfs {
+            return Err(DeploytixError::ValidationError(
+                "LVM thin provisioning is not supported with ZFS (ZFS manages its own volumes)".to_string(),
             ));
         }
 
