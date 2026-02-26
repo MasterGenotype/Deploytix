@@ -21,6 +21,7 @@ fn binary_to_package() -> HashMap<&'static str, &'static str> {
     map.insert("mkfs.btrfs", "btrfs-progs");
     map.insert("mkfs.xfs", "xfsprogs");
     map.insert("mkfs.f2fs", "f2fs-tools");
+    map.insert("zpool", "zfs-utils");
 
     // Encryption
     map.insert("cryptsetup", "cryptsetup");
@@ -52,6 +53,7 @@ fn binary_exists(name: &str) -> bool {
 /// Determine required binaries based on configuration
 pub fn required_binaries(
     filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
@@ -64,17 +66,23 @@ pub fn required_binaries(
         "basestrap",
     ];
 
-    // Filesystem-specific
+    // Data filesystem tool
     match filesystem {
         Filesystem::Ext4 => bins.push("mkfs.ext4"),
         Filesystem::Btrfs => bins.push("mkfs.btrfs"),
         Filesystem::Xfs => bins.push("mkfs.xfs"),
+        Filesystem::Zfs => bins.push("zpool"),
         Filesystem::F2fs => bins.push("mkfs.f2fs"),
     }
 
-    // Boot partition uses ext4
-    if !bins.contains(&"mkfs.ext4") {
-        bins.push("mkfs.ext4");
+    // Boot filesystem tool (only add if different from data filesystem)
+    match boot_filesystem {
+        Filesystem::Ext4 if filesystem != &Filesystem::Ext4 => bins.push("mkfs.ext4"),
+        Filesystem::Btrfs if filesystem != &Filesystem::Btrfs => bins.push("mkfs.btrfs"),
+        Filesystem::Xfs if filesystem != &Filesystem::Xfs => bins.push("mkfs.xfs"),
+        Filesystem::Zfs if filesystem != &Filesystem::Zfs => bins.push("zpool"),
+        Filesystem::F2fs if filesystem != &Filesystem::F2fs => bins.push("mkfs.f2fs"),
+        _ => {} // already covered by data filesystem match
     }
 
     // Encryption
@@ -103,11 +111,12 @@ pub fn required_binaries(
 /// Check for missing dependencies and return list of missing packages
 pub fn check_dependencies(
     filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
 ) -> Vec<String> {
-    let required = required_binaries(filesystem, encryption, use_lvm_thin, bootloader);
+    let required = required_binaries(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
     let bin_to_pkg = binary_to_package();
 
     let mut missing_packages: Vec<String> = Vec::new();
@@ -134,11 +143,12 @@ pub fn check_dependencies(
 pub fn ensure_dependencies(
     cmd: &CommandRunner,
     filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
 ) -> Result<()> {
-    let required = required_binaries(filesystem, encryption, use_lvm_thin, bootloader);
+    let required = required_binaries(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
     let bin_to_pkg = binary_to_package();
 
     // Collect missing binaries with their providing packages
@@ -190,7 +200,7 @@ pub fn ensure_dependencies(
     }
 
     // Verify installation
-    let still_missing = check_dependencies(filesystem, encryption, use_lvm_thin, bootloader);
+    let still_missing = check_dependencies(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
     if !still_missing.is_empty() {
         return Err(crate::utils::error::DeploytixError::ConfigError(format!(
             "Failed to install some dependencies: {}",

@@ -36,13 +36,31 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         "linux-zen-headers".to_string(),
     ]);
 
-    // Filesystem tools
+    // Filesystem tools — always include btrfs-progs as it is commonly needed
     packages.push("btrfs-progs".to_string());
+    // Data filesystem tools
     match config.disk.filesystem {
         Filesystem::Ext4 => packages.push("e2fsprogs".to_string()),
         Filesystem::Xfs => packages.push("xfsprogs".to_string()),
         Filesystem::F2fs => packages.push("f2fs-tools".to_string()),
-        Filesystem::Btrfs => {} // Already added
+        Filesystem::Zfs => packages.push("zfs-utils".to_string()),
+        Filesystem::Btrfs => {} // Already added above
+    }
+    // Boot filesystem tools (if different from data filesystem)
+    match config.disk.boot_filesystem {
+        Filesystem::Ext4 if config.disk.filesystem != Filesystem::Ext4 => {
+            packages.push("e2fsprogs".to_string());
+        }
+        Filesystem::Xfs if config.disk.filesystem != Filesystem::Xfs => {
+            packages.push("xfsprogs".to_string());
+        }
+        Filesystem::F2fs if config.disk.filesystem != Filesystem::F2fs => {
+            packages.push("f2fs-tools".to_string());
+        }
+        Filesystem::Zfs if config.disk.filesystem != Filesystem::Zfs => {
+            packages.push("zfs-utils".to_string());
+        }
+        _ => {} // same as data filesystem or btrfs (already added)
     }
 
     // Bootloader
