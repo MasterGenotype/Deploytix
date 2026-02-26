@@ -67,15 +67,16 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
             DeploytixError::FilesystemError(format!("Failed to format EFI partition: {}", e))
         })
 }
-/// Format BOOT as BTRFS
+/// Format the BOOT partition as BTRFS
 ///
-/// # Note
-/// This function is currently unreachable: no layout definition sets
-/// `is_bios_boot = true` on a partition.  A real GPT BIOS Boot partition
-/// (type 21686148-...) stores GRUB's core image as raw data and must
-/// **not** carry a filesystem, so callers should skip such partitions
-/// rather than format them.
-#[allow(dead_code)]
+/// The BOOT partition (`is_boot_fs = true`) holds the GRUB bootloader,
+/// kernel images, and initramfs.  It is always formatted as btrfs regardless
+/// of which filesystem the user configured for data partitions, because GRUB
+/// reads /boot directly and the installer relies on btrfs features there.
+///
+/// This is distinct from a raw GPT BIOS Boot partition (type GUID
+/// 21686148-…), which stores GRUB's core image as raw sectors and must
+/// **not** carry a filesystem at all.
 pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
     info!("Formatting {} as BTRFS (BOOT)", partition);
 
@@ -120,6 +121,11 @@ pub fn format_all_partitions(
 
         if part.is_efi {
             format_efi(cmd, &part_path)?;
+        } else if part.is_boot_fs {
+            // The /boot partition always uses btrfs so that GRUB, kernel images,
+            // and initramfs are stored on a consistent filesystem regardless of
+            // what the user chose for the data partitions.
+            format_boot(cmd, &part_path)?;
         } else if part.is_swap {
             format_swap(cmd, &part_path, Some(&part.name))?;
         } else if part.is_luks {
@@ -129,9 +135,9 @@ pub fn format_all_partitions(
                 part_path
             );
         } else if part.is_bios_boot {
-            // BIOS Boot partitions (GPT type 21686148-...) hold GRUB's core image
-            // as raw data and must NOT carry a filesystem.  Skip them here; the
-            // bootloader installer writes the image directly.
+            // Raw GPT BIOS Boot partitions (type 21686148-...) hold GRUB's core
+            // image as raw sectors and must NOT carry a filesystem.  Skip them
+            // here; the bootloader installer writes the image directly.
             info!(
                 "Skipping {} (BIOS Boot partition, no filesystem needed)",
                 part_path
