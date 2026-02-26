@@ -287,6 +287,7 @@ impl DeploytixGui {
                     "log".to_string(),
                 ],
                 sudoer: self.sudoer,
+                encrypt_home: false,
             },
             network: NetworkConfig {
                 backend: self.network_backend.clone(),
