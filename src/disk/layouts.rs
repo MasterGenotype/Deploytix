@@ -85,11 +85,19 @@ pub struct PartitionDef {
     pub is_efi: bool,
     /// Whether this is a LUKS container partition
     pub is_luks: bool,
-    /// Whether this is a BIOS Boot partition
+        /// Whether this partition has the Legacy BIOS Bootable attribute set
+    /// (the "bootable" flag from fdisk/sfdisk expert mode — GPT attribute bit 2).
+    /// This is set on the /boot filesystem partition so that GRUB can locate
+    /// it on BIOS+GPT systems.  Not to be confused with a GPT BIOS Boot
+    /// partition (type ef02), which holds core.img as raw data without any
+    /// filesystem.
     pub is_bios_boot: bool,
-    /// Whether this is a BIOS FileSystem Partition
+    /// Whether this is the /boot filesystem partition (stores kernel,
+    /// initramfs, and grub configuration).  Formatted as ext4.
     pub is_boot_fs: bool,
-    /// Additional attributes (e.g., LegacyBIOSBootable)
+    /// Additional GPT partition attributes passed verbatim to sfdisk.
+    /// The LegacyBIOSBootable attribute is generated automatically from
+    /// is_bios_boot and must not be duplicated here.
     pub attributes: Option<String>,
 }
 
@@ -292,9 +300,9 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
         PartitionDef {
             number: 3,
@@ -412,9 +420,9 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
         PartitionDef {
             number: 3,
@@ -504,9 +512,9 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
     ];
 
@@ -617,9 +625,9 @@ fn compute_custom_layout(
             is_swap: false,
             is_efi: false,
             is_luks: false,
-            is_bios_boot: false,
+            is_bios_boot: true,
             is_boot_fs: true,
-            attributes: Some("LegacyBIOSBootable".to_string()),
+            attributes: None,
         },
     ];
 

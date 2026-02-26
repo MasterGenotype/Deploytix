@@ -56,8 +56,13 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> Result<S
             part_path, current_sector, size_sectors, part.type_guid, part_uuid, part.name
         );
 
-        // Add attributes if present
-        if let Some(ref attrs) = part.attributes {
+        // Add the Legacy BIOS Bootable attribute when flagged (fdisk/sfdisk
+        // expert-mode "bootable" toggle — GPT attribute bit 2).  This is what
+        // tells the firmware which partition to use for BIOS booting on GPT
+        // disks and is separate from any filesystem placed on the partition.
+        if part.is_bios_boot {
+            line.push_str(", attrs=\"LegacyBIOSBootable\"");
+        } else if let Some(ref attrs) = part.attributes {
             line.push_str(&format!(", attrs=\"{}\"", attrs));
         }
 

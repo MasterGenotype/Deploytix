@@ -67,14 +67,23 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
             DeploytixError::FilesystemError(format!("Failed to format EFI partition: {}", e))
         })
 }
-/// Format BOOT as BTRFS
-pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
-    info!("Formatting {} as BTRFS (BOOT)", partition);
+/// Format the /boot filesystem partition as ext4.
+///
+/// The /boot partition stores the kernel, initramfs, and GRUB configuration.
+/// ext4 is used here because GRUB must read this partition during early boot
+/// (before it loads its own filesystem drivers) and ext4 is the most
+/// universally supported filesystem for that purpose.
+///
+/// Note: this is distinct from a GPT BIOS Boot partition (type ef02), which
+/// holds GRUB's core.img as raw binary data and must never have a filesystem
+/// applied to it.
+pub fn format_boot_fs(cmd: &CommandRunner, partition: &str) -> Result<()> {
+    info!("Formatting {} as ext4 (/boot)", partition);
 
-    cmd.run("mkfs.btrfs", &["-f", "-L", "BOOT", partition])
+    cmd.run("mkfs.ext4", &["-F", "-L", "BOOT", partition])
         .map(|_| ())
         .map_err(|e| {
-            DeploytixError::FilesystemError(format!("Failed to format BOOT Partition: {}", e))
+            DeploytixError::FilesystemError(format!("Failed to format /boot partition: {}", e))
         })
 }
 
@@ -111,6 +120,7 @@ pub fn format_all_partitions(
         let part_path = partition_path(device, part.number);
 
         if part.is_efi {
+            // EFI System Partition: must be FAT32 so UEFI firmware can read .efi files
             format_efi(cmd, &part_path)?;
         } else if part.is_swap {
             format_swap(cmd, &part_path, Some(&part.name))?;
@@ -120,8 +130,22 @@ pub fn format_all_partitions(
                 "Skipping {} (LUKS partition, formatted by encryption module)",
                 part_path
             );
+        } else if part.is_boot_fs {
+            // /boot filesystem partition: format as ext4 so GRUB can read
+            // the kernel, initramfs, and grub.cfg during early boot.
+            // The LegacyBIOSBootable (is_bios_boot) attribute may also be
+            // set on this partition — that is a GPT attribute flag and does
+            // not affect what filesystem is placed here.
+            format_boot_fs(cmd, &part_path)?;
         } else if part.is_bios_boot {
-            format_boot(cmd, &part_path)?;
+            // A GPT BIOS Boot partition (type ef02) holds GRUB's core.img as
+            // raw binary data embedded directly by grub-install.  It must
+            // NOT have any filesystem applied — doing so would overwrite the
+            // embedded stage and break BIOS booting.
+            info!(
+                "Skipping {} (BIOS Boot partition — contains raw GRUB core.img, no filesystem)",
+                part_path
+            );
         } else {
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;
         }

@@ -9,7 +9,7 @@ use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    create_btrfs_filesystem, format_all_partitions, format_boot, format_efi, format_swap,
+    create_btrfs_filesystem, format_all_partitions, format_boot_fs, format_efi, format_swap,
 };
 use crate::disk::layouts::{
     compute_layout_from_config, get_luks_partitions, print_layout_summary, ComputedLayout,
@@ -604,9 +604,9 @@ impl Installer {
             format_swap(&self.cmd, &swap_device, Some("SWAP"))?;
         }
 
-        // Format BOOT partition as BTRFS
+        // Format /boot partition as ext4
         if let Some(ref boot_container) = self.luks_boot_container {
-            format_boot(&self.cmd, &boot_container.mapped_path)?;
+            format_boot_fs(&self.cmd, &boot_container.mapped_path)?;
         } else {
             let boot_part = layout
                 .partitions
@@ -616,7 +616,7 @@ impl Installer {
                     DeploytixError::ConfigError("No Boot partition found in layout".to_string())
                 })?;
             let boot_device = partition_path(&self.config.disk.device, boot_part.number);
-            format_boot(&self.cmd, &boot_device)?;
+            format_boot_fs(&self.cmd, &boot_device)?;
         }
 
         // Format EFI partition as FAT32
@@ -923,10 +923,10 @@ impl Installer {
             }
         }
 
-        // Format BOOT partition as btrfs
+        // Format /boot partition as ext4
         if let Some(ref boot_container) = self.luks_boot_container {
             // Encrypted boot: format the mapped device
-            format_boot(&self.cmd, &boot_container.mapped_path)?;
+            format_boot_fs(&self.cmd, &boot_container.mapped_path)?;
         } else {
             let boot_part = layout
                 .partitions
@@ -936,7 +936,7 @@ impl Installer {
                     DeploytixError::ConfigError("No Boot partition found in layout".to_string())
                 })?;
             let boot_device = partition_path(&self.config.disk.device, boot_part.number);
-            format_boot(&self.cmd, &boot_device)?;
+            format_boot_fs(&self.cmd, &boot_device)?;
         }
 
         // Format EFI partition as FAT32
