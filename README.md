@@ -1,5 +1,7 @@
 # Deploytix
 
+Can also be built into a package and included in a ISO for installation via bootable media.
+
 A portable Rust CLI and GUI application for automated deployment of **Artix Linux** to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, and optional LUKS2 encryption.
 
 > **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap`, `artix-chroot`, `artools`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
