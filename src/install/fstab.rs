@@ -1,6 +1,6 @@
 //! Fstab generation
 
-use crate::config::SwapType;
+use crate::config::{Filesystem, SwapType};
 use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
@@ -20,6 +20,7 @@ pub fn generate_fstab(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
+    filesystem: &Filesystem,
 ) -> Result<()> {
     // Check if this layout uses subvolumes
     if layout.uses_subvolumes() {
@@ -57,14 +58,22 @@ pub fn generate_fstab(
         if part.is_swap {
             fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
         } else if let Some(ref mount_point) = part.mount_point {
-            // Determine filesystem type and options
-            let (fstype, options, pass) = if part.is_efi {
-                ("vfat", "defaults,noatime", 2)
-            } else if mount_point == "/" {
-                ("btrfs", "defaults,noatime,compress=zstd", 1)
+            // Determine filesystem type and options based on configuration
+            let fstype;
+            let options;
+            let pass;
+            if part.is_efi {
+                fstype = "vfat".to_string();
+                options = "defaults,noatime".to_string();
+                pass = 2;
             } else {
-                ("btrfs", "defaults,noatime,compress=zstd", 2)
-            };
+                fstype = filesystem.to_string();
+                options = match filesystem {
+                    Filesystem::Btrfs => "defaults,noatime,compress=zstd".to_string(),
+                    _ => "defaults,noatime".to_string(),
+                };
+                pass = if mount_point == "/" { 1 } else { 2 };
+            }
 
             fstab_content.push_str(&format!(
                 "UUID={}\t{}\t{}\t{}\t0\t{}\n",
@@ -90,7 +99,11 @@ fn generate_fstab_with_subvolumes(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    let subvolumes = layout.subvolumes.as_ref().unwrap();
+    let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
+        crate::utils::error::DeploytixError::ConfigError(
+            "Layout reports subvolumes in use but subvolumes field is None".to_string(),
+        )
+    })?;
     info!(
         "Generating /etc/fstab with {} btrfs subvolumes",
         subvolumes.len()
@@ -160,10 +173,11 @@ fn generate_fstab_with_subvolumes(
                 uuid
             ));
         } else if let Some(ref mount_point) = part.mount_point {
-            let fstype = if part.is_efi { "vfat" } else { "btrfs" };
+            // is_efi and is_swap are already handled above; any remaining
+            // partition with a mount point is a regular data partition.
             content.push_str(&format!(
-                "\nUUID={}  {}  {}  defaults,noatime  0  2\n",
-                uuid, mount_point, fstype
+                "\nUUID={}  {}  btrfs  defaults,noatime  0  2\n",
+                uuid, mount_point
             ));
         }
     }

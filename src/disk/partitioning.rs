@@ -10,10 +10,15 @@ use tracing::info;
 use uuid::Uuid;
 
 /// Generate sfdisk script for a partition layout
-pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
-    let device_info = get_device_info(device).ok();
+pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> Result<String> {
+    let device_info = get_device_info(device).map_err(|e| {
+        DeploytixError::PartitionError(format!(
+            "Cannot read device info for {}: {}",
+            device, e
+        ))
+    })?;
     let sector_size = 512u64; // Default, could be read from sysfs
-    let total_sectors = device_info.map(|d| d.size_bytes / sector_size).unwrap_or(0);
+    let total_sectors = device_info.size_bytes / sector_size;
 
     let first_lba = 2048u64;
     let last_lba = total_sectors.saturating_sub(34);
@@ -66,7 +71,7 @@ pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> String {
         }
     }
 
-    script
+    Ok(script)
 }
 
 /// Apply partition layout to a disk using sfdisk
@@ -78,7 +83,7 @@ pub fn apply_partitions(cmd: &CommandRunner, device: &str, layout: &ComputedLayo
     );
 
     // Generate sfdisk script
-    let script = generate_sfdisk_script(device, layout);
+    let script = generate_sfdisk_script(device, layout)?;
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would apply sfdisk script:");

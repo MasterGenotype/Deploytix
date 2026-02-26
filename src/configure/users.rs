@@ -4,6 +4,7 @@ use crate::config::DeploymentConfig;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
 /// Create user account
@@ -55,9 +56,17 @@ pub fn create_user(
         cmd.run_in_chroot(install_root, &format!("chmod 700 /home/{}", username))?;
     }
 
-    // Set password using chpasswd
-    let chpasswd_cmd = format!("echo '{}:{}' | chpasswd", username, password);
-    cmd.run_in_chroot(install_root, &chpasswd_cmd)?;
+    // Set password using chpasswd, passing credentials via a temp file to
+    // avoid shell injection when the password contains single quotes or
+    // other shell metacharacters.
+    let temp_path = format!("{}/tmp/.deploytix_chpasswd", install_root);
+    fs::write(&temp_path, format!("{}:{}", username, password))?;
+    let mut perms = fs::metadata(&temp_path)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(&temp_path, perms)?;
+    let result = cmd.run_in_chroot(install_root, "chpasswd < /tmp/.deploytix_chpasswd");
+    let _ = fs::remove_file(&temp_path);
+    result?;
 
     // Configure sudoers if user should be sudoer
     if config.user.sudoer {
@@ -113,8 +122,15 @@ pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str
         return Ok(());
     }
 
-    let chpasswd_cmd = format!("echo 'root:{}' | chpasswd", password);
-    cmd.run_in_chroot(install_root, &chpasswd_cmd)?;
+    // Pass credentials via a temp file to avoid shell injection.
+    let temp_path = format!("{}/tmp/.deploytix_chpasswd", install_root);
+    fs::write(&temp_path, format!("root:{}", password))?;
+    let mut perms = fs::metadata(&temp_path)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(&temp_path, perms)?;
+    let result = cmd.run_in_chroot(install_root, "chpasswd < /tmp/.deploytix_chpasswd");
+    let _ = fs::remove_file(&temp_path);
+    result?;
 
     Ok(())
 }
