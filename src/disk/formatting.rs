@@ -50,6 +50,22 @@ pub fn format_partition(
             args.push(partition);
             cmd.run("mkfs.f2fs", &args)
         }
+        Filesystem::Zfs => {
+            // ZFS uses zpool create rather than a traditional mkfs tool.
+            // The pool name is taken from the label when provided, otherwise
+            // derived from the partition path's last component.
+            let pool_name = label.unwrap_or_else(|| {
+                partition
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("zpool")
+            });
+            cmd.run(
+                "zpool",
+                &["create", "-f", "-m", "none", "-o", "ashift=12",
+                  "-O", "atime=off", pool_name, partition],
+            )
+        }
     };
 
     result.map(|_| ()).map_err(|e| {
@@ -67,14 +83,25 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
             DeploytixError::FilesystemError(format!("Failed to format EFI partition: {}", e))
         })
 }
-/// Format BOOT as BTRFS
-pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
-    info!("Formatting {} as BTRFS (BOOT)", partition);
-
-    cmd.run("mkfs.btrfs", &["-f", "-L", "BOOT", partition])
-        .map(|_| ())
+/// Format the /boot filesystem partition with the configured boot filesystem.
+///
+/// The /boot partition stores the kernel, initramfs, and GRUB configuration.
+/// It must NOT be confused with the raw BIOS Boot partition (core.img area),
+/// which carries no filesystem and must never be formatted.
+/// In standalone GRUB mode the .efi binary is placed on the EFI (FAT32)
+/// partition; the /boot partition is still needed for kernel/initramfs files.
+pub fn format_boot_partition(
+    cmd: &CommandRunner,
+    partition: &str,
+    boot_filesystem: &Filesystem,
+) -> Result<()> {
+    info!(
+        "Formatting {} as {} (BOOT)",
+        partition, boot_filesystem
+    );
+    format_partition(cmd, partition, boot_filesystem, Some("BOOT"))
         .map_err(|e| {
-            DeploytixError::FilesystemError(format!("Failed to format BOOT Partition: {}", e))
+            DeploytixError::FilesystemError(format!("Failed to format BOOT partition: {}", e))
         })
 }
 
@@ -93,18 +120,26 @@ pub fn format_swap(cmd: &CommandRunner, partition: &str, label: Option<&str>) ->
     })
 }
 
-/// Format all partitions according to the layout
+/// Format all partitions according to the layout.
+///
+/// `filesystem` applies to data partitions; `boot_filesystem` applies to the
+/// /boot partition (`is_boot_fs`).  The EFI partition is always FAT32.
+/// Partitions flagged `is_bios_boot` only receive the GPT LegacyBIOSBootable
+/// attribute (set by the sfdisk script); they are formatted according to
+/// `is_boot_fs` — not skipped or overridden.
 pub fn format_all_partitions(
     cmd: &CommandRunner,
     device: &str,
     layout: &ComputedLayout,
     filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     info!(
-        "Formatting {} partitions on {} (default fs: {})",
+        "Formatting {} partitions on {} (data fs: {}, boot fs: {})",
         layout.partitions.len(),
         device,
-        filesystem
+        filesystem,
+        boot_filesystem,
     );
 
     for part in &layout.partitions {
@@ -115,13 +150,15 @@ pub fn format_all_partitions(
         } else if part.is_swap {
             format_swap(cmd, &part_path, Some(&part.name))?;
         } else if part.is_luks {
-            // LUKS partitions are handled separately by encryption module
+            // LUKS partitions are handled separately by the encryption module
             info!(
                 "Skipping {} (LUKS partition, formatted by encryption module)",
                 part_path
             );
-        } else if part.is_bios_boot {
-            format_boot(cmd, &part_path)?;
+        } else if part.is_boot_fs {
+            // /boot filesystem: kernel, initramfs, and GRUB config live here.
+            // Formatted with the chosen boot filesystem (not the data filesystem).
+            format_boot_partition(cmd, &part_path, boot_filesystem)?;
         } else {
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;
         }

@@ -10,12 +10,30 @@ use tracing::info;
 pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
     let mut modules = Vec::new();
 
-    // Filesystem modules
+    // Data filesystem modules
     match config.disk.filesystem {
         Filesystem::Btrfs => modules.push("btrfs".to_string()),
         Filesystem::Ext4 => modules.push("ext4".to_string()),
         Filesystem::Xfs => modules.push("xfs".to_string()),
+        Filesystem::Zfs => {} // ZFS is loaded via the zfs hook, not as a static module
         Filesystem::F2fs => modules.push("f2fs".to_string()),
+    }
+
+    // Boot filesystem modules (if different from data filesystem)
+    match config.disk.boot_filesystem {
+        Filesystem::Btrfs if config.disk.filesystem != Filesystem::Btrfs => {
+            modules.push("btrfs".to_string());
+        }
+        Filesystem::Ext4 if config.disk.filesystem != Filesystem::Ext4 => {
+            modules.push("ext4".to_string());
+        }
+        Filesystem::Xfs if config.disk.filesystem != Filesystem::Xfs => {
+            modules.push("xfs".to_string());
+        }
+        Filesystem::F2fs if config.disk.filesystem != Filesystem::F2fs => {
+            modules.push("f2fs".to_string());
+        }
+        _ => {} // same as data filesystem or ZFS (hook-based)
     }
 
     // Always include vfat and dependencies for EFI partition mounting in initramfs
