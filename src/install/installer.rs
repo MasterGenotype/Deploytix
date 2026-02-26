@@ -412,7 +412,13 @@ impl Installer {
         info!("[Phase 3/6] Generating /etc/fstab with partition UUIDs");
 
         let layout = self.layout.as_ref().unwrap();
-        generate_fstab(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
+        generate_fstab(
+            &self.cmd,
+            &self.config.disk.device,
+            layout,
+            INSTALL_ROOT,
+            &self.config.disk.filesystem,
+        )?;
 
         Ok(())
     }
