@@ -80,7 +80,11 @@ fn mount_partitions_with_subvolumes(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
-    let subvolumes = layout.subvolumes.as_ref().unwrap();
+    let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
+        crate::utils::error::DeploytixError::ConfigError(
+            "Layout reports subvolumes in use but subvolumes field is None".to_string(),
+        )
+    })?;
     info!("Setting up btrfs subvolumes on {} (root partition)", device);
 
     // Find the ROOT partition
@@ -96,10 +100,10 @@ fn mount_partitions_with_subvolumes(
 
     let root_path = partition_path(device, root_part.number);
 
-    // Create subvolumes on the ROOT partition
-    // This temporarily mounts the raw btrfs, creates subvolumes, then unmounts
-    let temp_mount = "/tmp/deploytix_btrfs_setup";
-    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount)?;
+    // Include the process ID in the temp path so concurrent installer instances
+    // (e.g., integration tests) don't clobber each other's mounts.
+    let temp_mount = format!("/tmp/deploytix_btrfs_setup_{}", std::process::id());
+    create_btrfs_subvolumes(cmd, &root_path, subvolumes, &temp_mount)?;
 
     // Now mount the subvolumes to their final locations
     mount_btrfs_subvolumes(cmd, &root_path, subvolumes, install_root)?;

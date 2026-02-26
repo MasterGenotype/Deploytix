@@ -96,6 +96,16 @@ impl Installer {
         }
     }
 
+    /// Return a reference to the computed layout, or an error if it has not
+    /// been initialized yet (i.e., if `prepare()` was not called first).
+    fn layout(&self) -> Result<&ComputedLayout> {
+        self.layout.as_ref().ok_or_else(|| {
+            DeploytixError::ConfigError(
+                "Disk layout not initialized; ensure prepare() ran successfully".to_string(),
+            )
+        })
+    }
+
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
         info!(
@@ -364,7 +374,7 @@ impl Installer {
             self.config.disk.device, self.config.disk.layout
         );
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
 
         Ok(())
@@ -377,7 +387,7 @@ impl Installer {
             self.config.disk.device, self.config.disk.filesystem
         );
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         format_all_partitions(
             &self.cmd,
             &self.config.disk.device,
@@ -392,7 +402,7 @@ impl Installer {
     fn mount_partitions(&self) -> Result<()> {
         info!("[Phase 2/6] Mounting partitions to {}", INSTALL_ROOT);
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         mount_partitions(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
 
         Ok(())
@@ -411,7 +421,7 @@ impl Installer {
     fn generate_fstab(&self) -> Result<()> {
         info!("[Phase 3/6] Generating /etc/fstab with partition UUIDs");
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         generate_fstab(
             &self.cmd,
             &self.config.disk.device,
@@ -441,7 +451,7 @@ impl Installer {
 
         // Bootloader (use layout-aware version when encryption or LVM thin is active)
         if self.config.disk.encryption || self.config.disk.use_lvm_thin {
-            let layout = self.layout.as_ref().unwrap();
+            let layout = self.layout()?;
             configure::bootloader::install_bootloader_with_layout(
                 &self.cmd,
                 &self.config,
@@ -535,7 +545,14 @@ impl Installer {
             self.config.disk.device
         );
 
-        let layout = self.layout.as_ref().unwrap();
+        // Direct field access lets the borrow checker see that only self.layout
+        // is borrowed, allowing other fields (luks_containers, luks_boot_container)
+        // to be mutated while layout is still in scope.
+        let layout = self.layout.as_ref().ok_or_else(|| {
+            DeploytixError::ConfigError(
+                "Disk layout not initialized; ensure prepare() ran successfully".to_string(),
+            )
+        })?;
 
         // Get all LUKS partitions from layout
         let luks_parts: Vec<(u32, &str)> = get_luks_partitions(layout)
@@ -590,7 +607,7 @@ impl Installer {
     fn format_multi_volume_partitions(&self) -> Result<()> {
         info!("[Phase 2/6] Formatting multi-volume encrypted partitions");
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
 
         // Format each LUKS-mapped device as BTRFS
         for container in &self.luks_containers {
@@ -637,7 +654,7 @@ impl Installer {
             INSTALL_ROOT
         );
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
 
         // Mount in order: root first, then usr, var, home
         // Find root container
@@ -742,7 +759,7 @@ impl Installer {
     fn generate_fstab_multi_volume(&self) -> Result<()> {
         info!("[Phase 3/6] Generating /etc/fstab for multi-volume encrypted system");
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
 
         generate_fstab_multi_volume(
             &self.cmd,
@@ -769,7 +786,7 @@ impl Installer {
 
     /// Install custom mkinitcpio hooks
     fn install_custom_hooks(&self) -> Result<()> {
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
 
         configure::hooks::install_custom_hooks(&self.cmd, &self.config, layout, INSTALL_ROOT)
     }
@@ -783,7 +800,14 @@ impl Installer {
             self.config.disk.device
         );
 
-        let layout = self.layout.as_ref().unwrap();
+        // Direct field access lets the borrow checker see that only self.layout
+        // is borrowed, allowing other fields (luks_lvm_container, lvm_thin_volumes)
+        // to be mutated while layout is still in scope.
+        let layout = self.layout.as_ref().ok_or_else(|| {
+            DeploytixError::ConfigError(
+                "Disk layout not initialized; ensure prepare() ran successfully".to_string(),
+            )
+        })?;
         let vg_name = &self.config.disk.lvm_vg_name;
         let pool_name = &self.config.disk.lvm_thin_pool_name;
         let pool_percent = self.config.disk.lvm_thin_pool_percent;
@@ -905,7 +929,7 @@ impl Installer {
     fn format_lvm_volumes(&self) -> Result<()> {
         info!("[Phase 2/6] Formatting LVM thin volumes");
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         let vg_name = &self.config.disk.lvm_vg_name;
 
         // Format each thin volume as btrfs
@@ -954,7 +978,7 @@ impl Installer {
     fn mount_lvm_volumes(&self) -> Result<()> {
         info!("[Phase 2/6] Mounting LVM thin volumes to {}", INSTALL_ROOT);
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         let vg_name = &self.config.disk.lvm_vg_name;
 
         // Ensure VG is activated and LVs are visible
@@ -1027,7 +1051,7 @@ impl Installer {
     fn generate_fstab_lvm_thin(&self) -> Result<()> {
         info!("[Phase 3/6] Generating /etc/fstab for LVM thin layout");
 
-        let layout = self.layout.as_ref().unwrap();
+        let layout = self.layout()?;
         let vg_name = &self.config.disk.lvm_vg_name;
 
         // Pass encrypted boot mapped device path if boot encryption is enabled

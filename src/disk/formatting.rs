@@ -68,6 +68,14 @@ pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
         })
 }
 /// Format BOOT as BTRFS
+///
+/// # Note
+/// This function is currently unreachable: no layout definition sets
+/// `is_bios_boot = true` on a partition.  A real GPT BIOS Boot partition
+/// (type 21686148-...) stores GRUB's core image as raw data and must
+/// **not** carry a filesystem, so callers should skip such partitions
+/// rather than format them.
+#[allow(dead_code)]
 pub fn format_boot(cmd: &CommandRunner, partition: &str) -> Result<()> {
     info!("Formatting {} as BTRFS (BOOT)", partition);
 
@@ -121,7 +129,13 @@ pub fn format_all_partitions(
                 part_path
             );
         } else if part.is_bios_boot {
-            format_boot(cmd, &part_path)?;
+            // BIOS Boot partitions (GPT type 21686148-...) hold GRUB's core image
+            // as raw data and must NOT carry a filesystem.  Skip them here; the
+            // bootloader installer writes the image directly.
+            info!(
+                "Skipping {} (BIOS Boot partition, no filesystem needed)",
+                part_path
+            );
         } else {
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;
         }

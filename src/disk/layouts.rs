@@ -122,7 +122,7 @@ pub struct ComputedLayout {
 impl ComputedLayout {
     /// Check if this layout uses btrfs subvolumes
     pub fn uses_subvolumes(&self) -> bool {
-        self.subvolumes.is_some() && !self.subvolumes.as_ref().unwrap().is_empty()
+        self.subvolumes.as_ref().map_or(false, |v| !v.is_empty())
     }
 
     /// Check if this layout has LVM thin provisioning
@@ -227,8 +227,8 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
         .saturating_sub(usr_mib)
         .saturating_sub(var_mib);
 
-    // If home is too small, reduce other partitions deterministically
-    if home_mib == 0 || home_mib > disk_mib {
+    // If home would end up with no space, reduce larger partitions to make room
+    if home_mib == 0 {
         let mut deficit =
             (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib).saturating_sub(disk_mib);
 

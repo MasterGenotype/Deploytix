@@ -106,12 +106,12 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         // LVM thin has a separate /usr thin volume that must be mounted before init.
         hooks.push("usr".to_string());
 
-        // Resume hook for hibernation
+        // Resume hook for hibernation — must be inserted BEFORE filesystems.
         if config.system.hibernation {
             let filesystems_idx = hooks
                 .iter()
                 .position(|h| h == "filesystems")
-                .unwrap_or(hooks.len());
+                .expect("filesystems hook must be present before resume insertion");
             hooks.insert(filesystems_idx, "resume".to_string());
         }
     } else {
@@ -128,12 +128,12 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             hooks.push("usr".to_string());
         }
 
-        // Resume hook for hibernation
+        // Resume hook for hibernation — must be inserted BEFORE filesystems.
         if config.system.hibernation {
             let filesystems_idx = hooks
                 .iter()
                 .position(|h| h == "filesystems")
-                .unwrap_or(hooks.len());
+                .expect("filesystems hook must be present before resume insertion");
             hooks.insert(filesystems_idx, "resume".to_string());
         }
     }
