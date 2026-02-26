@@ -84,6 +84,29 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     Ok(())
 }
 
+/// Generate KDE-specific desktop file content
+pub fn desktop_file_content(bindir: &str) -> String {
+    format!(
+        r#"[Desktop Entry]
+Type=Application
+Name=Deploytix
+GenericName=Artix Linux Installer
+Comment=Automated Artix Linux deployment installer
+Exec=pkexec {}/deploytix-gui
+Icon=system-software-install
+NoDisplay=false
+StartupNotify=true
+Terminal=false
+Categories=System;Settings;Qt;KDE;
+Keywords=linux;installer;artix;deployment;kde;plasma;
+X-KDE-SubstituteUID=false
+X-DBUS-StartupType=
+X-KDE-StartupNotify=true
+"#,
+        bindir
+    )
+}
+
 /// Configure SDDM display manager
 fn configure_sddm(_cmd: &CommandRunner, install_root: &str) -> Result<()> {
     info!("Configuring SDDM");

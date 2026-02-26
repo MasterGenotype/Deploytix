@@ -39,10 +39,10 @@ portable:
 	@file $(PORTABLE_BIN)
 
 ## Install GUI binary to $(BINDIR)  [default: ~/.local/bin]
-install: gui
+install: build gui
 	@mkdir -p $(BINDIR) $(APPDIR)
 	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
-	sed 's|%BINDIR%|$(BINDIR)|g' $(DESKTOP_FILE) > $(APPDIR)/$(DESKTOP_FILE)
+	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output $(APPDIR)/$(DESKTOP_FILE)
 	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
 	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
 	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)
@@ -61,7 +61,7 @@ install-all: build gui
 	@mkdir -p $(BINDIR) $(APPDIR)
 	install -m 755 $(CLI_BIN) $(BINDIR)/deploytix
 	install -m 755 $(GUI_BIN) $(BINDIR)/deploytix-gui
-	sed 's|%BINDIR%|$(BINDIR)|g' $(DESKTOP_FILE) > $(APPDIR)/$(DESKTOP_FILE)
+	$(CLI_BIN) generate-desktop-file --bindir $(BINDIR) --output $(APPDIR)/$(DESKTOP_FILE)
 	chmod 644 $(APPDIR)/$(DESKTOP_FILE)
 	sudo install -m 644 $(POLKIT_FILE) $(POLKITDIR)/$(POLKIT_FILE)
 	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(POLKIT_FILE)

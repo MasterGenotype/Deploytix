@@ -132,6 +132,15 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("thin-provisioning-tools".to_string());
     }
 
+    // gocryptfs encrypted home directory (if enabled)
+    if config.user.encrypt_home {
+        packages.extend([
+            "gocryptfs".to_string(),
+            "pam_mount".to_string(),
+            "fuse2".to_string(),
+        ]);
+    }
+
     // SecureBoot tools (if enabled)
     if config.system.secureboot {
         match config.system.secureboot_method {

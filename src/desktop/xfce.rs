@@ -41,3 +41,24 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     info!("XFCE installation complete");
     Ok(())
 }
+
+/// Generate XFCE-specific desktop file content
+pub fn desktop_file_content(bindir: &str) -> String {
+    format!(
+        r#"[Desktop Entry]
+Type=Application
+Name=Deploytix
+GenericName=Artix Linux Installer
+Comment=Automated Artix Linux deployment installer
+Exec=pkexec {}/deploytix-gui
+Icon=system-software-install
+NoDisplay=false
+StartupNotify=true
+Terminal=false
+Categories=System;Settings;XFCE;GTK;
+Keywords=linux;installer;artix;deployment;xfce;
+X-XFCE-Category=SystemSetup
+"#,
+        bindir
+    )
+}

@@ -1,13 +1,17 @@
+# This is a fallback template desktop file.
+# For installation, use: deploytix generate-desktop-file
+# The generate-desktop-file command auto-detects your DE and creates
+# a customized desktop file with DE-specific categories and features.
+
 [Desktop Entry]
 Type=Application
 Name=Deploytix
-GenericName=Deploytix
+GenericName=Artix Linux Installer
 Comment=Automated Artix Linux deployment installer
 Exec=pkexec %BINDIR%/deploytix-gui
 Icon=system-software-install
 NoDisplay=false
 StartupNotify=true
 Terminal=false
-Categories=System;
+Categories=System;Settings;
 Keywords=linux;installer;artix;deployment;
-X-KDE-SubstituteUID=false

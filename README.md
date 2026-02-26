@@ -108,6 +108,14 @@ sudo ./deploytix install -c my-config.toml
 # Dry-run (preview only)
 sudo ./deploytix -n install
 
+# Generate desktop file (auto-detect desktop environment)
+./deploytix generate-desktop-file -o deploytix-gui.desktop
+
+# Generate desktop file for specific DE
+./deploytix generate-desktop-file --de kde -o deploytix-gui.desktop
+./deploytix generate-desktop-file --de gnome -o deploytix-gui.desktop
+./deploytix generate-desktop-file --de xfce -o deploytix-gui.desktop
+
 # Cleanup: unmount partitions
 sudo ./deploytix cleanup
 

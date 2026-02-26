@@ -183,6 +183,9 @@ pub struct UserConfig {
     /// Create as sudoer (wheel group)
     #[serde(default = "default_true")]
     pub sudoer: bool,
+    /// Encrypt home directory with gocryptfs (auto-unlocks on login via pam_mount)
+    #[serde(default)]
+    pub encrypt_home: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +680,10 @@ impl DeploymentConfig {
         println!("\n👤 User Configuration\n");
         let username = prompt_input("Username", None)?;
         let password = prompt_password("User password", true)?;
+        let encrypt_home = prompt_confirm(
+            "Encrypt home directory with gocryptfs? (auto-unlocks on login)",
+            false,
+        )?;
 
         // Network
         let backends = [NetworkBackend::Iwd, NetworkBackend::NetworkManager];
@@ -756,6 +763,7 @@ impl DeploymentConfig {
                 password,
                 groups: default_groups(),
                 sudoer: true,
+                encrypt_home,
             },
             network: NetworkConfig { backend },
             desktop: DesktopConfig {
@@ -808,6 +816,7 @@ impl DeploymentConfig {
                 password: "changeme".to_string(),
                 groups: default_groups(),
                 sudoer: true,
+                encrypt_home: false,
             },
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,

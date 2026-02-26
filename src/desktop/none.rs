@@ -16,3 +16,23 @@ pub fn install(
     // Nothing to install for headless mode
     Ok(())
 }
+
+/// Generate generic desktop file content (no DE-specific features)
+pub fn desktop_file_content(bindir: &str) -> String {
+    format!(
+        r#"[Desktop Entry]
+Type=Application
+Name=Deploytix
+GenericName=Artix Linux Installer
+Comment=Automated Artix Linux deployment installer
+Exec=pkexec {}/deploytix-gui
+Icon=system-software-install
+NoDisplay=false
+StartupNotify=true
+Terminal=false
+Categories=System;Settings;
+Keywords=linux;installer;artix;deployment;
+"#,
+        bindir
+    )
+}

@@ -79,6 +79,21 @@ enum Commands {
         #[arg(short, long)]
         wipe: bool,
     },
+
+    /// Generate desktop file for the GUI launcher
+    GenerateDesktopFile {
+        /// Desktop environment (kde, gnome, xfce, none)
+        #[arg(short, long)]
+        de: Option<String>,
+
+        /// Binary directory path (default: $HOME/.local/bin)
+        #[arg(short, long)]
+        bindir: Option<String>,
+
+        /// Output path for desktop file
+        #[arg(short, long, default_value = "deploytix-gui.desktop")]
+        output: String,
+    },
 }
 
 fn init_logging(verbose: bool) {
@@ -118,6 +133,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Cleanup { device, wipe }) => {
             cmd_cleanup(device, wipe, dry_run)?;
+        }
+        Some(Commands::GenerateDesktopFile { de, bindir, output }) => {
+            cmd_generate_desktop_file(de, bindir, output)?;
         }
         None => {
             // Default: run interactive wizard
@@ -207,4 +225,86 @@ fn cmd_cleanup(device: Option<String>, wipe: bool, dry_run: bool) -> Result<()> 
     cleaner.cleanup(device.as_deref(), wipe)?;
 
     Ok(())
+}
+
+fn cmd_generate_desktop_file(
+    de: Option<String>,
+    bindir: Option<String>,
+    output: String,
+) -> Result<()> {
+    use crate::config::DesktopEnvironment;
+    use crate::desktop::generate_desktop_file;
+
+    // Detect desktop environment if not specified
+    let desktop_env = if let Some(de_str) = de {
+        match de_str.to_lowercase().as_str() {
+            "kde" | "plasma" => DesktopEnvironment::Kde,
+            "gnome" => DesktopEnvironment::Gnome,
+            "xfce" => DesktopEnvironment::Xfce,
+            "none" => DesktopEnvironment::None,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown desktop environment: {}. Valid options: kde, gnome, xfce, none",
+                    de_str
+                ))
+            }
+        }
+    } else {
+        // Auto-detect desktop environment
+        detect_desktop_environment()
+    };
+
+    // Determine bindir (default to $HOME/.local/bin)
+    let bindir_path = if let Some(path) = bindir {
+        path
+    } else {
+        let home = std::env::var("HOME")
+            .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()));
+        format!("{}/.local/bin", home)
+    };
+
+    // Generate desktop file content
+    let content = generate_desktop_file(&desktop_env, &bindir_path);
+
+    // Write to file
+    std::fs::write(&output, content)?;
+    println!("✓ Desktop file generated for {} at {}", desktop_env, output);
+
+    Ok(())
+}
+
+/// Auto-detect the current desktop environment
+fn detect_desktop_environment() -> config::DesktopEnvironment {
+    // Check environment variables
+    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        let desktop_lower = desktop.to_lowercase();
+        if desktop_lower.contains("kde") || desktop_lower.contains("plasma") {
+            info!("Detected KDE Plasma desktop environment");
+            return config::DesktopEnvironment::Kde;
+        } else if desktop_lower.contains("gnome") {
+            info!("Detected GNOME desktop environment");
+            return config::DesktopEnvironment::Gnome;
+        } else if desktop_lower.contains("xfce") {
+            info!("Detected XFCE desktop environment");
+            return config::DesktopEnvironment::Xfce;
+        }
+    }
+
+    // Check for KDE session
+    if std::env::var("KDE_FULL_SESSION").is_ok() {
+        info!("Detected KDE session");
+        return config::DesktopEnvironment::Kde;
+    }
+
+    // Check for GNOME session
+    if std::env::var("GNOME_DESKTOP_SESSION_ID").is_ok()
+        || std::env::var("GNOME_SHELL_SESSION_MODE").is_ok()
+    {
+        info!("Detected GNOME session");
+        return config::DesktopEnvironment::Gnome;
+    }
+
+    // Default to None if not detected
+    info!("Could not detect desktop environment, using generic desktop file");
+    config::DesktopEnvironment::None
 }

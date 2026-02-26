@@ -427,6 +427,9 @@ impl Installer {
         // User creation
         configure::users::create_user(&self.cmd, &self.config, INSTALL_ROOT)?;
 
+        // gocryptfs encrypted home directory (if enabled)
+        configure::gocryptfs::setup_encrypted_home(&self.cmd, &self.config, INSTALL_ROOT)?;
+
         // mkinitcpio
         configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &self.config, INSTALL_ROOT)?;
 
