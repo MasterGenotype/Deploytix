@@ -121,17 +121,26 @@ pub fn disk_config_panel(
             ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
             ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
             ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
+            ui.selectable_value(filesystem, Filesystem::Zfs, "zfs");
             ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
         });
     ui.add_space(8.0);
 
     // Swap Configuration
+    // Swap file requires btrfs or ext4; auto-correct if filesystem changed
+    let supports_swap_file =
+        *filesystem == Filesystem::Btrfs || *filesystem == Filesystem::Ext4;
+    if !supports_swap_file && *swap_type == SwapType::FileZram {
+        *swap_type = SwapType::Partition;
+    }
     ui.label("Swap Type:");
     egui::ComboBox::from_id_salt("swap_type")
         .selected_text(format!("{}", swap_type))
         .show_ui(ui, |ui| {
             ui.selectable_value(swap_type, SwapType::Partition, "Swap Partition");
-            ui.selectable_value(swap_type, SwapType::FileZram, "Swap File + ZRAM");
+            if supports_swap_file {
+                ui.selectable_value(swap_type, SwapType::FileZram, "Swap File + ZRAM");
+            }
             ui.selectable_value(swap_type, SwapType::ZramOnly, "ZRAM Only");
         });
     ui.add_space(8.0);
@@ -462,6 +471,7 @@ pub fn user_config_panel(
     password: &mut String,
     password_confirm: &mut String,
     sudoer: &mut bool,
+    encrypt_home: &mut bool,
 ) -> bool {
     ui.heading("User Configuration");
     ui.add_space(8.0);
@@ -485,6 +495,15 @@ pub fn user_config_panel(
     ui.add_space(8.0);
 
     ui.checkbox(sudoer, "Add user to wheel group (sudo access)");
+    ui.add_space(4.0);
+
+    ui.checkbox(encrypt_home, "Encrypt home directory with gocryptfs");
+    if *encrypt_home {
+        ui.label(
+            RichText::new("Home directory will be encrypted and auto-unlocked on login via pam_mount.")
+                .weak(),
+        );
+    }
     ui.add_space(8.0);
 
     // Validation
@@ -566,6 +585,7 @@ pub fn summary_panel(
     secureboot: bool,
     hostname: &str,
     username: &str,
+    encrypt_home: bool,
     network_backend: &NetworkBackend,
     desktop_env: &DesktopEnvironment,
     dry_run: &mut bool,
@@ -634,6 +654,10 @@ pub fn summary_panel(
 
             ui.label("Username:");
             ui.label(username);
+            ui.end_row();
+
+            ui.label("Encrypted Home:");
+            ui.label(if encrypt_home { "Enabled (gocryptfs)" } else { "Disabled" });
             ui.end_row();
 
             ui.label("Network:");

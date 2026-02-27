@@ -59,12 +59,12 @@ pub fn create_user(
     // Set password using chpasswd, passing credentials via a temp file to
     // avoid shell injection when the password contains single quotes or
     // other shell metacharacters.
-    let temp_path = format!("{}/tmp/.deploytix_chpasswd", install_root);
+    let temp_path = format!("{}/var/tmp/.deploytix_chpasswd", install_root);
     fs::write(&temp_path, format!("{}:{}", username, password))?;
     let mut perms = fs::metadata(&temp_path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&temp_path, perms)?;
-    let result = cmd.run_in_chroot(install_root, "chpasswd < /tmp/.deploytix_chpasswd");
+    let result = cmd.run_in_chroot(install_root, "chpasswd < /var/tmp/.deploytix_chpasswd");
     let _ = fs::remove_file(&temp_path);
     result?;
 
@@ -123,12 +123,12 @@ pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str
     }
 
     // Pass credentials via a temp file to avoid shell injection.
-    let temp_path = format!("{}/tmp/.deploytix_chpasswd", install_root);
+    let temp_path = format!("{}/var/tmp/.deploytix_chpasswd", install_root);
     fs::write(&temp_path, format!("root:{}", password))?;
     let mut perms = fs::metadata(&temp_path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&temp_path, perms)?;
-    let result = cmd.run_in_chroot(install_root, "chpasswd < /tmp/.deploytix_chpasswd");
+    let result = cmd.run_in_chroot(install_root, "chpasswd < /var/tmp/.deploytix_chpasswd");
     let _ = fs::remove_file(&temp_path);
     result?;
 

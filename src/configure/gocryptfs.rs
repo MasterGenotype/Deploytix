@@ -128,6 +128,11 @@ fn init_cipher_directory(
 }
 
 /// Temporarily mount the encrypted dir, copy skel files, then unmount.
+///
+/// All operations are combined into a single chroot invocation so the
+/// gocryptfs FUSE daemon stays alive throughout. Separate artix-chroot
+/// calls would tear down /dev/fuse between invocations, leaving the
+/// mount point in a "Transport endpoint is not connected" state.
 fn populate_skel(
     cmd: &CommandRunner,
     username: &str,
@@ -136,27 +141,17 @@ fn populate_skel(
 ) -> Result<()> {
     info!("Populating encrypted home with skeleton files");
 
-    // Mount the encrypted directory
-    let mount_cmd = format!(
-        "gocryptfs -extpass \"echo '{}'\" /home/{}.cipher /home/{}",
-        password, username, username
+    let combined_cmd = format!(
+        "gocryptfs -extpass \"echo '{}'\" /home/{}.cipher /home/{} && \
+         cp -a /etc/skel/. /home/{}/ && \
+         chown -R {}:{} /home/{} && \
+         fusermount -u /home/{}",
+        password, username, username,
+        username,
+        username, username, username,
+        username
     );
-    cmd.run_in_chroot(install_root, &mount_cmd)?;
-
-    // Copy skeleton files
-    cmd.run_in_chroot(
-        install_root,
-        &format!("cp -a /etc/skel/. /home/{}/", username),
-    )?;
-
-    // Fix ownership
-    cmd.run_in_chroot(
-        install_root,
-        &format!("chown -R {}:{} /home/{}", username, username, username),
-    )?;
-
-    // Unmount
-    cmd.run_in_chroot(install_root, &format!("fusermount -u /home/{}", username))?;
+    cmd.run_in_chroot(install_root, &combined_cmd)?;
 
     info!("Skeleton files copied to encrypted home");
     Ok(())

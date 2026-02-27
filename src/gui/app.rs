@@ -122,6 +122,7 @@ pub struct DeploytixGui {
     user_password: String,
     user_password_confirm: String,
     sudoer: bool,
+    encrypt_home: bool,
 
     // Network & Desktop
     network_backend: NetworkBackend,
@@ -184,6 +185,7 @@ impl Default for DeploytixGui {
             user_password: String::new(),
             user_password_confirm: String::new(),
             sudoer: true,
+            encrypt_home: false,
 
             network_backend: NetworkBackend::Iwd,
             desktop_env: DesktopEnvironment::None,
@@ -288,7 +290,7 @@ impl DeploytixGui {
                     "log".to_string(),
                 ],
                 sudoer: self.sudoer,
-                encrypt_home: false,
+                encrypt_home: self.encrypt_home,
             },
             network: NetworkConfig {
                 backend: self.network_backend.clone(),
@@ -553,6 +555,7 @@ impl eframe::App for DeploytixGui {
                     &mut self.user_password,
                     &mut self.user_password_confirm,
                     &mut self.sudoer,
+                    &mut self.encrypt_home,
                 ),
                 WizardStep::NetworkDesktop => panels::network_desktop_panel(
                     ui,
@@ -580,6 +583,7 @@ impl eframe::App for DeploytixGui {
                         self.secureboot,
                         &self.hostname,
                         &self.username,
+                        self.encrypt_home,
                         &self.network_backend,
                         &self.desktop_env,
                         &mut self.dry_run,
