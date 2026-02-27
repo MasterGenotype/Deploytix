@@ -590,6 +590,9 @@ pub fn summary_panel(
     desktop_env: &DesktopEnvironment,
     dry_run: &mut bool,
     confirmed: &mut bool,
+    save_config_path: &mut String,
+    save_config_status: &Option<(String, bool)>,
+    save_clicked: &mut bool,
 ) -> bool {
     ui.heading("Review Configuration");
     ui.add_space(8.0);
@@ -670,6 +673,29 @@ pub fn summary_panel(
         });
 
     ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    // Save configuration to file
+    ui.label(RichText::new("Save Configuration").strong());
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Path:");
+        ui.add(egui::TextEdit::singleline(save_config_path).desired_width(250.0));
+        if ui.button("💾 Save Config").clicked() {
+            *save_clicked = true;
+        }
+    });
+    if let Some((msg, is_error)) = save_config_status {
+        let color = if *is_error {
+            egui::Color32::RED
+        } else {
+            egui::Color32::GREEN
+        };
+        ui.label(RichText::new(msg).color(color));
+    }
+    ui.add_space(8.0);
+
     ui.separator();
     ui.add_space(8.0);
 

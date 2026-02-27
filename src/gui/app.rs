@@ -132,6 +132,10 @@ pub struct DeploytixGui {
     dry_run: bool,
     confirmed: bool,
 
+    // Save config
+    save_config_path: String,
+    save_config_status: Option<(String, bool)>, // (message, is_error)
+
     // Installation progress
     install_status: String,
     install_progress: f32,
@@ -192,6 +196,9 @@ impl Default for DeploytixGui {
 
             dry_run: false,
             confirmed: false,
+
+            save_config_path: "deploytix.toml".to_string(),
+            save_config_status: None,
 
             install_status: String::new(),
             install_progress: 0.0,
@@ -299,6 +306,28 @@ impl DeploytixGui {
                 environment: self.desktop_env.clone(),
                 display_manager: None,
             },
+        }
+    }
+
+    fn save_config(&mut self) {
+        let config = self.build_config();
+        match toml::to_string_pretty(&config) {
+            Ok(content) => match std::fs::write(&self.save_config_path, &content) {
+                Ok(()) => {
+                    self.save_config_status = Some((
+                        format!("✓ Saved to {}", self.save_config_path),
+                        false,
+                    ));
+                }
+                Err(e) => {
+                    self.save_config_status =
+                        Some((format!("✗ Write failed: {}", e), true));
+                }
+            },
+            Err(e) => {
+                self.save_config_status =
+                    Some((format!("✗ Serialization failed: {}", e), true));
+            }
         }
     }
 
@@ -569,7 +598,8 @@ impl eframe::App for DeploytixGui {
                         .map(|d| d.path.as_str())
                         .unwrap_or("(none)");
 
-                    panels::summary_panel(
+                    let mut save_clicked = false;
+                    let can = panels::summary_panel(
                         ui,
                         device_path,
                         &self.partition_layout,
@@ -588,7 +618,16 @@ impl eframe::App for DeploytixGui {
                         &self.desktop_env,
                         &mut self.dry_run,
                         &mut self.confirmed,
-                    )
+                        &mut self.save_config_path,
+                        &self.save_config_status,
+                        &mut save_clicked,
+                    );
+
+                    if save_clicked {
+                        self.save_config();
+                    }
+
+                    can
                 }
                 WizardStep::Installing => {
                     panels::progress_panel(
