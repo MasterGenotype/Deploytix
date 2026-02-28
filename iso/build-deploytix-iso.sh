@@ -410,7 +410,78 @@ generate_gui_profile() {
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
 }
 
-# ── Step F: Run buildiso ─────────────────────────────────────────────────────
+# ── Step F: Embed built packages in the live-overlay ─────────────────────────
+# The live ISO's pacman.conf (set up by buildiso) points [deploytix] at the
+# build machine's LOCAL_REPO_DIR, which does not exist on the booted live
+# system.  To let basestrap install deploytix-git and tkg-gui-git onto the
+# target disk, we embed the .pkg.tar.zst files and a pacman database directly
+# into the live-overlay and include a matching pacman.conf that points to the
+# in-ISO path so the live environment's pacman can find them at runtime.
+embed_live_repo() {
+    msg "Embedding packages in live-overlay for basestrap use..."
+    local dest="${WORKSPACE_PROFILES}/deploytix"
+    local live_overlay_dir="${dest}/live-overlay"
+    local live_repo_path="${live_overlay_dir}/var/lib/deploytix-repo"
+    local live_etc_dir="${live_overlay_dir}/etc"
+
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would embed packages at ${live_repo_path}"
+        return 0
+    fi
+
+    # If the live-overlay is a symlink (e.g. pointing to a DE profile's overlay),
+    # materialise it into a real directory so we can safely add files without
+    # modifying the symlink target.
+    if [[ -L "${live_overlay_dir}" ]]; then
+        local link_target
+        link_target="$(readlink -f "${live_overlay_dir}")"
+        rm "${live_overlay_dir}"
+        if [[ -d "${link_target}" ]]; then
+            cp -a "${link_target}" "${live_overlay_dir}"
+        else
+            mkdir -p "${live_overlay_dir}"
+        fi
+        msg2 "Materialised live-overlay symlink into real directory"
+    fi
+
+    mkdir -p "${live_repo_path}" "${live_etc_dir}"
+
+    # Copy all built packages into the in-ISO repo directory
+    local pkg_count=0
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        for pkg in "${src_dir}"/*.pkg.tar.zst; do
+            [[ -f "$pkg" ]] || continue
+            cp -f "$pkg" "${live_repo_path}/"
+            msg2 "Embedded $(basename "$pkg")"
+            pkg_count=$((pkg_count + 1))
+        done
+    done
+
+    (( pkg_count > 0 )) || die "No packages available to embed in live-overlay"
+
+    # Build a pacman database from the embedded packages so pacman/basestrap
+    # can resolve and install them inside the live environment.
+    repo-add "${live_repo_path}/deploytix.db.tar.zst" \
+        "${live_repo_path}"/*.pkg.tar.zst
+
+    # Generate a pacman.conf for the live system:
+    #   • base it on the system artools conf so all standard Artix repos are present
+    #   • append [deploytix] pointing to the in-ISO path
+    # This file, placed in the live-overlay, overrides the default pacman.conf
+    # installed by the base Artix system packages.
+    cp "${SYSTEM_PACMAN_CONF}" "${live_etc_dir}/pacman.conf"
+    cat >> "${live_etc_dir}/pacman.conf" <<EOF
+
+# ── Deploytix local repository (embedded in ISO for basestrap use) ──
+[deploytix]
+SigLevel = Optional TrustAll
+Server = file:///var/lib/deploytix-repo
+EOF
+
+    msg2 "Embedded ${pkg_count} package(s); [deploytix] repo available at /var/lib/deploytix-repo"
+}
+
+# ── Step H: Run buildiso ─────────────────────────────────────────────────────
 run_buildiso() {
     msg "Building ISO (init=${INITSYS}, profile=deploytix)..."
 
@@ -472,6 +543,7 @@ main() {
     create_local_repo
     install_pacman_conf
     install_profile
+    embed_live_repo
     run_buildiso
 
     msg "Done!"
