@@ -71,6 +71,13 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Bootloader
     packages.extend(["efibootmgr".to_string(), "grub".to_string()]);
 
+    // Deploytix — install itself on the target system so it remains available
+    // after first boot; dosfstools is always required for the FAT32 EFI partition.
+    packages.extend([
+        "deploytix-git".to_string(),
+        "dosfstools".to_string(),
+    ]);
+
     // Essential tools
     packages.extend([
         "git".to_string(),

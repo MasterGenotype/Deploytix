@@ -44,3 +44,5 @@ rootfs:
 livefs:
   packages:
     - deploytix-git
+    - dosfstools
+    - artools
