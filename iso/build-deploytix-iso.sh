@@ -40,6 +40,11 @@ PACMAN_CONF_DIR="${ARTOOLS_CONF_DIR}/pacman.conf.d"
 PACMAN_CONF_NAME="iso-x86_64.conf"
 SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
 
+# ── External package sources ─────────────────────────────────────────────────
+TKG_GUI_REPO_URL="https://github.com/MasterGenotype/tkg-gui.git"
+TKG_GUI_CLONE_DIR=""  # resolved in resolve_paths()
+TKG_GUI_PKG_DIR=""    # pkg/ inside the tkg-gui clone
+
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
@@ -108,6 +113,8 @@ resolve_paths() {
     PKG_DIR="${REPO_ROOT}/pkg"
     LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
+    TKG_GUI_CLONE_DIR="${WORKSPACE_DIR}/tkg-gui-src"
+    TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -135,16 +142,18 @@ check_prerequisites() {
 # ── Step B: Build packages ───────────────────────────────────────────────────
 build_packages() {
     if "$SKIP_REBUILD"; then
-        # Verify packages exist
+        # Verify packages exist in both source dirs
         local count
-        count=$(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l)
+        count=$(find "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" \
+            -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l)
         if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/ and -s (skip rebuild) was set"
+            die "No .pkg.tar.zst found in ${PKG_DIR}/ or ${TKG_GUI_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
         msg "Skipping package build (-s); reusing existing packages"
         return 0
     fi
 
+    # ── Deploytix packages ───────────────────────────────────────────────────
     msg "Building deploytix packages..."
     pushd "${PKG_DIR}" >/dev/null
 
@@ -156,15 +165,45 @@ build_packages() {
 
     popd >/dev/null
 
-    # Verify output
     if ! "$DRY_RUN"; then
         local count
         count=$(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
-        if (( count == 0 )); then
-            die "makepkg produced no packages"
-        fi
-        msg2 "Built ${count} package(s)"
+        (( count > 0 )) || die "makepkg produced no deploytix packages"
+        msg2 "Built ${count} deploytix package(s)"
     fi
+
+    # ── tkg-gui packages ─────────────────────────────────────────────────────
+    build_tkg_gui_packages
+}
+
+# Clone (or update) tkg-gui and build its pkg/PKGBUILD
+build_tkg_gui_packages() {
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would clone/update ${TKG_GUI_REPO_URL} and run makepkg"
+        return 0
+    fi
+
+    msg "Building tkg-gui packages..."
+
+    if [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
+        msg2 "Updating tkg-gui repository..."
+        git -C "${TKG_GUI_CLONE_DIR}" pull --ff-only
+    else
+        msg2 "Cloning tkg-gui repository..."
+        git clone "${TKG_GUI_REPO_URL}" "${TKG_GUI_CLONE_DIR}"
+    fi
+
+    [[ -f "${TKG_GUI_PKG_DIR}/PKGBUILD" ]] \
+        || die "tkg-gui pkg/PKGBUILD not found at ${TKG_GUI_PKG_DIR}/PKGBUILD"
+
+    pushd "${TKG_GUI_PKG_DIR}" >/dev/null
+    makepkg -sf --noconfirm
+    popd >/dev/null
+
+    local count
+    count=$(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
+    (( count > 0 )) || die "makepkg produced no tkg-gui packages"
+    msg2 "Built ${count} tkg-gui package(s)"
 }
 
 # ── Step C: Create local pacman repository ───────────────────────────────────
@@ -184,13 +223,15 @@ create_local_repo() {
     # Clean old packages
     sudo rm -f "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
-    # Copy packages
+    # Copy packages from all source directories
     local pkg_count=0
-    for pkg in "${PKG_DIR}"/*.pkg.tar.zst; do
-        [[ -f "$pkg" ]] || continue
-        sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
-        msg2 "Added $(basename "$pkg")"
-        pkg_count=$((pkg_count + 1))
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        for pkg in "${src_dir}"/*.pkg.tar.zst; do
+            [[ -f "$pkg" ]] || continue
+            sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
+            msg2 "Added $(basename "$pkg")"
+            pkg_count=$((pkg_count + 1))
+        done
     done
 
     if (( pkg_count == 0 )); then
@@ -279,6 +320,12 @@ reset_artifacts() {
         msg2 "Removed repo: ${LOCAL_REPO_DIR}"
     fi
 
+    # Remove tkg-gui clone
+    if [[ -d "${TKG_GUI_CLONE_DIR}" ]]; then
+        rm -rf "${TKG_GUI_CLONE_DIR}"
+        msg2 "Removed tkg-gui clone: ${TKG_GUI_CLONE_DIR}"
+    fi
+
     msg "Reset complete"
 }
 
@@ -335,8 +382,8 @@ generate_gui_profile() {
     # Start from the DE profile and inject deploytix packages
     cp "$de_profile" "$dest/profile.yaml"
 
-    # Add deploytix packages to livefs (live session only) and remove calamares
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git"]' "$dest/profile.yaml"
+    # Add deploytix and tkg-gui packages to livefs (live session only) and remove calamares
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     # Copy overlays from the DE profile
