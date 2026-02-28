@@ -33,6 +33,9 @@ ISO_DIR=""            # iso/ directory inside repo
 PKG_DIR=""            # pkg/ directory inside repo
 LOCAL_REPO_DIR=""     # pacman repository in artools workspace
 PROFILE_SRC=""        # iso/profile/deploytix/
+TKG_GUI_DIR="${HOME}/.gitrepos/tkg-gui"   # tkg-gui source repo
+TKG_GUI_PKG_DIR="${TKG_GUI_DIR}/pkg"      # tkg-gui PKGBUILD directory
+TKG_GUI_PKG=""        # resolved path to the tkg-gui .pkg.tar.zst
 WORKSPACE_DIR="${HOME}/artools-workspace"
 WORKSPACE_PROFILES="${WORKSPACE_DIR}/iso-profiles"
 ARTOOLS_CONF_DIR="${HOME}/.config/artools"
@@ -132,7 +135,62 @@ check_prerequisites() {
     msg2 "All prerequisites satisfied"
 }
 
-# ── Step B: Build packages ───────────────────────────────────────────────────
+# ── Step B1: Resolve or build tkg-gui package ────────────────────────────────
+build_tkg_gui_package() {
+    msg "Resolving tkg-gui package..."
+
+    if [[ ! -d "$TKG_GUI_DIR" ]]; then
+        die "tkg-gui repo not found at ${TKG_GUI_DIR}"
+    fi
+
+    # Look for the most recent tkg-gui .pkg.tar.zst in pkg/ or repo root
+    local latest_pkg=""
+    latest_pkg=$(
+        find "${TKG_GUI_DIR}" -maxdepth 2 -name 'tkg-gui*.pkg.tar.zst' -type f \
+            -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-
+    )
+
+    if [[ -n "$latest_pkg" ]] && "$SKIP_REBUILD"; then
+        msg2 "Reusing existing tkg-gui package: $(basename "$latest_pkg")"
+        TKG_GUI_PKG="$latest_pkg"
+        return 0
+    fi
+
+    if [[ -n "$latest_pkg" ]] && ! "$SKIP_REBUILD"; then
+        msg2 "Found existing package but rebuilding: $(basename "$latest_pkg")"
+    fi
+
+    if [[ ! -f "${TKG_GUI_PKG_DIR}/PKGBUILD" ]]; then
+        die "tkg-gui PKGBUILD not found at ${TKG_GUI_PKG_DIR}/PKGBUILD"
+    fi
+
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would build tkg-gui from ${TKG_GUI_PKG_DIR}/PKGBUILD"
+        return 0
+    fi
+
+    msg2 "Building tkg-gui from PKGBUILD..."
+    pushd "${TKG_GUI_PKG_DIR}" >/dev/null
+    makepkg -sf --noconfirm
+    popd >/dev/null
+
+    # Resolve the newly built package
+    latest_pkg=$(
+        find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name 'tkg-gui*.pkg.tar.zst' -type f \
+            -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-
+    )
+
+    if [[ -z "$latest_pkg" ]]; then
+        die "tkg-gui makepkg produced no package"
+    fi
+
+    TKG_GUI_PKG="$latest_pkg"
+    msg2 "Built tkg-gui package: $(basename "$TKG_GUI_PKG")"
+}
+
+# ── Step B2: Build deploytix packages ────────────────────────────────────────
 build_packages() {
     if "$SKIP_REBUILD"; then
         # Verify packages exist
@@ -192,6 +250,13 @@ create_local_repo() {
         msg2 "Added $(basename "$pkg")"
         pkg_count=$((pkg_count + 1))
     done
+
+    # Copy tkg-gui package if available
+    if [[ -n "$TKG_GUI_PKG" && -f "$TKG_GUI_PKG" ]]; then
+        sudo cp -f "$TKG_GUI_PKG" "${LOCAL_REPO_DIR}/"
+        msg2 "Added $(basename "$TKG_GUI_PKG") (tkg-gui)"
+        pkg_count=$((pkg_count + 1))
+    fi
 
     if (( pkg_count == 0 )); then
         die "No packages found to add to repository"
@@ -421,6 +486,7 @@ main() {
     msg2 "Profile:     ${WORKSPACE_PROFILES}/deploytix"
     echo
 
+    build_tkg_gui_package
     build_packages
     create_local_repo
     install_pacman_conf
