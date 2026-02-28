@@ -91,6 +91,9 @@ pub struct PartitionDef {
     pub is_boot_fs: bool,
     /// Additional attributes (e.g., LegacyBIOSBootable)
     pub attributes: Option<String>,
+    /// Whether this partition should be preserved (not reformatted) during reinstall.
+    /// Used when preserve_home is enabled to keep the existing /home filesystem intact.
+    pub preserve: bool,
 }
 
 /// Planned thin volume definition (saved when LVM thin collapses partitions)
@@ -282,6 +285,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 2,
@@ -298,6 +302,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: true,
             is_boot_fs: true,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 3,
@@ -311,6 +316,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 4,
@@ -324,6 +330,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 5,
@@ -337,6 +344,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 6,
@@ -350,6 +358,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 7,
@@ -363,6 +372,7 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
     ];
 
@@ -405,6 +415,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 2,
@@ -418,6 +429,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: true,
             is_boot_fs: true,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 3,
@@ -431,6 +443,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 4,
@@ -444,6 +457,7 @@ fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
     ];
 
@@ -496,6 +510,7 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         // Partition 2: Boot (can be LUKS1 encrypted)
         PartitionDef {
@@ -510,6 +525,7 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
             is_bios_boot: true,
             is_boot_fs: true,
             attributes: None,
+            preserve: false,
         },
     ];
 
@@ -529,6 +545,7 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         });
         next_part_num += 1;
     }
@@ -546,6 +563,7 @@ fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<Co
         is_bios_boot: false,
         is_boot_fs: false,
         attributes: None,
+        preserve: false,
     });
 
     Ok(ComputedLayout {
@@ -610,6 +628,7 @@ fn compute_custom_layout(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         },
         PartitionDef {
             number: 2,
@@ -623,6 +642,7 @@ fn compute_custom_layout(
             is_bios_boot: true,
             is_boot_fs: true,
             attributes: None,
+            preserve: false,
         },
     ];
 
@@ -642,6 +662,7 @@ fn compute_custom_layout(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         });
         next_part_num += 1;
     }
@@ -680,6 +701,7 @@ fn compute_custom_layout(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         });
         next_part_num += 1;
     }
@@ -749,6 +771,16 @@ pub fn compute_layout_from_config(
     // Apply LVM thin: collapse data partitions into a single LVM PV
     if disk_config.use_lvm_thin {
         layout = apply_lvm_thin_to_layout(layout, disk_config.encryption)?;
+    }
+
+    // Mark the /home partition as preserved when preserve_home is enabled.
+    // This prevents reformatting and keeps existing user data intact.
+    if disk_config.preserve_home {
+        for part in &mut layout.partitions {
+            if part.mount_point.as_deref() == Some("/home") {
+                part.preserve = true;
+            }
+        }
     }
 
     Ok(layout)
@@ -860,6 +892,7 @@ pub fn apply_lvm_thin_to_layout(
         is_bios_boot: false,
         is_boot_fs: false,
         attributes: None,
+        preserve: false,
     });
 
     Ok(ComputedLayout {
@@ -956,6 +989,7 @@ mod tests {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            preserve: false,
         }
     }
 
@@ -1037,12 +1071,11 @@ pub fn print_layout_summary(layout: &ComputedLayout) {
             format!("{} MiB", part.size_mib)
         };
 
+        let mount_str = part.mount_point.as_deref().unwrap_or("-");
+        let preserve_tag = if part.preserve { " [PRESERVE]" } else { "" };
         println!(
-            "{:<6} {:<10} {:>10} {:<20}",
-            part.number,
-            part.name,
-            size_str,
-            part.mount_point.as_deref().unwrap_or("-")
+            "{:<6} {:<10} {:>10} {:<20}{}",
+            part.number, part.name, size_str, mount_str, preserve_tag
         );
     }
     println!();

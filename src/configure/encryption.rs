@@ -576,6 +576,55 @@ pub fn setup_multi_volume_encryption(
     Ok(containers)
 }
 
+/// Open an existing LUKS container without reformatting (for preserved partitions).
+///
+/// This is used when `preserve_home` is enabled: the existing LUKS container on
+/// the home partition is unlocked with the provided password but not reformatted,
+/// keeping the existing filesystem and data intact.
+pub fn open_existing_luks(
+    cmd: &CommandRunner,
+    device: &str,
+    canonical_mapper: &str,
+    volume_name: &str,
+    password: &str,
+) -> Result<LuksContainer> {
+    let mapper_name = resolve_mapper_name(canonical_mapper);
+    let mapped_path = format!("/dev/mapper/{}", mapper_name);
+
+    info!(
+        "Opening existing LUKS container on {} (mapper: {}, preserved)",
+        device, mapper_name
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] cryptsetup open {} {} (preserved, no reformat)",
+            device, mapper_name
+        );
+        return Ok(LuksContainer {
+            device: device.to_string(),
+            mapper_name,
+            mapped_path,
+            volume_name: volume_name.to_string(),
+        });
+    }
+
+    // Open the existing LUKS container (do NOT format)
+    luks_open(device, &mapper_name, password)?;
+
+    info!(
+        "Opened existing LUKS container (preserved): {} -> {}",
+        device, mapped_path
+    );
+
+    Ok(LuksContainer {
+        device: device.to_string(),
+        mapper_name,
+        mapped_path,
+        volume_name: volume_name.to_string(),
+    })
+}
+
 /// Close multiple LUKS containers
 pub fn close_multi_luks(cmd: &CommandRunner, containers: &[LuksContainer]) -> Result<()> {
     info!("Closing {} LUKS containers", containers.len());

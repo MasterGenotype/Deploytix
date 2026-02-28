@@ -155,6 +155,15 @@ pub fn format_all_partitions(
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
 
+        // Skip preserved partitions — their existing filesystem is kept intact
+        if part.preserve {
+            info!(
+                "Preserving existing filesystem on {} ({}) — not reformatting",
+                part_path, part.name
+            );
+            continue;
+        }
+
         if part.is_efi {
             format_efi(cmd, &part_path)?;
         } else if part.is_bios_boot && !part.is_boot_fs {

@@ -137,6 +137,13 @@ pub struct DiskConfig {
     /// EFI, Boot, and Swap are always prepended by the system.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_partitions: Option<Vec<CustomPartitionEntry>>,
+
+    /// Preserve the existing /home partition during reinstallation.
+    /// When enabled, the home partition is not reformatted and user files
+    /// are kept intact. Only compatible with Standard and Custom layouts
+    /// that have a separate /home partition.
+    #[serde(default)]
+    pub preserve_home: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,6 +779,7 @@ impl DeploymentConfig {
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 custom_partitions,
+                preserve_home: false,
             },
             system: SystemConfig {
                 init,
@@ -826,6 +834,7 @@ impl DeploymentConfig {
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 custom_partitions: None,
+                preserve_home: false,
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -948,6 +957,44 @@ impl DeploymentConfig {
             return Err(DeploytixError::ValidationError(
                 "Swap file requires btrfs or ext4 filesystem".to_string(),
             ));
+        }
+
+        // Preserve home requires a layout with a separate /home partition
+        if self.disk.preserve_home {
+            match self.disk.layout {
+                PartitionLayout::Minimal => {
+                    return Err(DeploytixError::ValidationError(
+                        "Preserve home requires a separate /home partition; Minimal layout uses a single root partition".to_string(),
+                    ));
+                }
+                PartitionLayout::Custom => {
+                    // Custom layout: verify a /home partition exists
+                    if let Some(ref parts) = self.disk.custom_partitions {
+                        if !parts.iter().any(|p| p.mount_point == "/home") {
+                            return Err(DeploytixError::ValidationError(
+                                "Preserve home requires a /home partition in the custom layout".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(DeploytixError::ValidationError(
+                            "Preserve home with custom layout requires custom_partitions to be defined".to_string(),
+                        ));
+                    }
+                }
+                _ => {} // Standard (and legacy LvmThin) have /home
+            }
+
+            if self.disk.use_lvm_thin {
+                return Err(DeploytixError::ValidationError(
+                    "Preserve home is incompatible with LVM thin provisioning (volumes are recreated as a unit)".to_string(),
+                ));
+            }
+
+            if self.disk.use_subvolumes {
+                return Err(DeploytixError::ValidationError(
+                    "Preserve home is incompatible with btrfs subvolumes (subvolumes are recreated on root)".to_string(),
+                ));
+            }
         }
 
         // SecureBoot with ManualKeys requires keys path

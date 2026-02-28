@@ -94,6 +94,8 @@ pub struct DeploytixGui {
     zram_percent: u8,
     // Btrfs subvolumes
     use_subvolumes: bool,
+    // Preserve existing /home partition
+    preserve_home: bool,
     // LVM thin provisioning
     use_lvm_thin: bool,
     lvm_vg_name: String,
@@ -162,6 +164,7 @@ impl Default for DeploytixGui {
             swap_type: SwapType::Partition,
             zram_percent: 50,
             use_subvolumes: false,
+            preserve_home: false,
             use_lvm_thin: false,
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),
@@ -272,6 +275,7 @@ impl DeploytixGui {
                 } else {
                     None
                 },
+                preserve_home: self.preserve_home,
             },
             system: SystemConfig {
                 init: self.init_system.clone(),
@@ -546,6 +550,7 @@ impl eframe::App for DeploytixGui {
                     &self.devices,
                     &mut self.selected_device_index,
                     &mut self.refreshing_disks,
+                    self.preserve_home,
                 ),
                 WizardStep::DiskConfig => panels::disk_config_panel(
                     ui,
@@ -558,6 +563,7 @@ impl eframe::App for DeploytixGui {
                     &mut self.swap_type,
                     &mut self.zram_percent,
                     &mut self.use_subvolumes,
+                    &mut self.preserve_home,
                     &mut self.use_lvm_thin,
                     &mut self.lvm_vg_name,
                     &mut self.lvm_thin_pool_name,
@@ -614,6 +620,7 @@ impl eframe::App for DeploytixGui {
                         &self.hostname,
                         &self.username,
                         self.encrypt_home,
+                        self.preserve_home,
                         &self.network_backend,
                         &self.desktop_env,
                         &mut self.dry_run,

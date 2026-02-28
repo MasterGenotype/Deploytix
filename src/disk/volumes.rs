@@ -237,6 +237,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 2,
@@ -250,6 +251,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: true,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 3,
@@ -263,6 +265,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 4,
@@ -276,6 +279,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 5,
@@ -289,6 +293,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
             ],
             total_mib: 500000,
@@ -369,6 +374,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 2,
@@ -382,6 +388,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: true,
                     attributes: None,
+                    preserve: false,
                 },
                 PartitionDef {
                     number: 3,
@@ -395,6 +402,7 @@ mod tests {
                     is_bios_boot: false,
                     is_boot_fs: false,
                     attributes: None,
+                    preserve: false,
                 },
             ],
             total_mib: 500000,

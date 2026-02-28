@@ -442,10 +442,17 @@ impl Installer {
         self.layout = Some(layout);
 
         // Confirm with user
-        let warning = format!(
-            "This will ERASE ALL DATA on {}. This operation cannot be undone!",
-            self.config.disk.device
-        );
+        let warning = if self.config.disk.preserve_home {
+            format!(
+                "This will ERASE system partitions on {} but PRESERVE the /home partition. This operation cannot be undone!",
+                self.config.disk.device
+            )
+        } else {
+            format!(
+                "This will ERASE ALL DATA on {}. This operation cannot be undone!",
+                self.config.disk.device
+            )
+        };
 
         if !self.cmd.is_dry_run() && !self.skip_confirm && !warn_confirm(&warning)? {
             return Err(crate::utils::error::DeploytixError::UserCancelled);
@@ -666,25 +673,61 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        // Get all LUKS partitions from layout
-        let luks_parts: Vec<(u32, &str)> = get_luks_partitions(layout)
-            .iter()
-            .map(|p| (p.number, p.name.as_str()))
-            .collect();
+        // Separate LUKS partitions into new vs preserved
+        let luks_defs = get_luks_partitions(layout);
+        let mut new_luks: Vec<(u32, &str)> = Vec::new();
+        let mut preserved_luks: Vec<&crate::disk::layouts::PartitionDef> = Vec::new();
 
-        if luks_parts.is_empty() {
+        for p in &luks_defs {
+            if p.preserve {
+                preserved_luks.push(p);
+            } else {
+                new_luks.push((p.number, p.name.as_str()));
+            }
+        }
+
+        if new_luks.is_empty() && preserved_luks.is_empty() {
             return Err(DeploytixError::ConfigError(
                 "No LUKS partitions found in layout".to_string(),
             ));
         }
 
-        // Setup LUKS encryption for all volumes
-        let containers = setup_multi_volume_encryption(
-            &self.cmd,
-            &self.config,
-            &self.config.disk.device,
-            &luks_parts,
-        )?;
+        // Setup LUKS encryption for new (non-preserved) volumes
+        let mut containers = if !new_luks.is_empty() {
+            setup_multi_volume_encryption(
+                &self.cmd,
+                &self.config,
+                &self.config.disk.device,
+                &new_luks,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        // Open existing LUKS containers for preserved volumes (no reformat)
+        if !preserved_luks.is_empty() {
+            let password = self.config.disk.encryption_password.as_ref().ok_or_else(|| {
+                DeploytixError::ValidationError(
+                    "Encryption password required to unlock preserved partitions".to_string(),
+                )
+            })?;
+
+            for p in &preserved_luks {
+                let device = partition_path(&self.config.disk.device, p.number);
+                let volume_name = p.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+                    + &p.name[1..].to_lowercase();
+                let canonical_mapper = format!("Crypt-{}", volume_name);
+
+                let container = configure::encryption::open_existing_luks(
+                    &self.cmd,
+                    &device,
+                    &canonical_mapper,
+                    &volume_name,
+                    password,
+                )?;
+                containers.push(container);
+            }
+        }
 
         self.luks_containers = containers;
 
@@ -721,8 +764,22 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        // Format each LUKS-mapped device as BTRFS
+        // Format each LUKS-mapped device as BTRFS (skip preserved partitions)
+        let preserved_devices: Vec<String> = layout
+            .partitions
+            .iter()
+            .filter(|p| p.preserve)
+            .map(|p| partition_path(&self.config.disk.device, p.number))
+            .collect();
+
         for container in &self.luks_containers {
+            if preserved_devices.contains(&container.device) {
+                info!(
+                    "Preserving existing filesystem on {} ({}) — not reformatting",
+                    container.mapped_path, container.volume_name
+                );
+                continue;
+            }
             create_btrfs_filesystem(&self.cmd, &container.mapped_path, &container.volume_name)?;
         }
 

@@ -13,16 +13,24 @@ pub fn disk_selection_panel(
     devices: &[BlockDevice],
     selected_index: &mut Option<usize>,
     refreshing: &mut bool,
+    preserve_home: bool,
 ) -> bool {
     let mut can_proceed = false;
 
     ui.heading("Select Target Disk");
     ui.add_space(8.0);
     ui.label("Choose the disk where Artix Linux will be installed.");
-    ui.label(
-        RichText::new("⚠ All data on the selected disk will be erased!")
-            .color(egui::Color32::YELLOW),
-    );
+    if preserve_home {
+        ui.label(
+            RichText::new("⚠ System partitions will be erased. /home will be preserved.")
+                .color(egui::Color32::from_rgb(100, 200, 255)),
+        );
+    } else {
+        ui.label(
+            RichText::new("⚠ All data on the selected disk will be erased!")
+                .color(egui::Color32::YELLOW),
+        );
+    }
     ui.add_space(16.0);
 
     if ui.button("🔄 Refresh Disks").clicked() {
@@ -78,6 +86,7 @@ pub fn disk_config_panel(
     swap_type: &mut SwapType,
     zram_percent: &mut u8,
     use_subvolumes: &mut bool,
+    preserve_home: &mut bool,
     use_lvm_thin: &mut bool,
     lvm_vg_name: &mut String,
     lvm_thin_pool_name: &mut String,
@@ -160,6 +169,46 @@ pub fn disk_config_panel(
         ui.add_space(8.0);
     } else {
         *use_subvolumes = false;
+    }
+
+    // Preserve home partition (only for layouts with a separate /home)
+    {
+        let can_preserve = matches!(layout, PartitionLayout::Standard)
+            || (matches!(layout, PartitionLayout::Custom)
+                && custom_partitions.iter().any(|p| p.mount_point == "/home"));
+        let incompatible = *use_subvolumes || *use_lvm_thin;
+
+        if can_preserve && !incompatible {
+            ui.checkbox(
+                preserve_home,
+                "Preserve existing /home partition (reinstall without erasing user files)",
+            );
+            if *preserve_home {
+                ui.label(
+                    RichText::new(
+                        "Home partition will be kept intact from the existing installation.",
+                    )
+                    .weak(),
+                );
+            }
+        } else {
+            *preserve_home = false;
+            ui.add_enabled(false, egui::Checkbox::new(preserve_home, "Preserve existing /home partition"));
+            if *use_subvolumes {
+                ui.label(
+                    RichText::new("Preserve home is incompatible with btrfs subvolumes.").weak(),
+                );
+            } else if *use_lvm_thin {
+                ui.label(
+                    RichText::new("Preserve home is incompatible with LVM thin provisioning.").weak(),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Selected layout has no separate /home partition.").weak(),
+                );
+            }
+        }
+        ui.add_space(8.0);
     }
 
     // Encryption (available on all layouts)
@@ -586,6 +635,7 @@ pub fn summary_panel(
     hostname: &str,
     username: &str,
     encrypt_home: bool,
+    preserve_home: bool,
     network_backend: &NetworkBackend,
     desktop_env: &DesktopEnvironment,
     dry_run: &mut bool,
@@ -637,6 +687,10 @@ pub fn summary_panel(
 
             ui.label("Swap:");
             ui.label(format!("{}", swap_type));
+            ui.end_row();
+
+            ui.label("Preserve Home:");
+            ui.label(if preserve_home { "Yes" } else { "No" });
             ui.end_row();
 
             ui.label("Init System:");
@@ -702,11 +756,19 @@ pub fn summary_panel(
     ui.checkbox(dry_run, "Dry run mode (preview only, no changes)");
     ui.add_space(8.0);
 
-    ui.label(
-        RichText::new("⚠ WARNING: This will ERASE ALL DATA on the selected disk!")
-            .color(egui::Color32::RED)
-            .strong(),
-    );
+    if preserve_home {
+        ui.label(
+            RichText::new("⚠ WARNING: System partitions will be reformatted. /home partition data will be preserved.")
+                .color(egui::Color32::YELLOW)
+                .strong(),
+        );
+    } else {
+        ui.label(
+            RichText::new("⚠ WARNING: This will ERASE ALL DATA on the selected disk!")
+                .color(egui::Color32::RED)
+                .strong(),
+        );
+    }
     ui.add_space(4.0);
     ui.checkbox(confirmed, "I understand and want to proceed");
     ui.add_space(8.0);

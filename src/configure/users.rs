@@ -24,11 +24,16 @@ pub fn create_user(
     );
 
     let encrypt_home = config.user.encrypt_home;
+    let preserve_home = config.disk.preserve_home;
+
+    // Check if the user's home directory already exists (preserved home partition)
+    let home_dir = format!("{}/home/{}", install_root, username);
+    let home_exists = std::path::Path::new(&home_dir).exists();
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create user {} with groups {:?} (encrypt_home={})",
-            username, groups, encrypt_home
+            "  [dry-run] Would create user {} with groups {:?} (encrypt_home={}, preserve_home={}, home_exists={})",
+            username, groups, encrypt_home, preserve_home, home_exists
         );
         return Ok(());
     }
@@ -36,13 +41,30 @@ pub fn create_user(
     // Build groups string
     let groups_str = groups.join(",");
 
-    // Create user: skip home dir creation (-M) when gocryptfs will handle it
-    let useradd_cmd = if encrypt_home {
+    // Create user:
+    //   -M : skip home dir creation when gocryptfs will handle it
+    //   -m : create home normally
+    // When preserve_home is active and the home directory already exists,
+    // use -M to avoid overwriting existing files, then ensure ownership.
+    let skip_home_create = encrypt_home || (preserve_home && home_exists);
+    let useradd_cmd = if skip_home_create {
         format!("useradd -M -G {} -s /bin/bash {}", groups_str, username)
     } else {
         format!("useradd -m -G {} -s /bin/bash {}", groups_str, username)
     };
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
+
+    // When preserving an existing home directory, ensure correct ownership
+    if preserve_home && home_exists && !encrypt_home {
+        info!(
+            "Preserving existing home directory /home/{}; ensuring ownership",
+            username
+        );
+        cmd.run_in_chroot(
+            install_root,
+            &format!("chown {}:{} /home/{}", username, username, username),
+        )?;
+    }
 
     // For encrypted home: create the mount point directory
     if encrypt_home {
