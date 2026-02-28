@@ -40,6 +40,11 @@ PACMAN_CONF_DIR="${ARTOOLS_CONF_DIR}/pacman.conf.d"
 PACMAN_CONF_NAME="iso-x86_64.conf"
 SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
 
+# ── External package sources ─────────────────────────────────────────────────
+TKG_GUI_REPO_URL="https://github.com/MasterGenotype/tkg-gui.git"
+TKG_GUI_CLONE_DIR=""  # resolved in resolve_paths()
+TKG_GUI_PKG_DIR=""    # pkg/ inside the tkg-gui clone
+
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
@@ -108,6 +113,8 @@ resolve_paths() {
     PKG_DIR="${REPO_ROOT}/pkg"
     LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
+    TKG_GUI_CLONE_DIR="${WORKSPACE_DIR}/tkg-gui-src"
+    TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -135,16 +142,18 @@ check_prerequisites() {
 # ── Step B: Build packages ───────────────────────────────────────────────────
 build_packages() {
     if "$SKIP_REBUILD"; then
-        # Verify packages exist
+        # Verify packages exist in both source dirs
         local count
-        count=$(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l)
+        count=$(find "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" \
+            -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l)
         if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/ and -s (skip rebuild) was set"
+            die "No .pkg.tar.zst found in ${PKG_DIR}/ or ${TKG_GUI_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
         msg "Skipping package build (-s); reusing existing packages"
         return 0
     fi
 
+    # ── Deploytix packages ───────────────────────────────────────────────────
     msg "Building deploytix packages..."
     pushd "${PKG_DIR}" >/dev/null
 
@@ -156,15 +165,45 @@ build_packages() {
 
     popd >/dev/null
 
-    # Verify output
     if ! "$DRY_RUN"; then
         local count
         count=$(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
-        if (( count == 0 )); then
-            die "makepkg produced no packages"
-        fi
-        msg2 "Built ${count} package(s)"
+        (( count > 0 )) || die "makepkg produced no deploytix packages"
+        msg2 "Built ${count} deploytix package(s)"
     fi
+
+    # ── tkg-gui packages ─────────────────────────────────────────────────────
+    build_tkg_gui_packages
+}
+
+# Clone (or update) tkg-gui and build its pkg/PKGBUILD
+build_tkg_gui_packages() {
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would clone/update ${TKG_GUI_REPO_URL} and run makepkg"
+        return 0
+    fi
+
+    msg "Building tkg-gui packages..."
+
+    if [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
+        msg2 "Updating tkg-gui repository..."
+        git -C "${TKG_GUI_CLONE_DIR}" pull --ff-only
+    else
+        msg2 "Cloning tkg-gui repository..."
+        git clone "${TKG_GUI_REPO_URL}" "${TKG_GUI_CLONE_DIR}"
+    fi
+
+    [[ -f "${TKG_GUI_PKG_DIR}/PKGBUILD" ]] \
+        || die "tkg-gui pkg/PKGBUILD not found at ${TKG_GUI_PKG_DIR}/PKGBUILD"
+
+    pushd "${TKG_GUI_PKG_DIR}" >/dev/null
+    makepkg -sf --noconfirm
+    popd >/dev/null
+
+    local count
+    count=$(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
+    (( count > 0 )) || die "makepkg produced no tkg-gui packages"
+    msg2 "Built ${count} tkg-gui package(s)"
 }
 
 # ── Step C: Create local pacman repository ───────────────────────────────────
@@ -184,13 +223,15 @@ create_local_repo() {
     # Clean old packages
     sudo rm -f "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
-    # Copy packages
+    # Copy packages from all source directories
     local pkg_count=0
-    for pkg in "${PKG_DIR}"/*.pkg.tar.zst; do
-        [[ -f "$pkg" ]] || continue
-        sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
-        msg2 "Added $(basename "$pkg")"
-        pkg_count=$((pkg_count + 1))
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        for pkg in "${src_dir}"/*.pkg.tar.zst; do
+            [[ -f "$pkg" ]] || continue
+            sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
+            msg2 "Added $(basename "$pkg")"
+            pkg_count=$((pkg_count + 1))
+        done
     done
 
     if (( pkg_count == 0 )); then
@@ -279,6 +320,12 @@ reset_artifacts() {
         msg2 "Removed repo: ${LOCAL_REPO_DIR}"
     fi
 
+    # Remove tkg-gui clone
+    if [[ -d "${TKG_GUI_CLONE_DIR}" ]]; then
+        rm -rf "${TKG_GUI_CLONE_DIR}"
+        msg2 "Removed tkg-gui clone: ${TKG_GUI_CLONE_DIR}"
+    fi
+
     msg "Reset complete"
 }
 
@@ -335,8 +382,8 @@ generate_gui_profile() {
     # Start from the DE profile and inject deploytix packages
     cp "$de_profile" "$dest/profile.yaml"
 
-    # Add deploytix packages to livefs (live session only) and remove calamares
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git"]' "$dest/profile.yaml"
+    # Add deploytix and tkg-gui packages to livefs (live session only) and remove calamares
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     # Copy overlays from the DE profile
@@ -363,7 +410,78 @@ generate_gui_profile() {
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
 }
 
-# ── Step F: Run buildiso ─────────────────────────────────────────────────────
+# ── Step F: Embed built packages in the live-overlay ─────────────────────────
+# The live ISO's pacman.conf (set up by buildiso) points [deploytix] at the
+# build machine's LOCAL_REPO_DIR, which does not exist on the booted live
+# system.  To let basestrap install deploytix-git and tkg-gui-git onto the
+# target disk, we embed the .pkg.tar.zst files and a pacman database directly
+# into the live-overlay and include a matching pacman.conf that points to the
+# in-ISO path so the live environment's pacman can find them at runtime.
+embed_live_repo() {
+    msg "Embedding packages in live-overlay for basestrap use..."
+    local dest="${WORKSPACE_PROFILES}/deploytix"
+    local live_overlay_dir="${dest}/live-overlay"
+    local live_repo_path="${live_overlay_dir}/var/lib/deploytix-repo"
+    local live_etc_dir="${live_overlay_dir}/etc"
+
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would embed packages at ${live_repo_path}"
+        return 0
+    fi
+
+    # If the live-overlay is a symlink (e.g. pointing to a DE profile's overlay),
+    # materialise it into a real directory so we can safely add files without
+    # modifying the symlink target.
+    if [[ -L "${live_overlay_dir}" ]]; then
+        local link_target
+        link_target="$(readlink -f "${live_overlay_dir}")"
+        rm "${live_overlay_dir}"
+        if [[ -d "${link_target}" ]]; then
+            cp -a "${link_target}" "${live_overlay_dir}"
+        else
+            mkdir -p "${live_overlay_dir}"
+        fi
+        msg2 "Materialised live-overlay symlink into real directory"
+    fi
+
+    mkdir -p "${live_repo_path}" "${live_etc_dir}"
+
+    # Copy all built packages into the in-ISO repo directory
+    local pkg_count=0
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        for pkg in "${src_dir}"/*.pkg.tar.zst; do
+            [[ -f "$pkg" ]] || continue
+            cp -f "$pkg" "${live_repo_path}/"
+            msg2 "Embedded $(basename "$pkg")"
+            pkg_count=$((pkg_count + 1))
+        done
+    done
+
+    (( pkg_count > 0 )) || die "No packages available to embed in live-overlay"
+
+    # Build a pacman database from the embedded packages so pacman/basestrap
+    # can resolve and install them inside the live environment.
+    repo-add "${live_repo_path}/deploytix.db.tar.zst" \
+        "${live_repo_path}"/*.pkg.tar.zst
+
+    # Generate a pacman.conf for the live system:
+    #   • base it on the system artools conf so all standard Artix repos are present
+    #   • append [deploytix] pointing to the in-ISO path
+    # This file, placed in the live-overlay, overrides the default pacman.conf
+    # installed by the base Artix system packages.
+    cp "${SYSTEM_PACMAN_CONF}" "${live_etc_dir}/pacman.conf"
+    cat >> "${live_etc_dir}/pacman.conf" <<EOF
+
+# ── Deploytix local repository (embedded in ISO for basestrap use) ──
+[deploytix]
+SigLevel = Optional TrustAll
+Server = file:///var/lib/deploytix-repo
+EOF
+
+    msg2 "Embedded ${pkg_count} package(s); [deploytix] repo available at /var/lib/deploytix-repo"
+}
+
+# ── Step H: Run buildiso ─────────────────────────────────────────────────────
 run_buildiso() {
     msg "Building ISO (init=${INITSYS}, profile=deploytix)..."
 
@@ -425,6 +543,7 @@ main() {
     create_local_repo
     install_pacman_conf
     install_profile
+    embed_live_repo
     run_buildiso
 
     msg "Done!"
