@@ -45,8 +45,5 @@ livefs:
   packages:
     - deploytix-git
     - tkg-gui-git
-<<<<<<< HEAD
-=======
     - dosfstools
     - artools
->>>>>>> 1da30fd96e019dfb4de1301ddb82bbd05405e3b0
