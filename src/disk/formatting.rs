@@ -502,6 +502,65 @@ pub fn create_btrfs_filesystem(cmd: &CommandRunner, device: &str, label: &str) -
         })
 }
 
+/// Recursively delete all nested btrfs subvolumes under `path`.
+///
+/// `btrfs subvolume delete` refuses to remove a subvolume that still contains
+/// child subvolumes (e.g. snapshots, Docker layers, Flatpak data).  This
+/// helper lists children deepest-first and deletes them before the caller
+/// removes the parent.  All errors are logged but otherwise ignored so that a
+/// single stubborn subvolume doesn't abort the whole reinstall.
+fn delete_nested_subvolumes(cmd: &CommandRunner, path: &str) {
+    // `btrfs subvolume list -o` lists direct children; we need the full
+    // recursive tree sorted deepest-first so children are removed before
+    // parents.  `btrfs subvolume list` with the path gives us paths
+    // relative to the top-level volume.
+    let output = std::process::Command::new("btrfs")
+        .args(["subvolume", "list", "-o", path])
+        .output();
+
+    let lines = match output {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return, // No children or command failed — nothing to do
+    };
+
+    // Each line looks like:
+    //   ID 259 gen 12 top level 5 path <subvol_path>
+    // Extract the path portion and build absolute paths.
+    let mut child_paths: Vec<String> = lines
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(9, ' ').collect();
+            if parts.len() >= 9 {
+                // The path column is relative to the filesystem root;
+                // the mounted filesystem root is the parent of `path`.
+                // However `btrfs subvolume list -o <path>` returns paths
+                // relative to the filesystem top-level, so we need to
+                // find the mount point.  For simplicity we use the
+                // absolute path returned combined with the mount point.
+                // Since we mounted the raw btrfs at fs_mount, the path
+                // part after "path" is relative to that mount.
+                let rel = parts[8];
+                // `path` itself is something like /tmp/btrfs_mount/@var
+                // The parent directory is the mount point
+                let mount_point = std::path::Path::new(path)
+                    .parent()
+                    .unwrap_or(std::path::Path::new(path));
+                Some(format!("{}/{}", mount_point.display(), rel))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by path depth descending so deepest children are deleted first
+    child_paths.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
+
+    for child in &child_paths {
+        info!("preserve_home: deleting nested subvolume {}", child);
+        let _ = cmd.run("btrfs", &["subvolume", "delete", child]);
+    }
+}
+
 /// Create btrfs subvolumes on a device
 ///
 /// Follows the canonical BTRFS subvolume setup order:
@@ -554,6 +613,10 @@ pub fn create_btrfs_subvolumes(
             let subvol_path = format!("{}/{}", fs_mount, sv.name);
             // Subvolume may not exist (first install), ignore errors
             if std::path::Path::new(&subvol_path).exists() {
+                // Delete any nested subvolumes first (snapshots, Docker
+                // layers, etc.) — btrfs subvolume delete fails on
+                // non-empty subvolumes.
+                delete_nested_subvolumes(cmd, &subvol_path);
                 let _ = cmd.run("btrfs", &["subvolume", "delete", &subvol_path]);
                 info!("Deleted existing subvolume: {}", sv.name);
             }

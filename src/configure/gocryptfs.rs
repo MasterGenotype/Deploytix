@@ -33,28 +33,46 @@ pub fn setup_encrypted_home(
 
     let username = &config.user.name;
     let password = &config.user.password;
+    let preserve_home = config.disk.preserve_home;
 
     info!(
-        "Setting up gocryptfs encrypted home for user '{}'",
-        username
+        "Setting up gocryptfs encrypted home for user '{}' (preserve_home: {})",
+        username, preserve_home,
     );
 
     if cmd.is_dry_run() {
-        println!(
-            "  [dry-run] Would set up gocryptfs encrypted home for {}",
-            username
-        );
-        println!(
-            "  [dry-run] Would create /home/{}.cipher and initialize gocryptfs",
-            username
-        );
-        println!("  [dry-run] Would configure pam_mount and PAM for auto-unlock");
+        if preserve_home {
+            println!(
+                "  [dry-run] Would configure pam_mount/PAM for {} (preserve_home: skip cipher init)",
+                username
+            );
+        } else {
+            println!(
+                "  [dry-run] Would set up gocryptfs encrypted home for {}",
+                username
+            );
+            println!(
+                "  [dry-run] Would create /home/{}.cipher and initialize gocryptfs",
+                username
+            );
+            println!("  [dry-run] Would configure pam_mount and PAM for auto-unlock");
+        }
         return Ok(());
     }
 
     configure_fuse(cmd, install_root)?;
-    init_cipher_directory(cmd, username, password, install_root)?;
-    populate_skel(cmd, username, password, install_root)?;
+
+    // When preserve_home is enabled the existing cipher directory already
+    // contains user data.  Skip initialization and skel population to avoid
+    // destroying it.  PAM / pam_mount configuration is still applied so the
+    // fresh system can unlock the preserved encrypted home on login.
+    if !preserve_home {
+        init_cipher_directory(cmd, username, password, install_root)?;
+        populate_skel(cmd, username, password, install_root)?;
+    } else {
+        info!("preserve_home: skipping gocryptfs init (existing cipher directory preserved)");
+    }
+
     configure_pam_mount(username, install_root)?;
     configure_pam(install_root)?;
 

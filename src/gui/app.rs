@@ -266,6 +266,7 @@ impl DeploytixGui {
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_percent: self.zram_percent,
                 zram_algorithm: "zstd".to_string(),
+                preserve_home: false,
                 // Custom partitions
                 custom_partitions: if self.partition_layout == PartitionLayout::Custom {
                     Some(self.custom_partitions.clone())

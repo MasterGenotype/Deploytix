@@ -16,19 +16,21 @@ pub fn create_user(
     let username = &config.user.name;
     let password = &config.user.password;
     let groups = &config.user.groups;
+    let preserve_home = config.disk.preserve_home;
 
     info!(
-        "Creating user '{}' with groups [{}]",
+        "Creating user '{}' with groups [{}] (preserve_home: {})",
         username,
-        groups.join(", ")
+        groups.join(", "),
+        preserve_home,
     );
 
     let encrypt_home = config.user.encrypt_home;
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create user {} with groups {:?} (encrypt_home={})",
-            username, groups, encrypt_home
+            "  [dry-run] Would create user {} with groups {:?} (encrypt_home={}, preserve_home={})",
+            username, groups, encrypt_home, preserve_home,
         );
         return Ok(());
     }
@@ -54,6 +56,23 @@ pub fn create_user(
             &format!("chown {}:{} /home/{}", username, username, username),
         )?;
         cmd.run_in_chroot(install_root, &format!("chmod 700 /home/{}", username))?;
+    }
+
+    // When preserve_home is enabled the preserved /home/<user> directory has
+    // file ownership from the old system (potentially a different UID/GID).
+    // Fix ownership so the newly created user can access their files.
+    if preserve_home {
+        let home_dir = format!("{}/home/{}", install_root, username);
+        if std::path::Path::new(&home_dir).exists() {
+            info!(
+                "preserve_home: fixing ownership of /home/{} to match new UID/GID",
+                username
+            );
+            cmd.run_in_chroot(
+                install_root,
+                &format!("chown -R {}:{} /home/{}", username, username, username),
+            )?;
+        }
     }
 
     // Set password using chpasswd, passing credentials via a temp file to

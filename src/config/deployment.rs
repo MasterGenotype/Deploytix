@@ -941,6 +941,28 @@ impl DeploymentConfig {
             ));
         }
 
+        // preserve_home is incompatible with LVM thin provisioning — the entire
+        // LVM PV (including the home thin volume) must be recreated from scratch.
+        if self.disk.preserve_home && self.disk.use_lvm_thin {
+            return Err(DeploytixError::ValidationError(
+                "preserve_home is not supported with LVM thin provisioning (the LVM PV cannot be partially preserved)"
+                    .to_string(),
+            ));
+        }
+
+        // preserve_home with Minimal layout requires subvolumes — Minimal has no
+        // dedicated /home partition, so without an @home subvolume there is nothing
+        // to preserve.
+        if self.disk.preserve_home
+            && self.disk.layout == PartitionLayout::Minimal
+            && !self.disk.use_subvolumes
+        {
+            return Err(DeploytixError::ValidationError(
+                "preserve_home with Minimal layout requires use_subvolumes = true (Minimal has no dedicated /home partition)"
+                    .to_string(),
+            ));
+        }
+
         // Integrity requires encryption
         if self.disk.integrity && !self.disk.encryption {
             return Err(DeploytixError::ValidationError(

@@ -810,15 +810,15 @@ impl Installer {
                                 .to_string(),
                         )
                     })?;
-                let mapper_name = "Crypt-Home";
+                let mapper_name = configure::encryption::resolve_mapper_name("Crypt-Home");
                 info!(
                     "preserve_home: opening existing LUKS container {} as {}",
                     home_device, mapper_name
                 );
-                configure::encryption::open_luks(&self.cmd, &home_device, mapper_name, password)?;
+                configure::encryption::open_luks(&self.cmd, &home_device, &mapper_name, password)?;
                 containers.push(LuksContainer {
                     device: home_device,
-                    mapper_name: mapper_name.to_string(),
+                    mapper_name: mapper_name.clone(),
                     mapped_path: format!("/dev/mapper/{}", mapper_name),
                     volume_name: "Home".to_string(),
                 });
