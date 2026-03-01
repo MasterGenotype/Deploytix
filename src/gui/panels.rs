@@ -78,6 +78,7 @@ pub fn disk_config_panel(
     swap_type: &mut SwapType,
     zram_percent: &mut u8,
     use_subvolumes: &mut bool,
+    preserve_home: &mut bool,
     use_lvm_thin: &mut bool,
     lvm_vg_name: &mut String,
     lvm_thin_pool_name: &mut String,
@@ -160,6 +161,37 @@ pub fn disk_config_panel(
     } else {
         *use_subvolumes = false;
     }
+
+    // Preserve home (reinstall without overwriting /home)
+    ui.checkbox(preserve_home, "Preserve existing /home (reinstall without overwriting user data)");
+    if *preserve_home {
+        ui.label(
+            RichText::new(
+                "System partitions will be erased but /home will be kept intact.",
+            )
+            .weak(),
+        );
+        // Enforce incompatibilities
+        if *filesystem == Filesystem::Zfs {
+            ui.label(
+                RichText::new("⚠ preserve_home is not supported with ZFS")
+                    .color(egui::Color32::YELLOW),
+            );
+        }
+        if *use_lvm_thin {
+            ui.label(
+                RichText::new("⚠ preserve_home is not supported with LVM thin provisioning")
+                    .color(egui::Color32::YELLOW),
+            );
+        }
+        if *layout == PartitionLayout::Minimal && !*use_subvolumes {
+            ui.label(
+                RichText::new("⚠ preserve_home with Minimal layout requires subvolumes")
+                    .color(egui::Color32::YELLOW),
+            );
+        }
+    }
+    ui.add_space(8.0);
 
     // Encryption (available on all layouts)
     ui.checkbox(encryption, "Enable LUKS encryption on data partitions");

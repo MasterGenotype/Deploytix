@@ -94,6 +94,8 @@ pub struct DeploytixGui {
     zram_percent: u8,
     // Btrfs subvolumes
     use_subvolumes: bool,
+    // Preserve home
+    preserve_home: bool,
     // LVM thin provisioning
     use_lvm_thin: bool,
     lvm_vg_name: String,
@@ -162,6 +164,7 @@ impl Default for DeploytixGui {
             swap_type: SwapType::Partition,
             zram_percent: 50,
             use_subvolumes: false,
+            preserve_home: false,
             use_lvm_thin: false,
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),
@@ -266,7 +269,7 @@ impl DeploytixGui {
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_percent: self.zram_percent,
                 zram_algorithm: "zstd".to_string(),
-                preserve_home: false,
+                preserve_home: self.preserve_home,
                 // Custom partitions
                 custom_partitions: if self.partition_layout == PartitionLayout::Custom {
                     Some(self.custom_partitions.clone())
@@ -555,6 +558,7 @@ impl eframe::App for DeploytixGui {
                     &mut self.swap_type,
                     &mut self.zram_percent,
                     &mut self.use_subvolumes,
+                    &mut self.preserve_home,
                     &mut self.use_lvm_thin,
                     &mut self.lvm_vg_name,
                     &mut self.lvm_thin_pool_name,
