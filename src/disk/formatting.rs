@@ -54,16 +54,22 @@ pub fn format_partition(
             // ZFS uses zpool create rather than a traditional mkfs tool.
             // The pool name is taken from the label when provided, otherwise
             // derived from the partition path's last component.
-            let pool_name = label.unwrap_or_else(|| {
-                partition
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("zpool")
-            });
+            let pool_name =
+                label.unwrap_or_else(|| partition.rsplit('/').next().unwrap_or("zpool"));
             cmd.run(
                 "zpool",
-                &["create", "-f", "-m", "none", "-o", "ashift=12",
-                  "-O", "atime=off", pool_name, partition],
+                &[
+                    "create",
+                    "-f",
+                    "-m",
+                    "none",
+                    "-o",
+                    "ashift=12",
+                    "-O",
+                    "atime=off",
+                    pool_name,
+                    partition,
+                ],
             )
         }
     };
@@ -98,17 +104,13 @@ pub fn format_boot_partition(
     partition: &str,
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
-    info!(
-        "Formatting {} as {} (BOOT)",
-        partition, boot_filesystem
-    );
+    info!("Formatting {} as {} (BOOT)", partition, boot_filesystem);
     if *boot_filesystem == Filesystem::Zfs {
         return create_zfs_boot_pool(cmd, partition);
     }
-    format_partition(cmd, partition, boot_filesystem, Some("BOOT"))
-        .map_err(|e| {
-            DeploytixError::FilesystemError(format!("Failed to format BOOT partition: {}", e))
-        })
+    format_partition(cmd, partition, boot_filesystem, Some("BOOT")).map_err(|e| {
+        DeploytixError::FilesystemError(format!("Failed to format BOOT partition: {}", e))
+    })
 }
 
 /// Format a swap partition
@@ -143,17 +145,40 @@ pub fn format_all_partitions(
     layout: &ComputedLayout,
     filesystem: &Filesystem,
     boot_filesystem: &Filesystem,
+    preserve_home: bool,
 ) -> Result<()> {
     info!(
-        "Formatting {} partitions on {} (data fs: {}, boot fs: {})",
+        "Formatting {} partitions on {} (data fs: {}, boot fs: {}, preserve_home: {})",
         layout.partitions.len(),
         device,
         filesystem,
         boot_filesystem,
+        preserve_home,
     );
 
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
+
+        // Skip /home partition when preserve_home is enabled
+        if preserve_home && part.mount_point.as_deref() == Some("/home") {
+            info!(
+                "Skipping {} (preserve_home: /home partition preserved)",
+                part_path
+            );
+            continue;
+        }
+
+        // When preserve_home + subvolumes, skip the ROOT partition entirely.
+        // The ROOT btrfs filesystem contains the @home subvolume; reformatting
+        // it would destroy user data.  create_btrfs_subvolumes() handles the
+        // selective refresh (delete all subvols except @home, then recreate).
+        if preserve_home && layout.uses_subvolumes() && part.name == "ROOT" {
+            info!(
+                "Skipping {} (preserve_home + subvolumes: ROOT btrfs contains @home)",
+                part_path
+            );
+            continue;
+        }
 
         if part.is_efi {
             format_efi(cmd, &part_path)?;
@@ -254,19 +279,30 @@ pub fn create_zfs_pool(cmd: &CommandRunner, device: &str) -> Result<()> {
     cmd.run(
         "zpool",
         &[
-            "create", "-f",
-            "-o", "ashift=12",
-            "-O", "mountpoint=none",
-            "-O", "atime=off",
-            "-O", "compression=zstd",
-            "-O", "xattr=sa",
-            "-O", "acltype=posixacl",
-            ZFS_RPOOL_NAME, device,
+            "create",
+            "-f",
+            "-o",
+            "ashift=12",
+            "-O",
+            "mountpoint=none",
+            "-O",
+            "atime=off",
+            "-O",
+            "compression=zstd",
+            "-O",
+            "xattr=sa",
+            "-O",
+            "acltype=posixacl",
+            ZFS_RPOOL_NAME,
+            device,
         ],
     )
     .map(|_| ())
     .map_err(|e| {
-        DeploytixError::FilesystemError(format!("Failed to create ZFS pool {}: {}", ZFS_RPOOL_NAME, e))
+        DeploytixError::FilesystemError(format!(
+            "Failed to create ZFS pool {}: {}",
+            ZFS_RPOOL_NAME, e
+        ))
     })
 }
 
@@ -290,23 +326,41 @@ fn create_zfs_boot_pool(cmd: &CommandRunner, device: &str) -> Result<()> {
     cmd.run(
         "zpool",
         &[
-            "create", "-f", "-d",
-            "-o", "ashift=12",
-            "-o", "feature@async_destroy=enabled",
-            "-o", "feature@bookmarks=enabled",
-            "-o", "feature@embedded_data=enabled",
-            "-o", "feature@empty_bpobj=enabled",
-            "-o", "feature@enabled_txg=enabled",
-            "-o", "feature@extensible_dataset=enabled",
-            "-o", "feature@filesystem_limits=enabled",
-            "-o", "feature@hole_birth=enabled",
-            "-o", "feature@large_blocks=enabled",
-            "-o", "feature@lz4_compress=enabled",
-            "-o", "feature@spacemap_histogram=enabled",
-            "-O", "mountpoint=none",
-            "-O", "compression=lz4",
-            "-O", "atime=off",
-            ZFS_BPOOL_NAME, device,
+            "create",
+            "-f",
+            "-d",
+            "-o",
+            "ashift=12",
+            "-o",
+            "feature@async_destroy=enabled",
+            "-o",
+            "feature@bookmarks=enabled",
+            "-o",
+            "feature@embedded_data=enabled",
+            "-o",
+            "feature@empty_bpobj=enabled",
+            "-o",
+            "feature@enabled_txg=enabled",
+            "-o",
+            "feature@extensible_dataset=enabled",
+            "-o",
+            "feature@filesystem_limits=enabled",
+            "-o",
+            "feature@hole_birth=enabled",
+            "-o",
+            "feature@large_blocks=enabled",
+            "-o",
+            "feature@lz4_compress=enabled",
+            "-o",
+            "feature@spacemap_histogram=enabled",
+            "-O",
+            "mountpoint=none",
+            "-O",
+            "compression=lz4",
+            "-O",
+            "atime=off",
+            ZFS_BPOOL_NAME,
+            device,
         ],
     )
     .map(|_| ())
@@ -329,10 +383,10 @@ fn create_zfs_boot_pool(cmd: &CommandRunner, device: &str) -> Result<()> {
 ///
 /// All datasets use `mountpoint=legacy` so they can be managed via fstab.
 pub const ZFS_DATASETS: &[(&str, &str)] = &[
-    ("rpool/ROOT",     "/"),
-    ("rpool/home",     "/home"),
-    ("rpool/var",      "/var"),
-    ("rpool/var/log",  "/var/log"),
+    ("rpool/ROOT", "/"),
+    ("rpool/home", "/home"),
+    ("rpool/var", "/var"),
+    ("rpool/var/log", "/var/log"),
 ];
 
 /// Create the standard ZFS dataset hierarchy under an existing data pool.
@@ -341,22 +395,23 @@ pub fn create_zfs_datasets(cmd: &CommandRunner) -> Result<()> {
 
     if cmd.is_dry_run() {
         for (ds, mp) in ZFS_DATASETS {
-            println!("  [dry-run] zfs create -o mountpoint=legacy {} (→ {})", ds, mp);
+            println!(
+                "  [dry-run] zfs create -o mountpoint=legacy {} (→ {})",
+                ds, mp
+            );
         }
         return Ok(());
     }
 
     for (ds, mp) in ZFS_DATASETS {
-        cmd.run(
-            "zfs",
-            &["create", "-o", "mountpoint=legacy", ds],
-        )
-        .map(|_| ())
-        .map_err(|e| {
-            DeploytixError::FilesystemError(format!(
-                "Failed to create ZFS dataset {} ({}): {}", ds, mp, e
-            ))
-        })?;
+        cmd.run("zfs", &["create", "-o", "mountpoint=legacy", ds])
+            .map(|_| ())
+            .map_err(|e| {
+                DeploytixError::FilesystemError(format!(
+                    "Failed to create ZFS dataset {} ({}): {}",
+                    ds, mp, e
+                ))
+            })?;
         info!("Created dataset {} → {}", ds, mp);
     }
 
@@ -384,7 +439,8 @@ pub fn mount_zfs_datasets(cmd: &CommandRunner, install_root: &str) -> Result<()>
         } else {
             cmd.run("mount", &["-t", "zfs", ds, &target]).map_err(|e| {
                 DeploytixError::FilesystemError(format!(
-                    "Failed to mount ZFS dataset {}: {}", ds, e
+                    "Failed to mount ZFS dataset {}: {}",
+                    ds, e
                 ))
             })?;
             info!("Mounted {} to {}", ds, target);
@@ -397,7 +453,10 @@ pub fn mount_zfs_datasets(cmd: &CommandRunner, install_root: &str) -> Result<()>
 /// Mount the ZFS boot dataset at `<install_root>/boot`.
 pub fn mount_zfs_boot(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     let target = format!("{}/boot", install_root);
-    info!("Mounting ZFS boot dataset {} to {}", ZFS_BOOT_DATASET, target);
+    info!(
+        "Mounting ZFS boot dataset {} to {}",
+        ZFS_BOOT_DATASET, target
+    );
 
     if !cmd.is_dry_run() {
         fs::create_dir_all(&target)?;
@@ -454,17 +513,20 @@ pub fn create_btrfs_subvolumes(
     device: &str,
     subvolumes: &[SubvolumeDef],
     fs_mount: &str,
+    preserve_home: bool,
 ) -> Result<()> {
     info!(
-        "Creating {} btrfs subvolumes on {} (mounted at {})",
-        subvolumes.len(),
-        device,
-        fs_mount
+        "Creating btrfs subvolumes on {} (mounted at {}, preserve_home: {})",
+        device, fs_mount, preserve_home,
     );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mount {} {}", device, fs_mount);
         for sv in subvolumes {
+            if preserve_home && sv.mount_point == "/home" {
+                println!("  [dry-run] SKIP subvolume {} (preserve_home)", sv.name);
+                continue;
+            }
             println!(
                 "  [dry-run] btrfs subvolume create {}/{}",
                 fs_mount, sv.name
@@ -480,8 +542,43 @@ pub fn create_btrfs_subvolumes(
     // Mount the raw btrfs filesystem to its mountpoint
     cmd.run("mount", &[device, fs_mount])?;
 
+    // When preserve_home is enabled, delete all subvolumes EXCEPT @home
+    // so we get a fresh system while keeping user data.
+    if preserve_home {
+        info!("preserve_home: deleting existing subvolumes except @home");
+        for sv in subvolumes {
+            if sv.mount_point == "/home" {
+                info!("preserve_home: keeping subvolume {}", sv.name);
+                continue;
+            }
+            let subvol_path = format!("{}/{}", fs_mount, sv.name);
+            // Subvolume may not exist (first install), ignore errors
+            if std::path::Path::new(&subvol_path).exists() {
+                let _ = cmd.run("btrfs", &["subvolume", "delete", &subvol_path]);
+                info!("Deleted existing subvolume: {}", sv.name);
+            }
+        }
+    }
+
     // Create each subvolume inside the filesystem mountpoint
     for sv in subvolumes {
+        // Skip @home subvolume when preserve_home is enabled
+        if preserve_home && sv.mount_point == "/home" {
+            let subvol_path = format!("{}/{}", fs_mount, sv.name);
+            if std::path::Path::new(&subvol_path).exists() {
+                info!(
+                    "preserve_home: subvolume {} already exists, skipping",
+                    sv.name
+                );
+                continue;
+            }
+            // If @home doesn't exist, fall through to create it
+            info!(
+                "preserve_home: subvolume {} does not exist, creating it",
+                sv.name
+            );
+        }
+
         let subvol_path = format!("{}/{}", fs_mount, sv.name);
         cmd.run("btrfs", &["subvolume", "create", &subvol_path])
             .map_err(|e| {

@@ -146,10 +146,7 @@ fn populate_skel(
          cp -a /etc/skel/. /home/{}/ && \
          chown -R {}:{} /home/{} && \
          fusermount -u /home/{}",
-        password, username, username,
-        username,
-        username, username, username,
-        username
+        password, username, username, username, username, username, username, username
     );
     cmd.run_in_chroot(install_root, &combined_cmd)?;
 

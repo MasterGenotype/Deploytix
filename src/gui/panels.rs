@@ -128,8 +128,7 @@ pub fn disk_config_panel(
 
     // Swap Configuration
     // Swap file requires btrfs or ext4; auto-correct if filesystem changed
-    let supports_swap_file =
-        *filesystem == Filesystem::Btrfs || *filesystem == Filesystem::Ext4;
+    let supports_swap_file = *filesystem == Filesystem::Btrfs || *filesystem == Filesystem::Ext4;
     if !supports_swap_file && *swap_type == SwapType::FileZram {
         *swap_type = SwapType::Partition;
     }
@@ -500,8 +499,10 @@ pub fn user_config_panel(
     ui.checkbox(encrypt_home, "Encrypt home directory with gocryptfs");
     if *encrypt_home {
         ui.label(
-            RichText::new("Home directory will be encrypted and auto-unlocked on login via pam_mount.")
-                .weak(),
+            RichText::new(
+                "Home directory will be encrypted and auto-unlocked on login via pam_mount.",
+            )
+            .weak(),
         );
     }
     ui.add_space(8.0);
@@ -660,7 +661,11 @@ pub fn summary_panel(
             ui.end_row();
 
             ui.label("Encrypted Home:");
-            ui.label(if encrypt_home { "Enabled (gocryptfs)" } else { "Disabled" });
+            ui.label(if encrypt_home {
+                "Enabled (gocryptfs)"
+            } else {
+                "Disabled"
+            });
             ui.end_row();
 
             ui.label("Network:");

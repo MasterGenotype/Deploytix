@@ -40,8 +40,7 @@ extern "C" fn handle_signal(sig: libc::c_int) {
         }
     } else {
         // Second (or later) signal — force-exit.
-        let msg =
-            b"\nForced exit - cleanup may be incomplete. Run: deploytix cleanup\n";
+        let msg = b"\nForced exit - cleanup may be incomplete. Run: deploytix cleanup\n";
         unsafe {
             libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
             libc::signal(sig, libc::SIG_DFL);
@@ -55,8 +54,14 @@ extern "C" fn handle_signal(sig: libc::c_int) {
 /// Safe to call more than once (idempotent).
 pub fn install_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGINT, handle_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as libc::sighandler_t,
+        );
     }
 }
 

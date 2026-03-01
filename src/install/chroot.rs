@@ -19,9 +19,30 @@ pub fn mount_partitions(
     layout: &ComputedLayout,
     install_root: &str,
 ) -> Result<()> {
+    mount_partitions_inner(cmd, device, layout, install_root, false)
+}
+
+/// Mount all partitions with preserve_home support
+pub fn mount_partitions_preserve(
+    cmd: &CommandRunner,
+    device: &str,
+    layout: &ComputedLayout,
+    install_root: &str,
+    preserve_home: bool,
+) -> Result<()> {
+    mount_partitions_inner(cmd, device, layout, install_root, preserve_home)
+}
+
+fn mount_partitions_inner(
+    cmd: &CommandRunner,
+    device: &str,
+    layout: &ComputedLayout,
+    install_root: &str,
+    preserve_home: bool,
+) -> Result<()> {
     // Check if this layout uses btrfs subvolumes
     if layout.uses_subvolumes() {
-        return mount_partitions_with_subvolumes(cmd, device, layout, install_root);
+        return mount_partitions_with_subvolumes(cmd, device, layout, install_root, preserve_home);
     }
 
     info!(
@@ -159,6 +180,7 @@ fn mount_partitions_with_subvolumes(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
+    preserve_home: bool,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().unwrap();
     info!("Setting up btrfs subvolumes on {} (root partition)", device);
@@ -179,7 +201,7 @@ fn mount_partitions_with_subvolumes(
     // Create subvolumes on the ROOT partition
     // This temporarily mounts the raw btrfs, creates subvolumes, then unmounts
     let temp_mount = "/tmp/deploytix_btrfs_setup";
-    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount)?;
+    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount, preserve_home)?;
 
     // Now mount the subvolumes to their final locations
     mount_btrfs_subvolumes(cmd, &root_path, subvolumes, install_root)?;

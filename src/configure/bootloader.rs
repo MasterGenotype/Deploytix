@@ -84,7 +84,15 @@ fn install_grub(
 
     // Configure GRUB defaults
     let uses_subvolumes = config.disk.use_subvolumes;
-    configure_grub_defaults(cmd, config, &root_uuid, None, uses_subvolumes, false, install_root)?;
+    configure_grub_defaults(
+        cmd,
+        config,
+        &root_uuid,
+        None,
+        uses_subvolumes,
+        false,
+        install_root,
+    )?;
 
     run_grub_install(cmd, device, install_root)?;
 
@@ -411,7 +419,10 @@ fn configure_grub_defaults(
         cmdline_parts.push("rw".to_string());
     } else if config.disk.filesystem == crate::config::Filesystem::Zfs {
         // ZFS root: the zfs hook reads the root dataset from the kernel cmdline
-        cmdline_parts.push(format!("root=ZFS={}", crate::disk::formatting::ZFS_ROOT_DATASET));
+        cmdline_parts.push(format!(
+            "root=ZFS={}",
+            crate::disk::formatting::ZFS_ROOT_DATASET
+        ));
         cmdline_parts.push("rw".to_string());
     } else {
         // Non-encrypted system

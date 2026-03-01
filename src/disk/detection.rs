@@ -116,10 +116,9 @@ fn is_physical_disk(name: &str) -> bool {
 /// Check if a device is mounted
 fn is_device_mounted(device: &str) -> bool {
     let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    mounts.lines().any(|line| {
-        line.split_whitespace()
-            .next() == Some(device)
-    })
+    mounts
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(device))
 }
 
 /// List available block devices

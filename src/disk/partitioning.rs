@@ -12,10 +12,7 @@ use uuid::Uuid;
 /// Generate sfdisk script for a partition layout
 pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> Result<String> {
     let device_info = get_device_info(device).map_err(|e| {
-        DeploytixError::PartitionError(format!(
-            "Cannot read device info for {}: {}",
-            device, e
-        ))
+        DeploytixError::PartitionError(format!("Cannot read device info for {}: {}", device, e))
     })?;
     let sector_size = 512u64; // Default, could be read from sysfs
     let total_sectors = device_info.size_bytes / sector_size;

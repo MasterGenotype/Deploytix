@@ -815,16 +815,13 @@ pub fn apply_lvm_thin_to_layout(
             // mount_point may be Some("/home") or None (cleared by subvolumes
             // for the ROOT partition).  Derive the mount point from the name
             // when it has been cleared.
-            let mount_point = part
-                .mount_point
-                .clone()
-                .unwrap_or_else(|| {
-                    if part.name.eq_ignore_ascii_case("ROOT") {
-                        "/".to_string()
-                    } else {
-                        format!("/{}", part.name.to_lowercase())
-                    }
-                });
+            let mount_point = part.mount_point.clone().unwrap_or_else(|| {
+                if part.name.eq_ignore_ascii_case("ROOT") {
+                    "/".to_string()
+                } else {
+                    format!("/{}", part.name.to_lowercase())
+                }
+            });
 
             // Convert data partition sizes to virtual thin volume sizes
             let virtual_size = if part.size_mib == 0 {

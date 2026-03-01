@@ -211,6 +211,23 @@ fn luks_format_inner(device: &str, password: &str, integrity: bool) -> Result<()
 }
 
 /// Open a LUKS container
+///
+/// Public wrapper used by the installer to re-open existing LUKS containers
+/// (e.g. when `preserve_home` is enabled and the Home volume is not reformatted).
+pub fn open_luks(
+    cmd: &CommandRunner,
+    device: &str,
+    mapper_name: &str,
+    password: &str,
+) -> Result<()> {
+    if cmd.is_dry_run() {
+        println!("  [dry-run] cryptsetup open {} {}", device, mapper_name);
+        return Ok(());
+    }
+    luks_open(device, mapper_name, password)
+}
+
+/// Open a LUKS container (internal)
 fn luks_open(device: &str, mapper_name: &str, password: &str) -> Result<()> {
     info!("Opening LUKS container {} as {}", device, mapper_name);
 

@@ -104,9 +104,7 @@ impl Cleaner {
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-")
-                        || name.starts_with("temporary-cryptsetup-")
-                    {
+                    if name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-") {
                         Some(name)
                     } else {
                         None
@@ -145,9 +143,7 @@ impl Cleaner {
                 continue;
             };
 
-            if !cmdline.starts_with("cryptsetup\0")
-                && !cmdline.starts_with("cryptsetup ")
-            {
+            if !cmdline.starts_with("cryptsetup\0") && !cmdline.starts_with("cryptsetup ") {
                 continue;
             }
 
@@ -157,13 +153,9 @@ impl Cleaner {
                 continue;
             };
             if let Some(after_comm) = stat.rfind(')') {
-                let fields: Vec<&str> =
-                    stat[after_comm + 1..].split_whitespace().collect();
+                let fields: Vec<&str> = stat[after_comm + 1..].split_whitespace().collect();
                 if fields.len() >= 2 && fields[1] == "1" {
-                    info!(
-                        "Killing orphaned cryptsetup process (PID {})",
-                        pid
-                    );
+                    info!("Killing orphaned cryptsetup process (PID {})", pid);
                     if self.cmd.is_dry_run() {
                         println!("  [dry-run] Would kill PID {}", pid);
                         continue;

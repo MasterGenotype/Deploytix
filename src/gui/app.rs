@@ -314,19 +314,15 @@ impl DeploytixGui {
         match toml::to_string_pretty(&config) {
             Ok(content) => match std::fs::write(&self.save_config_path, &content) {
                 Ok(()) => {
-                    self.save_config_status = Some((
-                        format!("✓ Saved to {}", self.save_config_path),
-                        false,
-                    ));
+                    self.save_config_status =
+                        Some((format!("✓ Saved to {}", self.save_config_path), false));
                 }
                 Err(e) => {
-                    self.save_config_status =
-                        Some((format!("✗ Write failed: {}", e), true));
+                    self.save_config_status = Some((format!("✗ Write failed: {}", e), true));
                 }
             },
             Err(e) => {
-                self.save_config_status =
-                    Some((format!("✗ Serialization failed: {}", e), true));
+                self.save_config_status = Some((format!("✗ Serialization failed: {}", e), true));
             }
         }
     }

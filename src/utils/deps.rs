@@ -116,7 +116,13 @@ pub fn check_dependencies(
     use_lvm_thin: bool,
     bootloader: &Bootloader,
 ) -> Vec<String> {
-    let required = required_binaries(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
+    let required = required_binaries(
+        filesystem,
+        boot_filesystem,
+        encryption,
+        use_lvm_thin,
+        bootloader,
+    );
     let bin_to_pkg = binary_to_package();
 
     let mut missing_packages: Vec<String> = Vec::new();
@@ -148,7 +154,13 @@ pub fn ensure_dependencies(
     use_lvm_thin: bool,
     bootloader: &Bootloader,
 ) -> Result<()> {
-    let required = required_binaries(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
+    let required = required_binaries(
+        filesystem,
+        boot_filesystem,
+        encryption,
+        use_lvm_thin,
+        bootloader,
+    );
     let bin_to_pkg = binary_to_package();
 
     // Collect missing binaries with their providing packages
@@ -200,7 +212,13 @@ pub fn ensure_dependencies(
     }
 
     // Verify installation
-    let still_missing = check_dependencies(filesystem, boot_filesystem, encryption, use_lvm_thin, bootloader);
+    let still_missing = check_dependencies(
+        filesystem,
+        boot_filesystem,
+        encryption,
+        use_lvm_thin,
+        bootloader,
+    );
     if !still_missing.is_empty() {
         return Err(crate::utils::error::DeploytixError::ConfigError(format!(
             "Failed to install some dependencies: {}",

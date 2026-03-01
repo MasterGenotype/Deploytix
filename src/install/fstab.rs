@@ -95,7 +95,8 @@ pub fn generate_fstab(
             if part.is_efi {
                 let uuid = get_partition_uuid(&part_path)?;
                 fstab_content.push_str(&format!(
-                    "UUID={}\t/boot/efi\tvfat\tdefaults,noatime\t0\t2\n", uuid
+                    "UUID={}\t/boot/efi\tvfat\tdefaults,noatime\t0\t2\n",
+                    uuid
                 ));
             } else if part.is_swap {
                 let uuid = get_partition_uuid(&part_path)?;
