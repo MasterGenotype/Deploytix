@@ -8,7 +8,7 @@ arch=('x86_64')
 url="https://github.com/MasterGenotype/Deploytix"
 license=('GPL-3.0-or-later')
 makedepends=('cargo' 'git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
-source=("deploytix::git+ssh://git@github.com/MasterGenotype/Deploytix.git")
+source=("deploytix::git+https://github.com/MasterGenotype/Deploytix.git")
 sha256sums=('SKIP')
 
 pkgver() {

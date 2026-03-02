@@ -33,7 +33,6 @@ ISO_DIR=""            # iso/ directory inside repo
 PKG_DIR=""            # pkg/ directory inside repo
 LOCAL_REPO_DIR=""     # pacman repository in artools workspace
 PROFILE_SRC=""        # iso/profile/deploytix/
-TKG_GUI_PKG=""        # resolved path to the tkg-gui .pkg.tar.zst
 WORKSPACE_DIR="${HOME}/artools-workspace"
 WORKSPACE_PROFILES="${WORKSPACE_DIR}/iso-profiles"
 ARTOOLS_CONF_DIR="${HOME}/.config/artools"
@@ -234,13 +233,6 @@ create_local_repo() {
             pkg_count=$((pkg_count + 1))
         done
     done
-
-    # Copy tkg-gui package if available
-    if [[ -n "$TKG_GUI_PKG" && -f "$TKG_GUI_PKG" ]]; then
-        sudo cp -f "$TKG_GUI_PKG" "${LOCAL_REPO_DIR}/"
-        msg2 "Added $(basename "$TKG_GUI_PKG") (tkg-gui)"
-        pkg_count=$((pkg_count + 1))
-    fi
 
     if (( pkg_count == 0 )); then
         die "No packages found to add to repository"
@@ -472,12 +464,21 @@ embed_live_repo() {
     repo-add "${live_repo_path}/deploytix.db.tar.zst" \
         "${live_repo_path}"/*.pkg.tar.zst
 
-    # Generate a pacman.conf for the live system:
-    #   • base it on the system artools conf so all standard Artix repos are present
-    #   • append [deploytix] pointing to the in-ISO path
-    # This file, placed in the live-overlay, overrides the default pacman.conf
-    # installed by the base Artix system packages.
-    cp "${SYSTEM_PACMAN_CONF}" "${live_etc_dir}/pacman.conf"
+    # Generate a pacman.conf for the live system.
+    #
+    # IMPORTANT: We must NOT use SYSTEM_PACMAN_CONF (the artools iso-x86_64.conf)
+    # here — that file is an artools-internal build config, not a valid
+    # system pacman.conf.  Instead, use the real system /etc/pacman.conf as
+    # the base so that the live environment's pacman/basestrap works correctly.
+    # If /etc/pacman.conf is unavailable (e.g. running in a minimal container),
+    # fall back to the artools config as a last resort.
+    local pacman_base="/etc/pacman.conf"
+    if [[ ! -f "$pacman_base" ]]; then
+        warn "/etc/pacman.conf not found, falling back to ${SYSTEM_PACMAN_CONF}"
+        pacman_base="${SYSTEM_PACMAN_CONF}"
+    fi
+
+    cp "$pacman_base" "${live_etc_dir}/pacman.conf"
     cat >> "${live_etc_dir}/pacman.conf" <<EOF
 
 # ── Deploytix local repository (embedded in ISO for basestrap use) ──
@@ -495,11 +496,10 @@ run_buildiso() {
 
     local args=(-p deploytix -i "$INITSYS")
 
-    if "$CLEAN_BUILD"; then
-        args+=()  # buildiso cleans by default unless -c is passed to disable it
-    else
-        args+=(-c)  # -c disables clean, preserving previous work
+    if ! "$CLEAN_BUILD"; then
+        args+=(-c)  # -c tells buildiso to skip cleaning (preserve previous work)
     fi
+    # When CLEAN_BUILD is true, omit -c so buildiso performs its default clean
 
     if "$CHROOT_ONLY"; then
         args+=(-x)

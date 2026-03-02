@@ -37,19 +37,6 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<Output> {
     Ok(output)
 }
 
-/// Execute a command and return stdout as string
-#[allow(dead_code)]
-pub fn run_command_output(program: &str, args: &[&str]) -> Result<String> {
-    let output = run_command(program, args)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Execute a command, allowing it to fail (returns None on failure)
-#[allow(dead_code)]
-pub fn run_command_optional(program: &str, args: &[&str]) -> Option<String> {
-    run_command_output(program, args).ok()
-}
-
 /// Check if a command exists in PATH
 pub fn command_exists(program: &str) -> bool {
     Command::new("which")
@@ -59,14 +46,6 @@ pub fn command_exists(program: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Run a command in a chroot environment
-#[allow(dead_code)]
-pub fn run_in_chroot(chroot_path: &str, program: &str, args: &[&str]) -> Result<Output> {
-    let mut chroot_args = vec![chroot_path, program];
-    chroot_args.extend(args);
-    run_command("chroot", &chroot_args)
 }
 
 /// Run a command in chroot using artix-chroot (if available) or plain chroot
@@ -103,16 +82,6 @@ impl CommandRunner {
             Ok(None)
         } else {
             run_command(program, args).map(Some)
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn run_output(&self, program: &str, args: &[&str]) -> Result<Option<String>> {
-        if self.dry_run {
-            log_dry_run(program, args);
-            Ok(None)
-        } else {
-            run_command_output(program, args).map(Some)
         }
     }
 
