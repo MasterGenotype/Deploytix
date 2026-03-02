@@ -63,7 +63,10 @@ impl Cleaner {
             .lines()
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
+                if parts.len() >= 2
+                    && (parts[1] == INSTALL_ROOT
+                        || parts[1].starts_with(&format!("{}/", INSTALL_ROOT)))
+                {
                     Some(parts[1])
                 } else {
                     None

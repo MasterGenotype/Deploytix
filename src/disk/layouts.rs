@@ -236,26 +236,30 @@ fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
         let reducible = usr_mib.saturating_sub(USR_MIN_MIB);
         if reducible > 0 && deficit > 0 {
             let take = deficit.min(reducible);
+            let before = usr_mib;
             usr_mib -= take;
             usr_mib = floor_align(usr_mib, ALIGN_MIB);
-            deficit -= take;
+            deficit = deficit.saturating_sub(before - usr_mib);
         }
 
         // Then ROOT
         let reducible = root_mib.saturating_sub(ROOT_MIN_MIB);
         if reducible > 0 && deficit > 0 {
             let take = deficit.min(reducible);
+            let before = root_mib;
             root_mib -= take;
             root_mib = floor_align(root_mib, ALIGN_MIB);
-            deficit -= take;
+            deficit = deficit.saturating_sub(before - root_mib);
         }
 
         // Then VAR
         let reducible = var_mib.saturating_sub(VAR_MIN_MIB);
         if reducible > 0 && deficit > 0 {
             let take = deficit.min(reducible);
+            let before = var_mib;
             var_mib -= take;
             var_mib = floor_align(var_mib, ALIGN_MIB);
+            let _ = deficit.saturating_sub(before - var_mib);
         }
 
         // Note: home_mib will be 0 (remainder) in the partition definition

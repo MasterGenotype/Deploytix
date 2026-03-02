@@ -108,6 +108,14 @@ fn configure_fuse(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     Ok(())
 }
 
+/// Escape a password for safe embedding inside a single-quoted shell string.
+///
+/// Single-quote characters cannot be escaped inside single quotes in POSIX shell.
+/// The standard workaround is to close the quote, escape the character, then reopen.
+fn shell_escape_single_quote(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 /// Create the cipher directory and initialize gocryptfs.
 fn init_cipher_directory(
     cmd: &CommandRunner,
@@ -120,11 +128,12 @@ fn init_cipher_directory(
     info!("Creating cipher directory: {}", cipher_dir);
     fs::create_dir_all(&cipher_dir)?;
 
-    // Initialize gocryptfs with the user's password
-    // Use -extpass to provide password non-interactively
+    // Initialize gocryptfs with the user's password.
+    // Escape single-quote characters to prevent shell interpretation.
+    let escaped_password = shell_escape_single_quote(password);
     let init_cmd = format!(
         "gocryptfs -init -q -extpass \"echo '{}'\" /home/{}.cipher",
-        password, username
+        escaped_password, username
     );
     cmd.run_in_chroot(install_root, &init_cmd)?;
 
@@ -159,12 +168,13 @@ fn populate_skel(
 ) -> Result<()> {
     info!("Populating encrypted home with skeleton files");
 
+    let escaped_password = shell_escape_single_quote(password);
     let combined_cmd = format!(
         "gocryptfs -extpass \"echo '{}'\" /home/{}.cipher /home/{} && \
          cp -a /etc/skel/. /home/{}/ && \
          chown -R {}:{} /home/{} && \
          fusermount -u /home/{}",
-        password, username, username, username, username, username, username, username
+        escaped_password, username, username, username, username, username, username, username
     );
     cmd.run_in_chroot(install_root, &combined_cmd)?;
 
@@ -224,6 +234,12 @@ fn configure_pam(install_root: &str) -> Result<()> {
     let pam_path = format!("{}/etc/pam.d/system-login", install_root);
 
     let content = fs::read_to_string(&pam_path).unwrap_or_default();
+
+    // Bail early if pam_mount is already configured to avoid duplicates.
+    if content.contains("pam_mount.so") {
+        info!("pam_mount already present in system-login, skipping");
+        return Ok(());
+    }
 
     let mut modified = false;
     let mut new_lines: Vec<String> = Vec::new();
@@ -303,12 +319,6 @@ fn configure_pam(install_root: &str) -> Result<()> {
     }
 
     if modified {
-        // Check for existing pam_mount lines to avoid duplicates
-        if content.contains("pam_mount.so") {
-            info!("pam_mount already present in system-login, skipping");
-            return Ok(());
-        }
-
         let new_content = new_lines.join("\n") + "\n";
         fs::write(&pam_path, new_content)?;
         info!("PAM system-login updated with pam_mount entries");

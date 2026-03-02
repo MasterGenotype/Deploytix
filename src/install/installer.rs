@@ -271,7 +271,10 @@ impl Installer {
                 .lines()
                 .filter_map(|line| {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
+                    if parts.len() >= 2
+                        && (parts[1] == INSTALL_ROOT
+                            || parts[1].starts_with(&format!("{}/", INSTALL_ROOT)))
+                    {
                         Some(parts[1])
                     } else {
                         None
@@ -1075,9 +1078,7 @@ impl Installer {
         let lvm_part = layout
             .partitions
             .iter()
-            .find(|p| {
-                p.mount_point.as_deref() == Some("/") || p.name.to_lowercase().contains("lvm")
-            })
+            .find(|p| p.name.to_lowercase() == "lvm")
             .ok_or_else(|| {
                 DeploytixError::ConfigError("No LVM PV partition found in layout".to_string())
             })?;

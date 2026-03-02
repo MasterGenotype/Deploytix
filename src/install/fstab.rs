@@ -58,7 +58,7 @@ pub fn generate_fstab(
 ) -> Result<()> {
     // Check if this layout uses subvolumes
     if layout.uses_subvolumes() {
-        return generate_fstab_with_subvolumes(cmd, device, layout, install_root);
+        return generate_fstab_with_subvolumes(cmd, device, layout, install_root, filesystem);
     }
 
     info!(
@@ -155,6 +155,7 @@ fn generate_fstab_with_subvolumes(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
         crate::utils::error::DeploytixError::ConfigError(
@@ -229,9 +230,14 @@ fn generate_fstab_with_subvolumes(
                 "\n# EFI System Partition\nUUID={}  /boot/efi  vfat  umask=0077,defaults  0  2\n",
                 uuid
             ));
+        } else if part.is_boot_fs {
+            let (boot_fstype, boot_opts) = boot_fs_fstab_entry(boot_filesystem);
+            content.push_str(&format!(
+                "\n# Boot partition\nUUID={}  /boot  {}  {}  0  2\n",
+                uuid, boot_fstype, boot_opts
+            ));
         } else if let Some(ref mount_point) = part.mount_point {
-            // is_efi and is_swap are already handled above; any remaining
-            // partition with a mount point is a regular data partition.
+            // Any remaining partition with a mount point
             content.push_str(&format!(
                 "\nUUID={}  {}  btrfs  defaults,noatime  0  2\n",
                 uuid, mount_point

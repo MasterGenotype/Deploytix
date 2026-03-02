@@ -81,9 +81,9 @@ pub fn add_keyfile_to_luks(
             stderr: e.to_string(),
         })?;
 
-    // Write password to stdin
+    // Write password to stdin (with newline, as expected by cryptsetup)
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(password.as_bytes())?;
+        writeln!(stdin, "{}", password)?;
     }
     drop(child.stdin.take());
 
