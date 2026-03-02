@@ -329,6 +329,20 @@ reset_artifacts() {
     msg "Reset complete"
 }
 
+# ── Resolve common/ directory ────────────────────────────────────────────────
+# artools stores shared overlays and configs in a "common" directory that lives
+# next to the profile directories.  The workspace may or may not have its own
+# copy; prefer it when available, otherwise fall back to the system install.
+resolve_common_dir() {
+    if [[ -d "${WORKSPACE_PROFILES}/common" ]]; then
+        printf '%s' "${WORKSPACE_PROFILES}/common"
+    elif [[ -d "/usr/share/artools/iso-profiles/common" ]]; then
+        printf '%s' "/usr/share/artools/iso-profiles/common"
+    else
+        die "Cannot find artools common profile directory"
+    fi
+}
+
 # ── Step E: Install ISO profile ──────────────────────────────────────────────
 install_profile() {
     msg "Installing deploytix ISO profile..."
@@ -352,8 +366,11 @@ install_profile() {
         cp "${PROFILE_SRC}/profile.yaml" "$dest/profile.yaml"
     fi
 
-    # Set root-overlay symlink to common
-    ln -sfn "../common/root-overlay" "$dest/root-overlay"
+    # Set root-overlay symlink to common using an absolute path so it resolves
+    # correctly regardless of whether common/ exists in the workspace.
+    local common_dir
+    common_dir="$(resolve_common_dir)"
+    ln -sfn "${common_dir}/root-overlay" "$dest/root-overlay"
 
     # Copy live-overlay if it exists in our profile source
     if [[ -d "${PROFILE_SRC}/live-overlay" ]]; then
@@ -386,23 +403,33 @@ generate_gui_profile() {
     yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
-    # Copy overlays from the DE profile
+    # Copy overlays from the DE profile.
+    # Symlinks in system profiles use relative paths like ../common/root-overlay
+    # which only resolve within that directory tree.  We resolve them to absolute
+    # paths so they remain valid when copied into the workspace.
     local de_dir
     de_dir="$(dirname "$de_profile")"
 
     if [[ -L "${de_dir}/root-overlay" ]]; then
-        # Resolve the symlink target relative to workspace
-        local link_target
-        link_target="$(readlink "${de_dir}/root-overlay")"
-        ln -sfn "$link_target" "$dest/root-overlay"
+        local resolved
+        resolved="$(readlink -f "${de_dir}/root-overlay")"
+        if [[ -d "$resolved" ]]; then
+            ln -sfn "$resolved" "$dest/root-overlay"
+        else
+            warn "DE root-overlay symlink target missing: $resolved"
+        fi
     elif [[ -d "${de_dir}/root-overlay" ]]; then
         cp -a "${de_dir}/root-overlay" "$dest/"
     fi
 
     if [[ -L "${de_dir}/live-overlay" ]]; then
-        local link_target
-        link_target="$(readlink "${de_dir}/live-overlay")"
-        ln -sfn "$link_target" "$dest/live-overlay"
+        local resolved
+        resolved="$(readlink -f "${de_dir}/live-overlay")"
+        if [[ -d "$resolved" ]]; then
+            ln -sfn "$resolved" "$dest/live-overlay"
+        else
+            warn "DE live-overlay symlink target missing: $resolved"
+        fi
     elif [[ -d "${de_dir}/live-overlay" ]]; then
         cp -a "${de_dir}/live-overlay" "$dest/"
     fi
@@ -413,16 +440,21 @@ generate_gui_profile() {
 # ── Step F: Embed built packages in the live-overlay ─────────────────────────
 # The live ISO's pacman.conf (set up by buildiso) points [deploytix] at the
 # build machine's LOCAL_REPO_DIR, which does not exist on the booted live
-# system.  To let basestrap install deploytix-git and tkg-gui-git onto the
-# target disk, we embed the .pkg.tar.zst files and a pacman database directly
-# into the live-overlay and include a matching pacman.conf that points to the
-# in-ISO path so the live environment's pacman can find them at runtime.
+# system.  We embed the .pkg.tar.zst files and a repo database into the
+# live-overlay at /var/lib/deploytix-repo so the Rust installer can discover
+# them at runtime via prepare_deploytix_repo() → ISO_REPO_PATH fallback.
+#
+# We intentionally do NOT override /etc/pacman.conf in the live-overlay.
+# Replacing it would clobber the pacman.conf that artools configured for the
+# rootfs (different mirrors, architecture options, etc.).  Instead the Rust
+# code detects the embedded repo, generates a temporary pacman.conf that
+# appends [deploytix] to the live system's real config, and passes -C to
+# basestrap.
 embed_live_repo() {
     msg "Embedding packages in live-overlay for basestrap use..."
     local dest="${WORKSPACE_PROFILES}/deploytix"
     local live_overlay_dir="${dest}/live-overlay"
     local live_repo_path="${live_overlay_dir}/var/lib/deploytix-repo"
-    local live_etc_dir="${live_overlay_dir}/etc"
 
     if "$DRY_RUN"; then
         msg2 "[dry-run] Would embed packages at ${live_repo_path}"
@@ -444,7 +476,7 @@ embed_live_repo() {
         msg2 "Materialised live-overlay symlink into real directory"
     fi
 
-    mkdir -p "${live_repo_path}" "${live_etc_dir}"
+    mkdir -p "${live_repo_path}"
 
     # Copy all built packages into the in-ISO repo directory
     local pkg_count=0
@@ -464,30 +496,7 @@ embed_live_repo() {
     repo-add "${live_repo_path}/deploytix.db.tar.zst" \
         "${live_repo_path}"/*.pkg.tar.zst
 
-    # Generate a pacman.conf for the live system.
-    #
-    # IMPORTANT: We must NOT use SYSTEM_PACMAN_CONF (the artools iso-x86_64.conf)
-    # here — that file is an artools-internal build config, not a valid
-    # system pacman.conf.  Instead, use the real system /etc/pacman.conf as
-    # the base so that the live environment's pacman/basestrap works correctly.
-    # If /etc/pacman.conf is unavailable (e.g. running in a minimal container),
-    # fall back to the artools config as a last resort.
-    local pacman_base="/etc/pacman.conf"
-    if [[ ! -f "$pacman_base" ]]; then
-        warn "/etc/pacman.conf not found, falling back to ${SYSTEM_PACMAN_CONF}"
-        pacman_base="${SYSTEM_PACMAN_CONF}"
-    fi
-
-    cp "$pacman_base" "${live_etc_dir}/pacman.conf"
-    cat >> "${live_etc_dir}/pacman.conf" <<EOF
-
-# ── Deploytix local repository (embedded in ISO for basestrap use) ──
-[deploytix]
-SigLevel = Optional TrustAll
-Server = file:///var/lib/deploytix-repo
-EOF
-
-    msg2 "Embedded ${pkg_count} package(s); [deploytix] repo available at /var/lib/deploytix-repo"
+    msg2 "Embedded ${pkg_count} package(s); repo at /var/lib/deploytix-repo"
 }
 
 # ── Step H: Run buildiso ─────────────────────────────────────────────────────
