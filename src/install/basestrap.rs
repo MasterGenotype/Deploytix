@@ -218,18 +218,56 @@ const TEMP_REPO_DIR: &str = "/tmp/deploytix-local-repo";
 /// Temporary pacman.conf that adds the [deploytix] repo.
 const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
 
+/// Check whether the system's `/etc/pacman.conf` already contains a
+/// `[deploytix]` repository section.
+fn pacman_conf_has_deploytix_repo() -> bool {
+    std::fs::read_to_string("/etc/pacman.conf")
+        .map(|contents| {
+            contents
+                .lines()
+                .any(|line| line.trim() == "[deploytix]")
+        })
+        .unwrap_or(false)
+}
+
 /// Check whether all required custom packages are resolvable in the
 /// currently configured pacman sync databases.
+///
+/// If the `[deploytix]` repo is configured but the sync DB hasn't been
+/// refreshed yet (common on first boot of the live ISO), this will
+/// refresh the deploytix database before checking.
 fn custom_packages_in_sync_db() -> bool {
-    REQUIRED_CUSTOM_PACKAGES.iter().all(|pkg| {
-        std::process::Command::new("pacman")
-            .args(["-Si", pkg])
+    // Quick check without refresh.
+    let all_found = || {
+        REQUIRED_CUSTOM_PACKAGES.iter().all(|pkg| {
+            std::process::Command::new("pacman")
+                .args(["-Si", pkg])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    };
+
+    if all_found() {
+        return true;
+    }
+
+    // If the [deploytix] repo is in pacman.conf but packages aren't in
+    // the sync DB, it likely means the DB hasn't been downloaded yet
+    // (first boot of the live ISO).  Refresh just the deploytix database.
+    if pacman_conf_has_deploytix_repo() {
+        info!("[deploytix] repo found in pacman.conf; refreshing sync database");
+        let _ = std::process::Command::new("pacman")
+            .args(["-Sy", "--noconfirm"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
+            .status();
+        return all_found();
+    }
+
+    false
 }
 
 /// Search well-known directories for pre-built `.pkg.tar.zst` files
@@ -372,9 +410,27 @@ pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
 
     info!("Deploytix custom packages not in repos; preparing local repository");
 
-    // 1. ISO-embedded repo already has a database — just write a config.
+    // 1. ISO-embedded repo already has a database — use it.
+    //    If /etc/pacman.conf already has the [deploytix] section (set up
+    //    by the ISO's live-overlay), we still need a custom config because
+    //    the sync DB check above failed — write one that's based on the
+    //    real system pacman.conf to ensure it's valid.
     let iso_db = Path::new(ISO_REPO_PATH).join("deploytix.db.tar.zst");
     if iso_db.exists() {
+        if pacman_conf_has_deploytix_repo() {
+            // Config is already set up and repo exists — the sync refresh
+            // in custom_packages_in_sync_db() should have made this work.
+            // Try once more; if it still fails, write a temp config.
+            info!("ISO-embedded repo exists and [deploytix] in pacman.conf; retrying sync");
+            let _ = std::process::Command::new("pacman")
+                .args(["-Sy", "--noconfirm"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if custom_packages_in_sync_db() {
+                return Ok(None);
+            }
+        }
         info!("Using ISO-embedded repo at {}", ISO_REPO_PATH);
         return write_custom_pacman_conf(ISO_REPO_PATH);
     }

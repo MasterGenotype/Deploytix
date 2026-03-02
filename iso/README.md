@@ -51,17 +51,20 @@ The ISO is written to `~/artools-workspace/iso/deploytix/`.
 | `-s` | Skip package rebuild (reuse existing `.pkg.tar.zst` in `pkg/`) | off |
 | `-c` | Clean buildiso work directory before building | off |
 | `-x` | Build chroot only (stop before ISO generation) | off |
+| `-r` | Reset — remove installed profile, repo, and pacman.conf override | off |
 | `-n` | Dry run — print actions without executing | off |
 | `-h` | Show help | — |
 
 ## What the Script Does
 
-1. **Builds deploytix packages** — runs `makepkg` in `pkg/` using the existing PKGBUILD
+1. **Builds deploytix packages** — runs `makepkg` in `pkg/` and clones/builds `tkg-gui-git`
 2. **Creates a local pacman repository** — copies packages to `/var/lib/artools/repos/deploytix/` and runs `repo-add`
 3. **Configures pacman** — installs a custom `iso-x86_64.conf` in `~/.config/artools/pacman.conf.d/` with a `[deploytix]` repo pointing to the local repository
 4. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`
-5. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
-6. **Cleans up** — restores the original pacman.conf on exit (including on failure)
+5. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo` with a matching `/etc/pacman.conf` so the live environment can install them via basestrap
+6. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
+
+To remove all installed artifacts (profile, repo, pacman.conf override), run `./iso/build-deploytix-iso.sh -r`.
 
 ## Customisation
 

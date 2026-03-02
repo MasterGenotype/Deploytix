@@ -329,58 +329,6 @@ pub fn create_efi_boot_entry(
     Ok(())
 }
 
-/// Set the EFI boot order to prioritize the given entry
-///
-/// This finds the boot entry with the given label and moves it to the front
-/// of the boot order.
-#[allow(dead_code)]
-pub fn set_efi_boot_order_priority(cmd: &CommandRunner, label: &str) -> Result<()> {
-    info!("Setting EFI boot order priority for '{}'", label);
-
-    if cmd.is_dry_run() {
-        println!("  [dry-run] Would set boot order priority for '{}'", label);
-        return Ok(());
-    }
-
-    // Get current boot entries to find the entry number for our label
-    let output = crate::utils::command::run_command_output("efibootmgr", &[])?;
-
-    // Parse output to find our entry number
-    // Format: Boot0014* Artix-SB	HD(...)
-    let mut our_entry: Option<String> = None;
-    let mut other_entries: Vec<String> = Vec::new();
-
-    for line in output.lines() {
-        if line.starts_with("Boot") && line.contains('*') {
-            // Extract entry number (e.g., "0014" from "Boot0014*")
-            if let Some(entry_num) = line.strip_prefix("Boot").and_then(|s| s.split('*').next()) {
-                if line.contains(label) {
-                    our_entry = Some(entry_num.to_string());
-                } else {
-                    other_entries.push(entry_num.to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(entry) = our_entry {
-        // Build new boot order with our entry first
-        let mut new_order = vec![entry];
-        new_order.extend(other_entries);
-        let order_str = new_order.join(",");
-
-        cmd.run("efibootmgr", &["-o", &order_str])?;
-        info!("Boot order set: {}", order_str);
-    } else {
-        info!(
-            "Boot entry '{}' not found, skipping boot order change",
-            label
-        );
-    }
-
-    Ok(())
-}
-
 /// Configure GRUB defaults
 /// For encrypted systems, pass luks_uuid and mapper_name
 /// uses_subvolumes indicates if the layout uses btrfs subvolumes (for rootflags)
