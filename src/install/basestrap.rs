@@ -74,14 +74,8 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Bootloader
     packages.extend(["efibootmgr".to_string(), "grub".to_string()]);
 
-    // Deploytix — install itself and tkg-gui on the target system so they
-    // remain available after first boot for re-deployment and kernel builds.
     // dosfstools is always required for the FAT32 EFI partition.
-    packages.extend([
-        "deploytix-git".to_string(),
-        "tkg-gui-git".to_string(),
-        "dosfstools".to_string(),
-    ]);
+    packages.push("dosfstools".to_string());
 
     // Essential tools
     packages.extend([
@@ -194,20 +188,20 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 
 // === Custom [deploytix] repository preparation ===
 //
-// The deploytix-git and tkg-gui-git packages live in a custom pacman
-// repository rather than in the standard Artix mirrors.  On the live ISO
-// this repo is embedded at /var/lib/deploytix-repo and referenced in
-// /etc/pacman.conf.  When the installer runs outside that environment we
-// create a temporary local repo from any pre-built .pkg.tar.zst files
-// we can locate and pass `-C <config>` to basestrap.
+// Custom packages live in a custom pacman repository rather than in the
+// standard Artix mirrors.  On the live ISO this repo is embedded at
+// /var/lib/deploytix-repo and referenced in /etc/pacman.conf.  When the
+// installer runs outside that environment we create a temporary local repo
+// from any pre-built .pkg.tar.zst files we can locate and pass `-C <config>`
+// to basestrap.
 
 /// Filename prefixes (with trailing dash) for package archives that
 /// belong to the custom [deploytix] repository.
-const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-git-", "deploytix-gui-git-", "tkg-gui-git-"];
+const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-gui-git-"];
 
 /// Packages from the [deploytix] repo that are in the basestrap list
 /// and must be resolvable.
-const REQUIRED_CUSTOM_PACKAGES: &[&str] = &["deploytix-git", "tkg-gui-git"];
+const REQUIRED_CUSTOM_PACKAGES: &[&str] = &[];
 
 /// Path where the ISO live-overlay embeds the deploytix repo.
 const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
@@ -383,7 +377,7 @@ pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
     let packages = locate_prebuilt_packages();
     if packages.is_empty() {
         return Err(DeploytixError::ConfigError(
-            "Cannot find deploytix-git / tkg-gui-git packages.\n\
+            "Cannot find custom deploytix packages.\n\
              These custom packages are not in any configured pacman repository \
              and no pre-built .pkg.tar.zst files were found.\n\
              Please run the installer from the Deploytix live ISO, or build the \
