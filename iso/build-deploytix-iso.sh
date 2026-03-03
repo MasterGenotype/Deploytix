@@ -403,6 +403,10 @@ generate_gui_profile() {
     yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
+    # Ensure Arch Linux repository support is available in the rootfs so
+    # packages from the Arch [extra] repo (e.g. pam_mount) are installable.
+    yq -i '.rootfs.packages += ["artix-archlinux-support"]' "$dest/profile.yaml"
+
     # Copy overlays from the DE profile.
     # Symlinks in system profiles use relative paths like ../common/root-overlay
     # which only resolve within that directory tree.  We resolve them to absolute

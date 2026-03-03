@@ -26,7 +26,7 @@ use crate::install::{
     run_basestrap, unmount_all,
 };
 use crate::utils::command::CommandRunner;
-use crate::utils::deps::ensure_dependencies;
+use crate::utils::deps::{ensure_arch_support, ensure_dependencies};
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
 use crate::utils::signal;
@@ -424,6 +424,10 @@ impl Installer {
             &self.config.system.bootloader,
         )?;
 
+        // Ensure artix-archlinux-support is installed on the host so the
+        // Arch [extra] mirrorlist is available for basestrap.
+        ensure_arch_support(&self.cmd)?;
+
         // Get device info and compute layout
         let device_info = get_device_info(&self.config.disk.device)?;
         let disk_mib = device_info.size_mib();
@@ -640,6 +644,10 @@ impl Installer {
     /// Configure the system in chroot
     fn configure_system(&self) -> Result<()> {
         info!("[Phase 4/6] Configuring system in chroot (locale, users, bootloader, network, services)");
+
+        // Enable Arch Linux repos on the target (uses artix-archlinux-support
+        // installed by basestrap to provide mirrorlist-arch).
+        configure::pacman::configure_arch_repos(&self.cmd, INSTALL_ROOT)?;
 
         // Locale and timezone
         configure::locale::configure_locale(&self.cmd, &self.config, INSTALL_ROOT)?;

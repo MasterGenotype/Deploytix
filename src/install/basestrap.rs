@@ -77,10 +77,14 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Deploytix — install itself and tkg-gui on the target system so they
     // remain available after first boot for re-deployment and kernel builds.
     // dosfstools is always required for the FAT32 EFI partition.
+    // artix-archlinux-support enables the Arch Linux [extra] repository
+    // on the target, providing mirrorlist-arch and archlinux-keyring for
+    // packages like pam_mount that live in Arch repos.
     packages.extend([
         "deploytix-git".to_string(),
         "tkg-gui-git".to_string(),
         "dosfstools".to_string(),
+        "artix-archlinux-support".to_string(),
     ]);
 
     // Essential tools

@@ -19,6 +19,7 @@ rootfs:
     - mkinitcpio-nfs-utils
     - squashfs-tools
     - artix-grub-live
+    - artix-archlinux-support
   packages-init:
     dinit:
       - dinit-user-spawn

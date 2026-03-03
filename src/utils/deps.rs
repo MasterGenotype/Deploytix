@@ -229,3 +229,50 @@ pub fn ensure_dependencies(
     info!("Successfully installed missing dependencies");
     Ok(())
 }
+
+/// Ensure `artix-archlinux-support` is installed on the host system.
+///
+/// This package provides `/etc/pacman.d/mirrorlist-arch` and the
+/// `archlinux-keyring`, which are required to access Arch Linux
+/// repositories (e.g. `[extra]` for packages like `pam_mount`).
+pub fn ensure_arch_support(cmd: &CommandRunner) -> Result<()> {
+    // Check if already installed.
+    let installed = Command::new("pacman")
+        .args(["-Qi", "artix-archlinux-support"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if installed {
+        info!("artix-archlinux-support already installed on host");
+        return Ok(());
+    }
+
+    info!("Installing artix-archlinux-support on host for Arch repo access");
+
+    if cmd.is_dry_run() {
+        println!("[dry-run] Would install: pacman -S --noconfirm artix-archlinux-support");
+        return Ok(());
+    }
+
+    let status = Command::new("pacman")
+        .args(["-S", "--noconfirm", "artix-archlinux-support"])
+        .status()?;
+
+    if !status.success() {
+        return Err(crate::utils::error::DeploytixError::CommandFailed {
+            command: "pacman -S artix-archlinux-support".to_string(),
+            stderr: format!("Exit code: {:?}", status.code()),
+        });
+    }
+
+    // Populate the Arch Linux keyring so signed packages verify correctly.
+    let _ = Command::new("pacman-key")
+        .args(["--populate", "archlinux"])
+        .status();
+
+    info!("artix-archlinux-support installed and keyring populated");
+    Ok(())
+}
