@@ -218,6 +218,21 @@ const TEMP_REPO_DIR: &str = "/tmp/deploytix-local-repo";
 /// Temporary pacman.conf that adds the [deploytix] repo.
 const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
 
+// === Arch Linux [extra] repository support ===
+//
+// Some packages required by deploytix (e.g. pam_mount for encrypted
+// home directories) live in Arch Linux's [extra] repository, which is
+// not enabled by default on Artix.  The functions below detect this
+// and append the repo to the pacman.conf used by basestrap.
+
+/// Geo-balanced Arch Linux mirror used as a fallback when the
+/// `mirrorlist-arch` file is not available on the host.
+const ARCH_MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com/$repo/os/$arch";
+
+/// Path to the Arch Linux mirrorlist installed by
+/// `artix-archlinux-support`.
+const ARCH_MIRRORLIST_PATH: &str = "/etc/pacman.d/mirrorlist-arch";
+
 /// Check whether the system's `/etc/pacman.conf` already contains a
 /// `[deploytix]` repository section.
 fn pacman_conf_has_deploytix_repo() -> bool {
@@ -456,6 +471,69 @@ pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
     write_custom_pacman_conf(TEMP_REPO_DIR)
 }
 
+// === Arch Linux [extra] repository detection / injection ===
+
+/// Check whether a pacman.conf string contains the Arch `[extra]` repo.
+fn conf_has_arch_extra(conf: &str) -> bool {
+    conf.lines().any(|line| line.trim() == "[extra]")
+}
+
+/// Ensure the Arch Linux `[extra]` repository is available in the
+/// pacman configuration used by basestrap.
+///
+/// Packages like `pam_mount` live in Arch's `[extra]` repo and are not
+/// mirrored in the Artix repositories.  If the effective config already
+/// contains `[extra]` this is a no-op; otherwise a custom pacman.conf
+/// is written (or updated) with the repo appended.
+fn ensure_arch_repos(
+    existing_conf: Option<String>,
+    cmd: &CommandRunner,
+) -> Result<Option<String>> {
+    if cmd.is_dry_run() {
+        return Ok(existing_conf);
+    }
+
+    let conf_path = existing_conf
+        .as_deref()
+        .unwrap_or("/etc/pacman.conf");
+
+    let conf_content =
+        std::fs::read_to_string(conf_path).map_err(DeploytixError::Io)?;
+
+    if conf_has_arch_extra(&conf_content) {
+        return Ok(existing_conf);
+    }
+
+    info!(
+        "Arch [extra] repository not configured; adding it for packages like pam_mount"
+    );
+
+    let mirror_entry = if Path::new(ARCH_MIRRORLIST_PATH).exists() {
+        format!("Include = {}", ARCH_MIRRORLIST_PATH)
+    } else {
+        format!("Server = {}", ARCH_MIRROR_URL)
+    };
+
+    let updated = format!(
+        "{}\n\n\
+         # Arch Linux [extra] repository (auto-added by deploytix installer)\n\
+         [extra]\n\
+         SigLevel = Optional TrustAll\n\
+         {}\n",
+        conf_content.trim_end(),
+        mirror_entry,
+    );
+
+    std::fs::write(TEMP_PACMAN_CONF, &updated).map_err(DeploytixError::Io)?;
+
+    info!(
+        "Updated pacman.conf at {} with Arch [extra] repository",
+        TEMP_PACMAN_CONF,
+    );
+
+    Ok(Some(TEMP_PACMAN_CONF.to_string()))
+}
+
 /// Maximum number of retry attempts for basestrap on network failures
 const BASESTRAP_MAX_RETRIES: u32 = 3;
 
@@ -499,6 +577,10 @@ pub fn run_basestrap_with_retries(
 ) -> Result<()> {
     // Ensure the custom [deploytix] packages are available.
     let custom_conf = prepare_deploytix_repo(cmd)?;
+
+    // Ensure the Arch [extra] repo is available for packages like
+    // pam_mount that are not mirrored in the Artix repositories.
+    let custom_conf = ensure_arch_repos(custom_conf, cmd)?;
 
     let packages = build_package_list(config);
 
