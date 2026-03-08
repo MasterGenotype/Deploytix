@@ -469,7 +469,7 @@ embed_live_repo() {
         link_target="$(readlink -f "${live_overlay_dir}")"
         rm "${live_overlay_dir}"
         if [[ -d "${link_target}" ]]; then
-            cp -a "${link_target}" "${live_overlay_dir}"
+            cp -aL "${link_target}" "${live_overlay_dir}"
         else
             mkdir -p "${live_overlay_dir}"
         fi
