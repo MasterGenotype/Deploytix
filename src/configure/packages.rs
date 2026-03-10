@@ -129,7 +129,53 @@ pub fn install_wine_packages(
 
 const GAMING_PACKAGES: &[&str] = &["steam", "gamescope"];
 
+/// Enable the [lib32] repository in the chroot's pacman.conf.
+///
+/// Steam and its 32-bit Vulkan driver dependencies live in `lib32`,
+/// which is commented-out by default.  This uncomments the section
+/// header **and** its `Include` line, then refreshes the database.
+fn enable_lib32_repo(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("Enabling [lib32] repository in chroot pacman.conf");
+
+    // Uncomment "#[lib32]" and the following "#Include = ..." line.
+    // sed processes the file in-place; the two-line address form handles
+    // both lines regardless of surrounding whitespace.
+    cmd.run_in_chroot(
+        install_root,
+        "sed -i '/^#\\[lib32\\]/,/^#Include/ s/^#//' /etc/pacman.conf",
+    )?;
+
+    // Sync the newly-enabled repository
+    cmd.run_in_chroot(install_root, "pacman -Sy --noconfirm")?;
+
+    Ok(())
+}
+
+/// Return the lib32 Vulkan driver packages that match the selected GPU vendors.
+///
+/// Naming convention:
+/// - NVIDIA  → `lib32-nvidia-utils`
+/// - AMD     → `lib32-vulkan-radeon`
+/// - Intel   → `lib32-vulkan-intel`
+fn lib32_vulkan_packages(config: &DeploymentConfig) -> Vec<&'static str> {
+    let mut pkgs = Vec::new();
+    for vendor in &config.packages.gpu_drivers {
+        match vendor {
+            GpuDriverVendor::Nvidia => pkgs.push("lib32-nvidia-utils"),
+            GpuDriverVendor::Amd => pkgs.push("lib32-vulkan-radeon"),
+            GpuDriverVendor::Intel => pkgs.push("lib32-vulkan-intel"),
+        }
+    }
+    pkgs.sort();
+    pkgs.dedup();
+    pkgs
+}
+
 /// Install gaming packages via pacman in chroot.
+///
+/// 1. Enables the `[lib32]` repository (required for Steam's 32-bit deps).
+/// 2. Installs the appropriate `lib32-*` Vulkan driver for every selected GPU.
+/// 3. Installs Steam and gamescope.
 pub fn install_gaming_packages(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -139,13 +185,29 @@ pub fn install_gaming_packages(
         return Ok(());
     }
 
+    let lib32_vulkan = lib32_vulkan_packages(config);
+
     info!("Installing gaming packages");
 
     if cmd.is_dry_run() {
+        println!("  [dry-run] Would enable [lib32] repository");
+        println!("  [dry-run] Would install lib32 Vulkan drivers: {:?}", lib32_vulkan);
         println!("  [dry-run] Would install gaming packages: {:?}", GAMING_PACKAGES);
         return Ok(());
     }
 
+    // Step 1: Enable [lib32] repo so 32-bit packages are available
+    enable_lib32_repo(cmd, install_root)?;
+
+    // Step 2: Install lib32 Vulkan driver(s) for selected GPU vendor(s)
+    if !lib32_vulkan.is_empty() {
+        let vulkan_list = lib32_vulkan.join(" ");
+        info!("Installing lib32 Vulkan drivers: {}", vulkan_list);
+        let vulkan_cmd = format!("pacman -S --noconfirm --needed {}", vulkan_list);
+        cmd.run_in_chroot(install_root, &vulkan_cmd)?;
+    }
+
+    // Step 3: Install Steam and gamescope
     let pkg_list = GAMING_PACKAGES.join(" ");
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     cmd.run_in_chroot(install_root, &install_cmd)?;
