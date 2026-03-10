@@ -3,7 +3,7 @@
 use crate::config::{
     Bootloader, CustomPartitionEntry, DeploymentConfig, DesktopConfig, DesktopEnvironment,
     DiskConfig, Filesystem, GpuDriverVendor, InitSystem, NetworkBackend, NetworkConfig,
-    PackagesConfig, PartitionLayout, SecureBootMethod, SwapType, SystemConfig, UserConfig,
+    PackagesConfig, SecureBootMethod, SwapType, SystemConfig, UserConfig,
 };
 use crate::disk::detection::{list_block_devices, BlockDevice};
 use crate::install::Installer;
@@ -83,7 +83,6 @@ pub struct DeploytixGui {
     refreshing_disks: bool,
 
     // Disk config
-    partition_layout: PartitionLayout,
     filesystem: Filesystem,
     encryption: bool,
     encryption_password: String,
@@ -101,8 +100,8 @@ pub struct DeploytixGui {
     lvm_vg_name: String,
     lvm_thin_pool_name: String,
     lvm_thin_pool_percent: u8,
-    // Custom partitions
-    custom_partitions: Vec<CustomPartitionEntry>,
+    // Partitions
+    partitions: Vec<CustomPartitionEntry>,
     // Editing state for new partition
     new_partition_mount: String,
     new_partition_size: String,
@@ -163,7 +162,6 @@ impl Default for DeploytixGui {
             selected_device_index: None,
             refreshing_disks: true, // Start by refreshing
 
-            partition_layout: PartitionLayout::Standard,
             filesystem: Filesystem::Btrfs,
             encryption: false,
             encryption_password: String::new(),
@@ -177,12 +175,7 @@ impl Default for DeploytixGui {
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),
             lvm_thin_pool_percent: 95,
-            custom_partitions: vec![CustomPartitionEntry {
-                mount_point: "/".to_string(),
-                label: None,
-                size_mib: 0, // Remainder
-                encryption: None,
-            }],
+            partitions: crate::config::default_partitions(),
             new_partition_mount: String::new(),
             new_partition_size: String::new(),
             new_partition_label: String::new(),
@@ -258,7 +251,6 @@ impl DeploytixGui {
         DeploymentConfig {
             disk: DiskConfig {
                 device: device_path,
-                layout: self.partition_layout.clone(),
                 filesystem: self.filesystem.clone(),
                 boot_filesystem: crate::config::default_boot_filesystem(),
                 encryption: self.encryption,
@@ -285,12 +277,8 @@ impl DeploytixGui {
                 zram_percent: self.zram_percent,
                 zram_algorithm: "zstd".to_string(),
                 preserve_home: self.preserve_home,
-                // Custom partitions
-                custom_partitions: if self.partition_layout == PartitionLayout::Custom {
-                    Some(self.custom_partitions.clone())
-                } else {
-                    None
-                },
+                // Partitions
+                partitions: self.partitions.clone(),
             },
             system: SystemConfig {
                 init: self.init_system.clone(),
@@ -580,27 +568,34 @@ impl eframe::App for DeploytixGui {
                     &mut self.selected_device_index,
                     &mut self.refreshing_disks,
                 ),
-                WizardStep::DiskConfig => panels::disk_config_panel(
-                    ui,
-                    &mut self.partition_layout,
-                    &mut self.filesystem,
-                    &mut self.encryption,
-                    &mut self.encryption_password,
-                    &mut self.boot_encryption,
-                    &mut self.integrity,
-                    &mut self.swap_type,
-                    &mut self.zram_percent,
-                    &mut self.use_subvolumes,
-                    &mut self.preserve_home,
-                    &mut self.use_lvm_thin,
-                    &mut self.lvm_vg_name,
-                    &mut self.lvm_thin_pool_name,
-                    &mut self.lvm_thin_pool_percent,
-                    &mut self.custom_partitions,
-                    &mut self.new_partition_mount,
-                    &mut self.new_partition_size,
-                    &mut self.new_partition_label,
-                ),
+                WizardStep::DiskConfig => {
+                    let disk_size_mib = self
+                        .selected_device_index
+                        .and_then(|i| self.devices.get(i))
+                        .map(|d| d.size_mib())
+                        .unwrap_or(0);
+                    panels::disk_config_panel(
+                        ui,
+                        disk_size_mib,
+                        &mut self.filesystem,
+                        &mut self.encryption,
+                        &mut self.encryption_password,
+                        &mut self.boot_encryption,
+                        &mut self.integrity,
+                        &mut self.swap_type,
+                        &mut self.zram_percent,
+                        &mut self.use_subvolumes,
+                        &mut self.preserve_home,
+                        &mut self.use_lvm_thin,
+                        &mut self.lvm_vg_name,
+                        &mut self.lvm_thin_pool_name,
+                        &mut self.lvm_thin_pool_percent,
+                        &mut self.partitions,
+                        &mut self.new_partition_mount,
+                        &mut self.new_partition_size,
+                        &mut self.new_partition_label,
+                    )
+                }
                 WizardStep::SystemConfig => panels::system_config_panel(
                     ui,
                     &mut self.init_system,
@@ -642,7 +637,7 @@ impl eframe::App for DeploytixGui {
                     let can = panels::summary_panel(
                         ui,
                         device_path,
-                        &self.partition_layout,
+                        &self.partitions,
                         &self.filesystem,
                         self.encryption,
                         self.boot_encryption,

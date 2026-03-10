@@ -20,7 +20,7 @@ pub struct DeploymentConfig {
     pub packages: PackagesConfig,
 }
 
-/// One user-defined data partition for PartitionLayout::Custom.
+/// One user-defined data partition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomPartitionEntry {
     /// Root-relative mount point, e.g. "/", "/home", "/var", "/data".
@@ -67,9 +67,6 @@ impl CustomPartitionEntry {
 pub struct DiskConfig {
     /// Target device path (e.g., /dev/sda)
     pub device: String,
-    /// Partition layout preset
-    #[serde(default)]
-    pub layout: PartitionLayout,
     /// Filesystem type for data partitions
     #[serde(default)]
     pub filesystem: Filesystem,
@@ -143,10 +140,11 @@ pub struct DiskConfig {
     #[serde(default)]
     pub preserve_home: bool,
 
-    /// Partition list for PartitionLayout::Custom.
-    /// EFI, Boot, and Swap are always prepended by the system.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_partitions: Option<Vec<CustomPartitionEntry>>,
+    /// User-defined data partitions (e.g. ROOT, HOME, USR, VAR).
+    /// EFI + Boot are always auto-prepended; Swap is prepended when
+    /// `swap_type == Partition`.
+    #[serde(default = "default_partitions")]
+    pub partitions: Vec<CustomPartitionEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,34 +254,6 @@ impl std::fmt::Display for GpuDriverVendor {
 }
 
 // Enums for configuration options
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum PartitionLayout {
-    /// Standard 7-partition layout (EFI, Boot, Swap, Root, Usr, Var, Home)
-    /// Supports optional encryption (LUKS2 on Root/Usr/Var/Home) and/or btrfs subvolumes.
-    #[default]
-    Standard,
-    /// Minimal 4-partition layout (EFI, Boot, Swap, Root with btrfs subvolumes)
-    /// Supports both UEFI and Legacy BIOS boot.
-    Minimal,
-    /// LVM Thin Provisioning layout (EFI, Boot, optional Swap, LUKS+LVM PV)
-    /// Thin LVs for root, usr, var, home with space-efficient overprovisioning.
-    LvmThin,
-    /// Custom layout (advanced)
-    Custom,
-}
-
-impl std::fmt::Display for PartitionLayout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Standard => write!(f, "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)"),
-            Self::Minimal => write!(f, "Minimal (EFI, Boot, Swap, Root with subvolumes)"),
-            Self::LvmThin => write!(f, "LVM Thin (EFI, Boot, LUKS+LVM with thin provisioning)"),
-            Self::Custom => write!(f, "Custom"),
-        }
-    }
-}
 
 /// Swap configuration type
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -517,6 +487,39 @@ fn default_groups() -> Vec<String> {
     ]
 }
 
+/// Default partition set: root, usr, var, and home.
+///
+/// Sizes are sensible starting defaults; the GUI sliders let the user
+/// redistribute space.  `/home` uses the remainder of the disk.
+pub fn default_partitions() -> Vec<CustomPartitionEntry> {
+    vec![
+        CustomPartitionEntry {
+            mount_point: "/".to_string(),
+            label: None,
+            size_mib: 20480, // 20 GiB
+            encryption: None,
+        },
+        CustomPartitionEntry {
+            mount_point: "/usr".to_string(),
+            label: None,
+            size_mib: 30720, // 30 GiB
+            encryption: None,
+        },
+        CustomPartitionEntry {
+            mount_point: "/var".to_string(),
+            label: None,
+            size_mib: 10240, // 10 GiB
+            encryption: None,
+        },
+        CustomPartitionEntry {
+            mount_point: "/home".to_string(),
+            label: None,
+            size_mib: 0, // Remainder
+            encryption: None,
+        },
+    ]
+}
+
 pub fn default_boot_filesystem() -> Filesystem {
     Filesystem::Ext4
 }
@@ -527,14 +530,9 @@ fn default_true() -> bool {
 
 impl DeploymentConfig {
     /// Load configuration from a TOML file.
-    ///
-    /// If the config uses the legacy `layout = "lvmthin"`, it is transparently
-    /// mapped to `layout = "standard"` with `use_lvm_thin = true` and
-    /// `encryption = true` to preserve backward compatibility.
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: DeploymentConfig = toml::from_str(&content)?;
-        config.normalize_legacy_lvmthin();
+        let config: DeploymentConfig = toml::from_str(&content)?;
         Ok(config)
     }
 
@@ -567,107 +565,92 @@ impl DeploymentConfig {
             devices[idx].path.clone()
         };
 
-        // Partition layout (LvmThin is no longer a layout option;
-        // LVM thin provisioning is offered as a feature toggle later)
-        let layouts = [
-            PartitionLayout::Standard,
-            PartitionLayout::Minimal,
-            PartitionLayout::Custom,
-        ];
-        let layout_idx = prompt_select("Partition layout", &layouts, 0)?;
-        let layout = layouts[layout_idx].clone();
+        // Partition definition
+        println!("\n📦 Partition Configuration");
+        println!("  EFI (512 MiB) and Boot (2 GiB) are added automatically.");
+        println!("  Swap partition is added when Swap Type is set to Partition.");
+        println!("  Set size_mib=0 for one partition to use remaining space.\n");
 
-        // Custom partitions for Custom layout
-        let custom_partitions = if layout == PartitionLayout::Custom {
-            println!("\n📦 Custom Partition Configuration");
-            println!("  Note: EFI (512 MiB), Boot (2 GiB), and Swap are prepended automatically.");
-            println!("  Set size_mib=0 for one partition to use remaining space.\n");
+        let mut partitions: Vec<CustomPartitionEntry> = Vec::new();
+        loop {
+            let mount_point = prompt_input("Mount point (e.g. /, /home, /var)", None)?;
 
-            let mut entries = Vec::new();
-            loop {
-                let mount_point = prompt_input("Mount point (e.g. /, /home, /var)", None)?;
+            // Validate mount point
+            if !mount_point.starts_with('/') {
+                println!("  Mount point must start with '/'");
+                continue;
+            }
+            if mount_point == "/boot" || mount_point == "/boot/efi" {
+                println!("  /boot and /boot/efi are reserved for system partitions");
+                continue;
+            }
+            if partitions
+                .iter()
+                .any(|e: &CustomPartitionEntry| e.mount_point == mount_point)
+            {
+                println!("  Duplicate mount point");
+                continue;
+            }
 
-                // Validate mount point
-                if !mount_point.starts_with('/') {
-                    println!("  Mount point must start with '/'");
-                    continue;
-                }
-                if mount_point == "/boot" || mount_point == "/boot/efi" {
-                    println!("  /boot and /boot/efi are reserved for system partitions");
-                    continue;
-                }
-                if entries
+            let size_str = prompt_input("Size in MiB (0 = remaining space)", Some("0"))?;
+            let size_mib: u64 = size_str.parse().unwrap_or(0);
+
+            // Check for multiple remainder partitions
+            if size_mib == 0
+                && partitions
                     .iter()
-                    .any(|e: &CustomPartitionEntry| e.mount_point == mount_point)
-                {
-                    println!("  Duplicate mount point");
-                    continue;
-                }
-
-                let size_str = prompt_input("Size in MiB (0 = remaining space)", Some("0"))?;
-                let size_mib: u64 = size_str.parse().unwrap_or(0);
-
-                // Check for multiple remainder partitions
-                if size_mib == 0
-                    && entries
-                        .iter()
-                        .any(|e: &CustomPartitionEntry| e.size_mib == 0)
-                {
-                    println!("  Only one partition may use remaining space (size_mib=0)");
-                    continue;
-                }
-
-                let default_label = if mount_point == "/" {
-                    "ROOT".to_string()
-                } else {
-                    mount_point
-                        .rsplit('/')
-                        .find(|s| !s.is_empty())
-                        .unwrap_or("DATA")
-                        .to_uppercase()
-                };
-                let label_str = prompt_input(
-                    &format!("Partition label [{}]", default_label),
-                    Some(&default_label),
-                )?;
-                let label = if label_str == default_label {
-                    None
-                } else {
-                    Some(label_str)
-                };
-
-                entries.push(CustomPartitionEntry {
-                    mount_point,
-                    label,
-                    size_mib,
-                    encryption: None, // Inherit from global setting
-                });
-
-                if !prompt_confirm("Add another partition?", true)? {
-                    break;
-                }
+                    .any(|e: &CustomPartitionEntry| e.size_mib == 0)
+            {
+                println!("  Only one partition may use remaining space (size_mib=0)");
+                continue;
             }
 
-            // Ensure at least one entry with mount_point == "/"
-            if !entries.iter().any(|e| e.mount_point == "/") {
-                println!(
-                    "  Warning: No root (/) partition defined. Adding one with remaining space."
-                );
-                entries.insert(
-                    0,
-                    CustomPartitionEntry {
-                        mount_point: "/".to_string(),
-                        label: None,
-                        size_mib: 0,
-                        encryption: None,
-                    },
-                );
-            }
+            let default_label = if mount_point == "/" {
+                "ROOT".to_string()
+            } else {
+                mount_point
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("DATA")
+                    .to_uppercase()
+            };
+            let label_str = prompt_input(
+                &format!("Partition label [{}]", default_label),
+                Some(&default_label),
+            )?;
+            let label = if label_str == default_label {
+                None
+            } else {
+                Some(label_str)
+            };
 
-            Some(entries)
-        } else {
-            None
-        };
+            partitions.push(CustomPartitionEntry {
+                mount_point,
+                label,
+                size_mib,
+                encryption: None, // Inherit from global setting
+            });
+
+            if !prompt_confirm("Add another partition?", true)? {
+                break;
+            }
+        }
+
+        // Ensure at least one entry with mount_point == "/"
+        if !partitions.iter().any(|e| e.mount_point == "/") {
+            println!(
+                "  Warning: No root (/) partition defined. Adding one with remaining space."
+            );
+            partitions.insert(
+                0,
+                CustomPartitionEntry {
+                    mount_point: "/".to_string(),
+                    label: None,
+                    size_mib: 0,
+                    encryption: None,
+                },
+            );
+        }
 
         // Data filesystem
         let filesystems = [
@@ -828,7 +811,6 @@ impl DeploymentConfig {
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
-                layout: layout.clone(),
                 filesystem,
                 boot_filesystem,
                 encryption,
@@ -849,7 +831,7 @@ impl DeploymentConfig {
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 preserve_home,
-                custom_partitions,
+                partitions,
             },
             system: SystemConfig {
                 init,
@@ -889,7 +871,6 @@ impl DeploymentConfig {
         DeploymentConfig {
             disk: DiskConfig {
                 device: "/dev/sda".to_string(),
-                layout: PartitionLayout::Standard,
                 filesystem: Filesystem::Btrfs,
                 boot_filesystem: Filesystem::Ext4,
                 encryption: false,
@@ -910,7 +891,7 @@ impl DeploymentConfig {
                 zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 preserve_home: false,
-                custom_partitions: None,
+                partitions: default_partitions(),
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -1021,15 +1002,12 @@ impl DeploymentConfig {
             ));
         }
 
-        // preserve_home with Minimal layout requires subvolumes — Minimal has no
-        // dedicated /home partition, so without an @home subvolume there is nothing
-        // to preserve.
-        if self.disk.preserve_home
-            && self.disk.layout == PartitionLayout::Minimal
-            && !self.disk.use_subvolumes
-        {
+        // preserve_home without a dedicated /home partition requires subvolumes
+        // (there must be an @home subvolume to preserve).
+        let has_home_partition = self.disk.partitions.iter().any(|p| p.mount_point == "/home");
+        if self.disk.preserve_home && !has_home_partition && !self.disk.use_subvolumes {
             return Err(DeploytixError::ValidationError(
-                "preserve_home with Minimal layout requires use_subvolumes = true (Minimal has no dedicated /home partition)"
+                "preserve_home requires either a /home partition or use_subvolumes = true"
                     .to_string(),
             ));
         }
@@ -1076,99 +1054,73 @@ impl DeploymentConfig {
             ));
         }
 
-        // Custom layout validation
-        if self.disk.layout == PartitionLayout::Custom {
-            let partitions = self.disk.custom_partitions.as_ref().ok_or_else(|| {
-                DeploytixError::ValidationError(
-                    "Custom layout requires custom_partitions to be defined".to_string(),
-                )
-            })?;
+        // Partition list validation
+        let partitions = &self.disk.partitions;
 
-            if partitions.is_empty() {
-                return Err(DeploytixError::ValidationError(
-                    "Custom layout requires at least one partition".to_string(),
-                ));
+        if partitions.is_empty() {
+            return Err(DeploytixError::ValidationError(
+                "At least one partition must be defined".to_string(),
+            ));
+        }
+
+        // Must have exactly one root partition
+        let root_count = partitions.iter().filter(|p| p.mount_point == "/").count();
+        if root_count != 1 {
+            return Err(DeploytixError::ValidationError(
+                "Exactly one partition with mount_point = \"/\" is required".to_string(),
+            ));
+        }
+
+        // All mount points must start with '/'
+        for p in partitions {
+            if !p.mount_point.starts_with('/') {
+                return Err(DeploytixError::ValidationError(format!(
+                    "Mount point '{}' must start with '/'",
+                    p.mount_point
+                )));
             }
+        }
 
-            // Must have exactly one root partition
-            let root_count = partitions.iter().filter(|p| p.mount_point == "/").count();
-            if root_count != 1 {
-                return Err(DeploytixError::ValidationError(
-                    "Custom layout must have exactly one partition with mount_point = \"/\""
-                        .to_string(),
-                ));
+        // Reserved mount points
+        for p in partitions {
+            if p.mount_point == "/boot" || p.mount_point == "/boot/efi" {
+                return Err(DeploytixError::ValidationError(format!(
+                    "Mount point '{}' is reserved for system partitions",
+                    p.mount_point
+                )));
             }
+        }
 
-            // All mount points must start with '/'
-            for p in partitions {
-                if !p.mount_point.starts_with('/') {
-                    return Err(DeploytixError::ValidationError(format!(
-                        "Mount point '{}' must start with '/'",
-                        p.mount_point
-                    )));
-                }
+        // No duplicate mount points
+        let mut seen = std::collections::HashSet::new();
+        for p in partitions {
+            if !seen.insert(&p.mount_point) {
+                return Err(DeploytixError::ValidationError(format!(
+                    "Duplicate mount point '{}' in partitions",
+                    p.mount_point
+                )));
             }
+        }
 
-            // Reserved mount points
-            for p in partitions {
-                if p.mount_point == "/boot" || p.mount_point == "/boot/efi" {
-                    return Err(DeploytixError::ValidationError(format!(
-                        "Mount point '{}' is reserved for system partitions",
-                        p.mount_point
-                    )));
-                }
-            }
+        // At most one remainder partition (size_mib = 0)
+        let remainder_count = partitions.iter().filter(|p| p.size_mib == 0).count();
+        if remainder_count > 1 {
+            return Err(DeploytixError::ValidationError(
+                "Only one partition may have size_mib = 0 (remainder)".to_string(),
+            ));
+        }
 
-            // No duplicate mount points
-            let mut seen = std::collections::HashSet::new();
-            for p in partitions {
-                if !seen.insert(&p.mount_point) {
-                    return Err(DeploytixError::ValidationError(format!(
-                        "Duplicate mount point '{}' in custom_partitions",
-                        p.mount_point
-                    )));
-                }
-            }
-
-            // At most one remainder partition (size_mib = 0)
-            let remainder_count = partitions.iter().filter(|p| p.size_mib == 0).count();
-            if remainder_count > 1 {
-                return Err(DeploytixError::ValidationError(
-                    "Only one custom partition may have size_mib = 0 (remainder)".to_string(),
-                ));
-            }
-
-            // Per-partition encryption requires global encryption
-            for p in partitions {
-                if p.encryption == Some(true) && !self.disk.encryption {
-                    return Err(DeploytixError::ValidationError(format!(
-                        "Partition '{}' has encryption=true but global encryption is disabled",
-                        p.mount_point
-                    )));
-                }
+        // Per-partition encryption requires global encryption
+        for p in partitions {
+            if p.encryption == Some(true) && !self.disk.encryption {
+                return Err(DeploytixError::ValidationError(format!(
+                    "Partition '{}' has encryption=true but global encryption is disabled",
+                    p.mount_point
+                )));
             }
         }
 
         Ok(())
-    }
-
-    /// Transparently map the legacy `layout = "lvmthin"` to
-    /// `layout = "standard"` + `use_lvm_thin = true` + `encryption = true`.
-    ///
-    /// This preserves backward compatibility with existing TOML configs.
-    fn normalize_legacy_lvmthin(&mut self) {
-        if self.disk.layout == PartitionLayout::LvmThin {
-            eprintln!(
-                "⚠ Deprecation warning: layout = \"lvmthin\" is deprecated. \
-                 Use layout = \"standard\" with use_lvm_thin = true instead. \
-                 Automatically remapping for backward compatibility."
-            );
-            self.disk.layout = PartitionLayout::Standard;
-            self.disk.use_lvm_thin = true;
-            if !self.disk.encryption {
-                self.disk.encryption = true;
-            }
-        }
     }
 }
 

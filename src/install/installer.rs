@@ -107,8 +107,10 @@ impl Installer {
         signal::install_signal_handlers();
 
         info!(
-            "Starting Deploytix installation on {} ({} layout, {} init)",
-            self.config.disk.device, self.config.disk.layout, self.config.system.init
+            "Starting Deploytix installation on {} ({} partitions, {} init)",
+            self.config.disk.device,
+            self.config.disk.partitions.len(),
+            self.config.system.init
         );
 
         // Phase 1: Preparation (no resources to clean up if this fails)
@@ -503,8 +505,9 @@ impl Installer {
             self.verify_existing_partitions(layout)?;
         } else {
             info!(
-                "[Phase 2/6] Partitioning {} with {} layout",
-                self.config.disk.device, self.config.disk.layout
+                "[Phase 2/6] Partitioning {} ({} data partitions)",
+                self.config.disk.device,
+                self.config.disk.partitions.len()
             );
             apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
         }
@@ -535,8 +538,8 @@ impl Installer {
             if !Path::new(&part_path).exists() {
                 return Err(DeploytixError::ConfigError(format!(
                     "preserve_home: expected partition {} ({}) does not exist on {}. \
-                     The existing partition table is not compatible with the {} layout.",
-                    part.number, part.name, self.config.disk.device, self.config.disk.layout
+                     The existing partition table is not compatible with the configured partitions.",
+                    part.number, part.name, self.config.disk.device
                 )));
             }
         }

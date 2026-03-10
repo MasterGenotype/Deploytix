@@ -553,7 +553,7 @@ fn delete_nested_subvolumes(cmd: &CommandRunner, path: &str) {
         .collect();
 
     // Sort by path depth descending so deepest children are deleted first
-    child_paths.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
+    child_paths.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
 
     for child in &child_paths {
         info!("preserve_home: deleting nested subvolume {}", child);

@@ -5,7 +5,7 @@
 //! Layouts define the *partition table* only. Storage features (encryption,
 //! LVM thin, subvolumes) are applied as layers by the installer pipeline.
 
-use crate::config::{CustomPartitionEntry, DiskConfig, PartitionLayout, SwapType};
+use crate::config::{CustomPartitionEntry, DiskConfig, SwapType};
 use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
 
@@ -132,19 +132,9 @@ impl ComputedLayout {
     }
 }
 
-/// Sizing constants from Disk-Populater.sh
-const EFI_MIB: u64 = 512;
-const BOOT_MIB: u64 = 2048;
-
-/// Ratios for dynamic sizing
-const ROOT_RATIO: f64 = 0.06441;
-const USR_RATIO: f64 = 0.26838;
-const VAR_RATIO: f64 = 0.05368;
-
-/// Minimum sizes
-const ROOT_MIN_MIB: u64 = 20480; // 20 GiB
-const USR_MIN_MIB: u64 = 20480; // 20 GiB
-const VAR_MIN_MIB: u64 = 8192; // 8 GiB
+/// System partition sizes
+pub const EFI_MIB: u64 = 512;
+pub const BOOT_MIB: u64 = 2048;
 
 /// Swap limits
 const SWAP_MIN_MIB: u64 = 4096; // 4 GiB
@@ -175,392 +165,17 @@ fn calculate_swap_mib(ram_mib: u64) -> u64 {
     floor_align(clamp(swap, SWAP_MIN_MIB, SWAP_MAX_MIB), ALIGN_MIB)
 }
 
-/// Compute the standard 7-partition layout
-///
-/// Layout: EFI, Boot, Swap, Root, Usr, Var, Home
-/// Partitions are created without encryption flags; encryption is applied
-/// as a layer by the installer pipeline.
-fn compute_standard_layout(disk_mib: u64) -> Result<ComputedLayout> {
-    let ram_mib = get_ram_mib();
-    let swap_mib = calculate_swap_mib(ram_mib);
-
-    // Reserved space (fixed partitions)
-    let reserved_mib = EFI_MIB + BOOT_MIB + swap_mib;
-    let remain_mib = disk_mib.saturating_sub(reserved_mib);
-
-    // Minimum total required
-    let min_total_mib = reserved_mib + ROOT_MIN_MIB + USR_MIN_MIB + VAR_MIN_MIB + 1;
-    if disk_mib < min_total_mib {
-        return Err(DeploytixError::DiskTooSmall {
-            size_mib: disk_mib,
-            required_mib: min_total_mib,
-        });
-    }
-
-    // Calculate sizes based on ratios
-    let mut root_mib = ((remain_mib as f64) * ROOT_RATIO) as u64;
-    let mut usr_mib = ((remain_mib as f64) * USR_RATIO) as u64;
-    let mut var_mib = ((remain_mib as f64) * VAR_RATIO) as u64;
-
-    // Apply minimums
-    if root_mib < ROOT_MIN_MIB {
-        root_mib = ROOT_MIN_MIB;
-    }
-    if usr_mib < USR_MIN_MIB {
-        usr_mib = USR_MIN_MIB;
-    }
-    if var_mib < VAR_MIN_MIB {
-        var_mib = VAR_MIN_MIB;
-    }
-
-    // Align down
-    root_mib = floor_align(root_mib, ALIGN_MIB);
-    usr_mib = floor_align(usr_mib, ALIGN_MIB);
-    var_mib = floor_align(var_mib, ALIGN_MIB);
-
-    // Calculate home (remainder)
-    let home_mib = disk_mib
-        .saturating_sub(EFI_MIB)
-        .saturating_sub(BOOT_MIB)
-        .saturating_sub(swap_mib)
-        .saturating_sub(root_mib)
-        .saturating_sub(usr_mib)
-        .saturating_sub(var_mib);
-
-    // If home is too small, reduce other partitions deterministically
-    if home_mib == 0 {
-        let mut deficit =
-            (EFI_MIB + BOOT_MIB + swap_mib + root_mib + usr_mib + var_mib).saturating_sub(disk_mib);
-
-        // Reduce USR first
-        let reducible = usr_mib.saturating_sub(USR_MIN_MIB);
-        if reducible > 0 && deficit > 0 {
-            let take = deficit.min(reducible);
-            usr_mib -= take;
-            usr_mib = floor_align(usr_mib, ALIGN_MIB);
-            deficit -= take;
-        }
-
-        // Then ROOT
-        let reducible = root_mib.saturating_sub(ROOT_MIN_MIB);
-        if reducible > 0 && deficit > 0 {
-            let take = deficit.min(reducible);
-            root_mib -= take;
-            root_mib = floor_align(root_mib, ALIGN_MIB);
-            deficit -= take;
-        }
-
-        // Then VAR
-        let reducible = var_mib.saturating_sub(VAR_MIN_MIB);
-        if reducible > 0 && deficit > 0 {
-            let take = deficit.min(reducible);
-            var_mib -= take;
-            var_mib = floor_align(var_mib, ALIGN_MIB);
-        }
-
-        // Note: home_mib will be 0 (remainder) in the partition definition
-        // The recalculated value here is just for validation purposes
-        let _recalculated_home = disk_mib
-            .saturating_sub(EFI_MIB)
-            .saturating_sub(BOOT_MIB)
-            .saturating_sub(swap_mib)
-            .saturating_sub(root_mib)
-            .saturating_sub(usr_mib)
-            .saturating_sub(var_mib);
-    }
-
-    let partitions = vec![
-        PartitionDef {
-            number: 1,
-            name: "EFI".to_string(),
-            size_mib: EFI_MIB,
-            type_guid: partition_types::EFI.to_string(),
-            mount_point: Some("/boot/efi".to_string()),
-            is_swap: false,
-            is_efi: true,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 2,
-            name: "BOOT".to_string(),
-            size_mib: BOOT_MIB,
-            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
-            mount_point: Some("/boot".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            // is_bios_boot = true sets the GPT LegacyBIOSBootable attribute bit
-            // (the "bootable" flag in fdisk/sfdisk expert mode), enabling GRUB
-            // to locate this partition on legacy BIOS systems.
-            is_bios_boot: true,
-            is_boot_fs: true,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 3,
-            name: "SWAP".to_string(),
-            size_mib: swap_mib,
-            type_guid: partition_types::LINUX_SWAP.to_string(),
-            mount_point: None,
-            is_swap: true,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 4,
-            name: "ROOT".to_string(),
-            size_mib: root_mib,
-            type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
-            mount_point: Some("/".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 5,
-            name: "USR".to_string(),
-            size_mib: usr_mib,
-            type_guid: partition_types::LINUX_USR_X86_64.to_string(),
-            mount_point: Some("/usr".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 6,
-            name: "VAR".to_string(),
-            size_mib: var_mib,
-            type_guid: partition_types::LINUX_VAR.to_string(),
-            mount_point: Some("/var".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 7,
-            name: "HOME".to_string(),
-            size_mib: 0, // Remainder
-            type_guid: partition_types::LINUX_HOME.to_string(),
-            mount_point: Some("/home".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-    ];
-
-    Ok(ComputedLayout {
-        partitions,
-        total_mib: disk_mib,
-        subvolumes: None,
-        planned_thin_volumes: None,
-    })
-}
-
-/// Compute the minimal 4-partition layout
-///
-/// Layout: EFI, Boot, Swap, Root
-/// This layout supports both UEFI and Legacy BIOS boot.
-/// Subvolumes are applied separately by the installer if use_subvolumes is enabled.
-fn compute_minimal_layout(disk_mib: u64) -> Result<ComputedLayout> {
-    let ram_mib = get_ram_mib();
-    let swap_mib = calculate_swap_mib(ram_mib);
-
-    // Minimum total required
-    let min_total_mib = EFI_MIB + BOOT_MIB + swap_mib + ROOT_MIN_MIB;
-    if disk_mib < min_total_mib {
-        return Err(DeploytixError::DiskTooSmall {
-            size_mib: disk_mib,
-            required_mib: min_total_mib,
-        });
-    }
-
-    let partitions = vec![
-        PartitionDef {
-            number: 1,
-            name: "EFI".to_string(),
-            size_mib: EFI_MIB,
-            type_guid: partition_types::EFI.to_string(),
-            mount_point: Some("/boot/efi".to_string()),
-            is_swap: false,
-            is_efi: true,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 2,
-            name: "BOOT".to_string(),
-            size_mib: BOOT_MIB,
-            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
-            mount_point: Some("/boot".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: true,
-            is_boot_fs: true,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 3,
-            name: "SWAP".to_string(),
-            size_mib: swap_mib,
-            type_guid: partition_types::LINUX_SWAP.to_string(),
-            mount_point: None,
-            is_swap: true,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        PartitionDef {
-            number: 4,
-            name: "ROOT".to_string(),
-            size_mib: 0, // Remainder
-            type_guid: partition_types::LINUX_ROOT_X86_64.to_string(),
-            mount_point: Some("/".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-    ];
-
-    Ok(ComputedLayout {
-        partitions,
-        total_mib: disk_mib,
-        subvolumes: None,
-        planned_thin_volumes: None,
-    })
-}
-
 /// Get all LUKS partition definitions from layout
 pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
     layout.partitions.iter().filter(|p| p.is_luks).collect()
 }
 
-/// Compute the LVM thin provisioning layout
+/// Compute partition layout from user-defined entries.
 ///
-/// Layout: EFI, Boot, optional Swap (if use_swap_partition), LVM PV (LUKS container)
-/// The LVM PV contains a thin pool with thin volumes for root, usr, var, home.
-fn compute_lvm_thin_layout(disk_mib: u64, use_swap_partition: bool) -> Result<ComputedLayout> {
-    let ram_mib = get_ram_mib();
-    let swap_mib = if use_swap_partition {
-        calculate_swap_mib(ram_mib)
-    } else {
-        0
-    };
-
-    // Minimum: 512 MiB EFI + 2048 MiB Boot + optional Swap + at least 50 GiB for LVM
-    let min_lvm_mib: u64 = 51200; // 50 GiB minimum for thin pool
-    let min_total_mib = EFI_MIB + BOOT_MIB + swap_mib + min_lvm_mib;
-    if disk_mib < min_total_mib {
-        return Err(DeploytixError::DiskTooSmall {
-            size_mib: disk_mib,
-            required_mib: min_total_mib,
-        });
-    }
-
-    let mut partitions = vec![
-        // Partition 1: EFI System Partition
-        PartitionDef {
-            number: 1,
-            name: "EFI".to_string(),
-            size_mib: EFI_MIB,
-            type_guid: partition_types::EFI.to_string(),
-            mount_point: Some("/boot/efi".to_string()),
-            is_swap: false,
-            is_efi: true,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        },
-        // Partition 2: Boot (can be LUKS1 encrypted)
-        PartitionDef {
-            number: 2,
-            name: "BOOT".to_string(),
-            size_mib: BOOT_MIB,
-            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
-            mount_point: Some("/boot".to_string()),
-            is_swap: false,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: true,
-            is_boot_fs: true,
-            attributes: None,
-        },
-    ];
-
-    let mut next_part_num = 3;
-
-    // Optional swap partition
-    if use_swap_partition {
-        partitions.push(PartitionDef {
-            number: next_part_num,
-            name: "SWAP".to_string(),
-            size_mib: swap_mib,
-            type_guid: partition_types::LINUX_SWAP.to_string(),
-            mount_point: None,
-            is_swap: true,
-            is_efi: false,
-            is_luks: false,
-            is_bios_boot: false,
-            is_boot_fs: false,
-            attributes: None,
-        });
-        next_part_num += 1;
-    }
-
-    // LVM PV partition (LUKS container, remainder of disk)
-    partitions.push(PartitionDef {
-        number: next_part_num,
-        name: "LVM".to_string(),
-        size_mib: 0, // Remainder
-        type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
-        mount_point: None, // Mounted via LVM
-        is_swap: false,
-        is_efi: false,
-        is_luks: true, // Will be LUKS encrypted
-        is_bios_boot: false,
-        is_boot_fs: false,
-        attributes: None,
-    });
-
-    Ok(ComputedLayout {
-        partitions,
-        total_mib: disk_mib,
-        subvolumes: None,
-        planned_thin_volumes: None,
-    })
-}
-
-/// Compute the custom user-defined layout
-///
-/// Layout: EFI, Boot, optional Swap, then user-defined partitions from `entries`.
-/// Exactly one partition may have `size_mib = 0` (remainder).
-fn compute_custom_layout(
+/// Always prepends EFI + Boot. Swap is prepended only when
+/// `use_swap_partition` is true. User entries follow as data partitions.
+/// Exactly one entry may have `size_mib = 0` (remainder of disk).
+pub fn compute_layout_from_entries(
     disk_mib: u64,
     encryption: bool,
     use_swap_partition: bool,
@@ -706,26 +321,12 @@ pub fn compute_layout_from_config(
 ) -> Result<ComputedLayout> {
     let use_swap_partition = disk_config.swap_type == SwapType::Partition;
 
-    let mut layout = match disk_config.layout {
-        PartitionLayout::Standard => compute_standard_layout(disk_mib)?,
-        PartitionLayout::Minimal => compute_minimal_layout(disk_mib)?,
-        PartitionLayout::LvmThin => {
-            // Legacy compat: should have been normalized to Standard + use_lvm_thin
-            // by DeploymentConfig::normalize_legacy_lvmthin(). Handle here as safety net.
-            compute_standard_layout(disk_mib)?
-        }
-        PartitionLayout::Custom => {
-            let entries = disk_config.custom_partitions.as_deref().ok_or_else(|| {
-                DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
-            })?;
-            compute_custom_layout(
-                disk_mib,
-                disk_config.encryption,
-                use_swap_partition,
-                entries,
-            )?
-        }
-    };
+    let mut layout = compute_layout_from_entries(
+        disk_mib,
+        disk_config.encryption,
+        use_swap_partition,
+        &disk_config.partitions,
+    )?;
 
     // Apply encryption flags to data partitions.
     // When LVM thin is active, encryption is applied to the single LVM PV
@@ -752,37 +353,6 @@ pub fn compute_layout_from_config(
     }
 
     Ok(layout)
-}
-
-/// Legacy wrapper — kept for backward compatibility with existing call sites.
-/// Prefer `compute_layout_from_config`.
-#[allow(dead_code)]
-pub fn compute_layout(
-    layout: &PartitionLayout,
-    disk_mib: u64,
-    encryption: bool,
-    use_swap_partition: bool,
-    custom_partitions: Option<&[CustomPartitionEntry]>,
-) -> Result<ComputedLayout> {
-    let mut computed = match layout {
-        PartitionLayout::Standard | PartitionLayout::LvmThin => {
-            // LvmThin normalised to Standard; compute as standard.
-            compute_standard_layout(disk_mib)?
-        }
-        PartitionLayout::Minimal => compute_minimal_layout(disk_mib)?,
-        PartitionLayout::Custom => {
-            let entries = custom_partitions.ok_or_else(|| {
-                DeploytixError::ConfigError("Custom layout requires custom_partitions".into())
-            })?;
-            compute_custom_layout(disk_mib, encryption, use_swap_partition, entries)?
-        }
-    };
-
-    if encryption {
-        apply_encryption_flags(&mut computed);
-    }
-
-    Ok(computed)
 }
 
 /// Mark data partitions (non-EFI, non-boot, non-swap) as LUKS containers.
@@ -867,25 +437,9 @@ pub fn apply_lvm_thin_to_layout(
     })
 }
 
-/// Compute LVM thin layout with swap type consideration
-#[allow(dead_code)]
-pub fn compute_lvm_thin_layout_with_swap(
-    disk_mib: u64,
-    use_swap_partition: bool,
-) -> Result<ComputedLayout> {
-    compute_lvm_thin_layout(disk_mib, use_swap_partition)
-}
-
-/// Check if layout has a separate /usr partition
-#[allow(dead_code)]
-pub fn has_usr_partition(layout: &PartitionLayout) -> bool {
-    matches!(layout, PartitionLayout::Standard)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PartitionLayout;
 
     // ── Pure math helpers ────────────────────────────────────────────────────
 
@@ -986,14 +540,6 @@ mod tests {
             make_partition(2, "ROOT", false),
         ]);
         assert!(get_luks_partitions(&layout).is_empty());
-    }
-
-    #[test]
-    fn has_usr_partition_true_only_for_standard_layout() {
-        assert!(has_usr_partition(&PartitionLayout::Standard));
-        assert!(!has_usr_partition(&PartitionLayout::Minimal));
-        assert!(!has_usr_partition(&PartitionLayout::LvmThin));
-        assert!(!has_usr_partition(&PartitionLayout::Custom));
     }
 
     #[test]

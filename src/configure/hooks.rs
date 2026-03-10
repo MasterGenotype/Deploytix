@@ -651,12 +651,11 @@ help() {{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DeploymentConfig, PartitionLayout};
+    use crate::config::DeploymentConfig;
 
-    /// Helper: build a config with the given layout and encryption flag
-    fn config_with(layout: crate::config::PartitionLayout, encryption: bool) -> DeploymentConfig {
+    /// Helper: build a config with the given encryption flag
+    fn config_encrypted(encryption: bool) -> DeploymentConfig {
         let mut cfg = DeploymentConfig::sample();
-        cfg.disk.layout = layout;
         cfg.disk.encryption = encryption;
         if encryption {
             cfg.disk.encryption_password = Some("test".to_string());
@@ -842,24 +841,14 @@ mod tests {
 
     #[test]
     fn no_hooks_generated_without_encryption() {
-        let cfg = config_with(PartitionLayout::Standard, false);
+        let cfg = config_encrypted(false);
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
         assert!(hooks.is_empty());
     }
 
     #[test]
-    fn no_hooks_generated_for_minimal() {
-        let cfg = config_with(PartitionLayout::Minimal, false);
-        let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
-        assert!(
-            hooks.is_empty(),
-            "Minimal layout should not use custom hooks"
-        );
-    }
-
-    #[test]
-    fn hooks_generated_for_standard_encrypted() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn hooks_generated_for_encrypted() {
+        let cfg = config_encrypted(true);
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0].name, "crypttab-unlock");
@@ -895,7 +884,7 @@ mod tests {
 
     #[test]
     fn mountcrypt_hook_mounts_all_encrypted_partitions() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+        let cfg = config_encrypted(true);
         let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Root"));
         assert!(hook.hook_content.contains("/dev/mapper/Crypt-Usr"));
@@ -905,7 +894,7 @@ mod tests {
 
     #[test]
     fn mountcrypt_hook_minimal_only_mounts_root() {
-        let cfg = config_with(PartitionLayout::Minimal, true);
+        let cfg = config_encrypted(true);
         let hook = generate_mountcrypt_hook(&cfg, &minimal_encrypted_layout());
         assert!(
             hook.hook_content.contains("/dev/mapper/Crypt-Root"),
@@ -923,7 +912,7 @@ mod tests {
 
     #[test]
     fn mountcrypt_hook_encrypted_boot() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.boot_encryption = true;
         let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(
@@ -938,7 +927,7 @@ mod tests {
 
     #[test]
     fn mountcrypt_hook_unencrypted_boot() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.boot_encryption = false;
         let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
         assert!(
@@ -953,7 +942,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_boot_encryption_generates_crypttab_unlock_hook() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
@@ -967,7 +956,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_no_boot_encryption_no_hooks() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         let hooks = generate_hooks(&cfg, &dummy_layout()).unwrap();
         assert!(

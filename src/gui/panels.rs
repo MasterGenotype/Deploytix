@@ -2,10 +2,18 @@
 
 use crate::config::{
     Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, NetworkBackend,
-    PartitionLayout, SecureBootMethod, SwapType,
+    SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
+use crate::disk::layouts::{BOOT_MIB, EFI_MIB};
 use egui::{RichText, Ui};
+
+/// Estimated swap size for GUI space calculations (8 GiB).
+/// The real value is RAM-dependent and computed at layout time.
+const SWAP_ESTIMATE_MIB: u64 = 8192;
+
+/// Minimum partition size in GiB shown on sliders.
+const MIN_PART_GIB: u64 = 1;
 
 /// Disk selection panel
 pub fn disk_selection_panel(
@@ -69,7 +77,7 @@ pub fn disk_selection_panel(
 #[allow(clippy::too_many_arguments)]
 pub fn disk_config_panel(
     ui: &mut Ui,
-    layout: &mut PartitionLayout,
+    disk_size_mib: u64,
     filesystem: &mut Filesystem,
     encryption: &mut bool,
     encryption_password: &mut String,
@@ -83,35 +91,12 @@ pub fn disk_config_panel(
     lvm_vg_name: &mut String,
     lvm_thin_pool_name: &mut String,
     lvm_thin_pool_percent: &mut u8,
-    custom_partitions: &mut Vec<CustomPartitionEntry>,
+    partitions: &mut Vec<CustomPartitionEntry>,
     new_partition_mount: &mut String,
     new_partition_size: &mut String,
     new_partition_label: &mut String,
 ) -> bool {
     ui.heading("Disk Configuration");
-    ui.add_space(8.0);
-
-    // Partition Layout
-    ui.label("Partition Layout:");
-    egui::ComboBox::from_id_salt("layout")
-        .selected_text(format!("{}", layout))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(
-                layout,
-                PartitionLayout::Standard,
-                "Standard (EFI, Boot, Swap, Root, Usr, Var, Home)",
-            );
-            ui.selectable_value(
-                layout,
-                PartitionLayout::Minimal,
-                "Minimal (EFI, Boot, Swap, Root with subvolumes)",
-            );
-            ui.selectable_value(
-                layout,
-                PartitionLayout::Custom,
-                "Custom (define your own partitions)",
-            );
-        });
     ui.add_space(8.0);
 
     // Filesystem
@@ -184,9 +169,10 @@ pub fn disk_config_panel(
                     .color(egui::Color32::YELLOW),
             );
         }
-        if *layout == PartitionLayout::Minimal && !*use_subvolumes {
+        let has_home = partitions.iter().any(|p| p.mount_point == "/home");
+        if !has_home && !*use_subvolumes {
             ui.label(
-                RichText::new("⚠ preserve_home with Minimal layout requires subvolumes")
+                RichText::new("⚠ preserve_home requires a /home partition or subvolumes")
                     .color(egui::Color32::YELLOW),
             );
         }
@@ -262,104 +248,174 @@ pub fn disk_config_panel(
     }
     ui.add_space(8.0);
 
-    // Custom Partition settings
-    if *layout == PartitionLayout::Custom {
-        ui.separator();
-        ui.add_space(8.0);
-        ui.label(RichText::new("Custom Partitions").strong());
-        ui.label(
-            RichText::new("EFI (512 MiB), Boot (2 GiB), and Swap are added automatically.").weak(),
-        );
-        ui.add_space(4.0);
+    // ── Partition sliders ────────────────────────────────────────────────
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("Partitions").strong());
 
-        // List existing partitions
-        let mut remove_idx: Option<usize> = None;
-        egui::ScrollArea::vertical()
-            .max_height(150.0)
-            .id_salt("custom_partitions_scroll")
-            .show(ui, |ui| {
-                for (i, part) in custom_partitions.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let size_str = if part.size_mib == 0 {
-                            "remainder".to_string()
-                        } else {
-                            format!("{} MiB", part.size_mib)
-                        };
-                        ui.label(format!(
-                            "{} - {} ({})",
-                            part.mount_point,
-                            part.effective_label(),
-                            size_str
-                        ));
-                        // Don't allow removing the root partition
-                        if part.mount_point != "/" && ui.small_button("✕").clicked() {
-                            remove_idx = Some(i);
-                        }
-                    });
-                }
-            });
+    // Compute available space for data partitions
+    let swap_overhead = if *swap_type == SwapType::Partition {
+        SWAP_ESTIMATE_MIB
+    } else {
+        0
+    };
+    let reserved_mib = EFI_MIB + BOOT_MIB + swap_overhead;
+    let data_budget_mib = disk_size_mib.saturating_sub(reserved_mib);
+    let data_budget_gib = data_budget_mib / 1024;
 
-        // Remove partition if requested
-        if let Some(idx) = remove_idx {
-            custom_partitions.remove(idx);
-        }
+    ui.label(
+        RichText::new(format!(
+            "System reserved: EFI 0.5 GiB + Boot 2 GiB{} — {:.1} GiB available for data partitions",
+            if swap_overhead > 0 {
+                format!(" + Swap ~{} GiB", swap_overhead / 1024)
+            } else {
+                String::new()
+            },
+            data_budget_mib as f64 / 1024.0,
+        ))
+        .weak(),
+    );
+    ui.add_space(4.0);
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("Add New Partition:").strong());
-        ui.add_space(4.0);
+    // Render per-partition sliders and collect mutations
+    let mut remove_idx: Option<usize> = None;
+    let part_count = partitions.len();
+    // Sum of all fixed (non-remainder) partitions in MiB
+    let fixed_total_mib: u64 = partitions.iter().map(|p| p.size_mib).sum();
+    let remainder_gib = data_budget_mib.saturating_sub(fixed_total_mib) / 1024;
 
-        ui.horizontal(|ui| {
-            ui.label("Mount Point:");
-            ui.add(egui::TextEdit::singleline(new_partition_mount).desired_width(100.0));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Size (MiB, 0=remainder):");
-            ui.add(egui::TextEdit::singleline(new_partition_size).desired_width(80.0));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Label (optional):");
-            ui.add(egui::TextEdit::singleline(new_partition_label).desired_width(100.0));
-        });
+    egui::ScrollArea::vertical()
+        .max_height(200.0)
+        .id_salt("partitions_scroll")
+        .show(ui, |ui| {
+            for i in 0..part_count {
+                let is_remainder = partitions[i].size_mib == 0;
+                let mount = partitions[i].mount_point.clone();
+                let label = partitions[i].effective_label();
 
-        if ui.button("➕ Add Partition").clicked() {
-            let mount = new_partition_mount.trim();
-            let size: u64 = new_partition_size.parse().unwrap_or(0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} ({})", mount, label));
 
-            // Validate
-            let mut valid = true;
-            if !mount.starts_with('/') {
-                valid = false;
-            }
-            if mount == "/boot" || mount == "/boot/efi" {
-                valid = false;
-            }
-            if custom_partitions.iter().any(|p| p.mount_point == mount) {
-                valid = false;
-            }
-            // Only one remainder partition allowed
-            if size == 0 && custom_partitions.iter().any(|p| p.size_mib == 0) {
-                valid = false;
-            }
+                    if is_remainder {
+                        // Show computed remainder (read-only)
+                        ui.label(
+                            RichText::new(format!("{} GiB (remainder)", remainder_gib))
+                                .weak(),
+                        );
+                    } else {
+                        // Slider in GiB. Max = current value + unallocated remainder
+                        // so dragging this slider steals from the remainder partition.
+                        let current_gib = partitions[i].size_mib / 1024;
+                        let other_fixed_mib: u64 = partitions
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, p)| *j != i && p.size_mib > 0)
+                            .map(|(_, p)| p.size_mib)
+                            .sum();
+                        let max_gib = data_budget_mib
+                            .saturating_sub(other_fixed_mib)
+                            .saturating_sub(1024) // leave 1 GiB for remainder
+                            / 1024;
+                        let max_gib = max_gib.max(MIN_PART_GIB);
 
-            if valid && !mount.is_empty() {
-                let label = if new_partition_label.trim().is_empty() {
-                    None
-                } else {
-                    Some(new_partition_label.trim().to_string())
-                };
-                custom_partitions.push(CustomPartitionEntry {
-                    mount_point: mount.to_string(),
-                    label,
-                    size_mib: size,
-                    encryption: None, // Inherit from global setting
+                        let mut gib = current_gib;
+                        ui.add(
+                            egui::Slider::new(&mut gib, MIN_PART_GIB..=max_gib)
+                                .suffix(" GiB")
+                                .clamping(egui::SliderClamping::Always),
+                        );
+                        // Write back as MiB
+                        partitions[i].size_mib = gib * 1024;
+                    }
+
+                    // Remove button (root partition cannot be removed)
+                    if mount != "/" && ui.small_button("✕").clicked() {
+                        remove_idx = Some(i);
+                    }
                 });
-                new_partition_mount.clear();
-                new_partition_size.clear();
-                new_partition_label.clear();
             }
-        }
-        ui.add_space(8.0);
+        });
+
+    if let Some(idx) = remove_idx {
+        partitions.remove(idx);
     }
+
+    // Allocated vs available bar
+    let allocated_gib = fixed_total_mib / 1024;
+    let fraction = if data_budget_gib > 0 {
+        (allocated_gib as f32) / (data_budget_gib as f32)
+    } else {
+        0.0
+    };
+    ui.add_space(4.0);
+    ui.add(
+        egui::ProgressBar::new(fraction.min(1.0))
+            .text(format!(
+                "Allocated: {} / {} GiB",
+                allocated_gib, data_budget_gib
+            )),
+    );
+    if allocated_gib > data_budget_gib {
+        ui.label(
+            RichText::new("⚠ Partitions exceed available disk space")
+                .color(egui::Color32::RED),
+        );
+    }
+    ui.add_space(8.0);
+
+    // ── Add new partition ────────────────────────────────────────────────
+    ui.label(RichText::new("Add New Partition:").strong());
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Mount Point:");
+        ui.add(egui::TextEdit::singleline(new_partition_mount).desired_width(100.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Size (GiB, 0=remainder):");
+        ui.add(egui::TextEdit::singleline(new_partition_size).desired_width(80.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Label (optional):");
+        ui.add(egui::TextEdit::singleline(new_partition_label).desired_width(100.0));
+    });
+
+    if ui.button("➕ Add Partition").clicked() {
+        let mount = new_partition_mount.trim();
+        let size_gib: u64 = new_partition_size.parse().unwrap_or(0);
+
+        let mut valid = true;
+        if !mount.starts_with('/') {
+            valid = false;
+        }
+        if mount == "/boot" || mount == "/boot/efi" {
+            valid = false;
+        }
+        if partitions.iter().any(|p| p.mount_point == mount) {
+            valid = false;
+        }
+        if size_gib == 0 && partitions.iter().any(|p| p.size_mib == 0) {
+            valid = false;
+        }
+
+        if valid && !mount.is_empty() {
+            let label = if new_partition_label.trim().is_empty() {
+                None
+            } else {
+                Some(new_partition_label.trim().to_string())
+            };
+            partitions.push(CustomPartitionEntry {
+                mount_point: mount.to_string(),
+                label,
+                size_mib: size_gib * 1024, // convert GiB → MiB
+                encryption: None,
+            });
+            new_partition_mount.clear();
+            new_partition_size.clear();
+            new_partition_label.clear();
+        }
+    }
+    ui.add_space(8.0);
 
     // Validation
     if *encryption && encryption_password.is_empty() {
@@ -377,22 +433,20 @@ pub fn disk_config_panel(
         return false;
     }
 
-    // Custom layout validation
-    if *layout == PartitionLayout::Custom {
-        if custom_partitions.is_empty() {
-            ui.label(
-                RichText::new("⚠ Custom layout requires at least one partition")
-                    .color(egui::Color32::RED),
-            );
-            return false;
-        }
-        if !custom_partitions.iter().any(|p| p.mount_point == "/") {
-            ui.label(
-                RichText::new("⚠ Custom layout must have a root (/) partition")
-                    .color(egui::Color32::RED),
-            );
-            return false;
-        }
+    // Partition validation
+    if partitions.is_empty() {
+        ui.label(
+            RichText::new("⚠ At least one partition is required")
+                .color(egui::Color32::RED),
+        );
+        return false;
+    }
+    if !partitions.iter().any(|p| p.mount_point == "/") {
+        ui.label(
+            RichText::new("⚠ A root (/) partition is required")
+                .color(egui::Color32::RED),
+        );
+        return false;
     }
 
     true
@@ -646,7 +700,7 @@ pub fn network_desktop_panel(
 pub fn summary_panel(
     ui: &mut Ui,
     device_path: &str,
-    layout: &PartitionLayout,
+    partitions: &[CustomPartitionEntry],
     filesystem: &Filesystem,
     encryption: bool,
     boot_encryption: bool,
@@ -683,8 +737,18 @@ pub fn summary_panel(
             ui.label(RichText::new(device_path).strong());
             ui.end_row();
 
-            ui.label("Partition Layout:");
-            ui.label(format!("{}", layout));
+            ui.label("Partitions:");
+            let part_summary: Vec<String> = partitions
+                .iter()
+                .map(|p| {
+                    if p.size_mib == 0 {
+                        format!("{} (remainder)", p.mount_point)
+                    } else {
+                        format!("{} ({} GiB)", p.mount_point, p.size_mib / 1024)
+                    }
+                })
+                .collect();
+            ui.label(part_summary.join(", "));
             ui.end_row();
 
             ui.label("Filesystem:");

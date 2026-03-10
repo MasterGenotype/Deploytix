@@ -290,6 +290,61 @@ fn custom_packages_in_sync_db() -> bool {
     false
 }
 
+/// Resolve the home directory of the user who invoked the installer.
+///
+/// The installer runs as root, either via `sudo` (sets `SUDO_USER`) or
+/// `pkexec`/polkit (sets `PKEXEC_UID`).  This function tries both and
+/// falls back to scanning `/home` for a Deploytix checkout.
+fn resolve_invoking_user_home() -> Option<PathBuf> {
+    // 1. SUDO_USER — set by sudo.
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        let home = PathBuf::from(format!("/home/{}", user));
+        if home.is_dir() {
+            return Some(home);
+        }
+    }
+
+    // 2. PKEXEC_UID — set by pkexec (polkit).
+    if let Ok(uid_str) = std::env::var("PKEXEC_UID") {
+        if let Ok(uid) = uid_str.parse::<u32>() {
+            if let Some(home) = home_dir_for_uid(uid) {
+                return Some(home);
+            }
+        }
+    }
+
+    // 3. Scan /home for a directory containing .gitrepos/Deploytix/pkg.
+    if let Ok(entries) = std::fs::read_dir("/home") {
+        for entry in entries.flatten() {
+            let candidate = entry.path();
+            if candidate.join(".gitrepos/Deploytix/pkg").is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+/// Map a numeric UID to its home directory by parsing `/etc/passwd`.
+fn home_dir_for_uid(uid: u32) -> Option<PathBuf> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 {
+            if let Ok(line_uid) = fields[2].parse::<u32>() {
+                if line_uid == uid {
+                    let home = PathBuf::from(fields[5]);
+                    if home.is_dir() {
+                        return Some(home);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Search well-known directories for pre-built `.pkg.tar.zst` files
 /// that belong to the deploytix custom packages.
 fn locate_prebuilt_packages() -> Vec<PathBuf> {
@@ -303,14 +358,18 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             .and_then(|p| p.parent()) // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
+            // Sibling tkg-gui repo (mirrors the ISO build script's TKG_GUI_LOCAL_DIR).
+            if let Some(parent) = repo_root.parent() {
+                search_dirs.push(parent.join("tkg-gui/pkg"));
+            }
         }
     }
 
-    // 2. Paths based on SUDO_USER (installer runs as root via sudo).
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        let home = format!("/home/{}", user);
-        search_dirs.push(PathBuf::from(&home).join(".gitrepos/Deploytix/pkg"));
-        search_dirs.push(PathBuf::from(&home).join("artools-workspace/tkg-gui-src/pkg"));
+    // 2. Invoking user's home (works for both sudo and pkexec/polkit).
+    if let Some(home) = resolve_invoking_user_home() {
+        search_dirs.push(home.join(".gitrepos/Deploytix/pkg"));
+        search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
+        search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
     }
 
     // 3. Current working directory (might be repo root).

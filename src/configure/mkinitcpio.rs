@@ -1,6 +1,6 @@
 //! mkinitcpio configuration and hook construction
 
-use crate::config::{DeploymentConfig, Filesystem, PartitionLayout};
+use crate::config::{DeploymentConfig, Filesystem};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -145,8 +145,8 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("filesystems".to_string());
         hooks.push("fsck".to_string());
 
-        // Separate /usr partition hook (Standard layout has separate /usr)
-        if config.disk.layout == PartitionLayout::Standard {
+        // Separate /usr partition requires the usr hook for early mount
+        if config.disk.partitions.iter().any(|p| p.mount_point == "/usr") {
             hooks.push("usr".to_string());
         }
 
@@ -299,11 +299,10 @@ pub fn regenerate_initramfs(cmd: &CommandRunner, install_root: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DeploymentConfig;
+    use crate::config::{CustomPartitionEntry, DeploymentConfig};
 
-    fn config_with(layout: PartitionLayout, encryption: bool) -> DeploymentConfig {
+    fn config_encrypted(encryption: bool) -> DeploymentConfig {
         let mut cfg = DeploymentConfig::sample();
-        cfg.disk.layout = layout;
         cfg.disk.encryption = encryption;
         if encryption {
             cfg.disk.encryption_password = Some("test".to_string());
@@ -312,8 +311,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_uses_custom_hooks() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_uses_custom_hooks() {
+        let cfg = config_encrypted(true);
         let hooks = construct_hooks(&cfg);
         assert!(hooks.contains(&"crypttab-unlock".to_string()));
         assert!(hooks.contains(&"mountcrypt".to_string()));
@@ -323,18 +322,20 @@ mod tests {
     }
 
     #[test]
-    fn minimal_unencrypted_has_filesystems_hook() {
-        let cfg = config_with(PartitionLayout::Minimal, false);
+    fn unencrypted_no_usr_has_filesystems_hook() {
+        let mut cfg = config_encrypted(false);
+        // Explicitly remove /usr so we can test the "no usr hook" path
+        cfg.disk.partitions.retain(|p| p.mount_point != "/usr");
         let hooks = construct_hooks(&cfg);
         assert!(hooks.contains(&"filesystems".to_string()));
         assert!(!hooks.contains(&"crypttab-unlock".to_string()));
         assert!(!hooks.contains(&"mountcrypt".to_string()));
-        assert!(!hooks.contains(&"usr".to_string())); // Minimal doesn't have separate /usr
+        assert!(!hooks.contains(&"usr".to_string()));
     }
 
     #[test]
-    fn unencrypted_standard_has_no_encrypt_hooks() {
-        let cfg = config_with(PartitionLayout::Standard, false);
+    fn unencrypted_has_no_encrypt_hooks() {
+        let cfg = config_encrypted(false);
         let hooks = construct_hooks(&cfg);
         assert!(!hooks.contains(&"encrypt".to_string()));
         assert!(!hooks.contains(&"crypttab-unlock".to_string()));
@@ -343,8 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_hook_ordering() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_hook_ordering() {
+        let cfg = config_encrypted(true);
         let hooks = construct_hooks(&cfg);
         let lvm2_pos = hooks.iter().position(|h| h == "lvm2").unwrap();
         let unlock_pos = hooks.iter().position(|h| h == "crypttab-unlock").unwrap();
@@ -358,8 +359,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_files_include_crypttab_and_keyfiles() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_files_include_crypttab_and_keyfiles() {
+        let cfg = config_encrypted(true);
         let files = construct_files(&cfg);
         assert!(files.contains(&"/etc/crypttab".to_string()));
         assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptroot.key".to_string()));
@@ -369,26 +370,26 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_boot_encryption_includes_boot_keyfile() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_boot_encryption_includes_boot_keyfile() {
+        let mut cfg = config_encrypted(true);
         cfg.disk.boot_encryption = true;
         let files = construct_files(&cfg);
         assert!(files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()));
     }
 
     #[test]
-    fn minimal_unencrypted_no_files() {
-        let cfg = config_with(PartitionLayout::Minimal, false);
+    fn unencrypted_no_files() {
+        let cfg = config_encrypted(false);
         let files = construct_files(&cfg);
         assert!(
             files.is_empty(),
-            "Unencrypted Minimal layout should not embed crypttab/keyfiles"
+            "Unencrypted config should not embed crypttab/keyfiles"
         );
     }
 
     #[test]
-    fn standard_encrypted_with_integrity_includes_dm_integrity_module() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_with_integrity_includes_dm_integrity_module() {
+        let mut cfg = config_encrypted(true);
         cfg.disk.integrity = true;
         let modules = construct_modules(&cfg);
         assert!(
@@ -398,8 +399,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_encrypted_without_integrity_excludes_dm_integrity_module() {
-        let cfg = config_with(PartitionLayout::Standard, true);
+    fn encrypted_without_integrity_excludes_dm_integrity_module() {
+        let cfg = config_encrypted(true);
         let modules = construct_modules(&cfg);
         assert!(
             !modules.contains(&"dm_integrity".to_string()),
@@ -409,7 +410,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_encrypted_uses_encrypt_hook() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         let hooks = construct_hooks(&cfg);
         assert!(
@@ -428,7 +429,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_boot_encryption_adds_crypttab_unlock_hook() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let hooks = construct_hooks(&cfg);
@@ -444,7 +445,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_boot_encryption_includes_crypttab_and_keyfiles() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         cfg.disk.boot_encryption = true;
         let files = construct_files(&cfg);
@@ -464,7 +465,7 @@ mod tests {
 
     #[test]
     fn lvm_thin_without_boot_encryption_no_files_in_initramfs() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         let files = construct_files(&cfg);
         // Without boot_encryption, cryptlvm.key is never generated by
@@ -485,8 +486,24 @@ mod tests {
     }
 
     #[test]
+    fn usr_hook_added_when_usr_partition_present() {
+        let mut cfg = config_encrypted(false);
+        cfg.disk.partitions.push(CustomPartitionEntry {
+            mount_point: "/usr".to_string(),
+            label: None,
+            size_mib: 20480,
+            encryption: None,
+        });
+        let hooks = construct_hooks(&cfg);
+        assert!(
+            hooks.contains(&"usr".to_string()),
+            "Must include usr hook when /usr partition exists"
+        );
+    }
+
+    #[test]
     fn lvm_thin_includes_usr_hook() {
-        let mut cfg = config_with(PartitionLayout::Standard, true);
+        let mut cfg = config_encrypted(true);
         cfg.disk.use_lvm_thin = true;
         let hooks = construct_hooks(&cfg);
         assert!(
