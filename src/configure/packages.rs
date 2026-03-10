@@ -318,24 +318,21 @@ pub fn install_yay(
         "pacman -S --noconfirm --needed go git base-devel",
     )?;
 
-    // Create a temporary build directory owned by the user
-    cmd.run_in_chroot(
-        install_root,
-        &format!("mkdir -p /tmp/yay-build && chown {0}:{0} /tmp/yay-build", username),
-    )?;
-
-    // Clone and build yay as the non-root user
+    // Create build dir, clone, build, and clean up in a single chroot
+    // invocation.  artix-chroot may mount a tmpfs over /tmp, so a
+    // directory created in one invocation would not survive to the next.
     let build_cmd = format!(
-        "sudo -u {} bash -c 'cd /tmp/yay-build && \
-         git clone https://aur.archlinux.org/yay.git && \
-         cd yay && \
-         makepkg -si --noconfirm'",
+        "mkdir -p /tmp/yay-build && \
+         chown {0}:{0} /tmp/yay-build && \
+         sudo -u {0} bash -c '\
+           cd /tmp/yay-build && \
+           git clone https://aur.archlinux.org/yay.git && \
+           cd yay && \
+           makepkg -si --noconfirm' && \
+         rm -rf /tmp/yay-build",
         username
     );
     cmd.run_in_chroot(install_root, &build_cmd)?;
-
-    // Clean up build directory
-    cmd.run_in_chroot(install_root, "rm -rf /tmp/yay-build")?;
 
     info!("yay AUR helper installed successfully");
     Ok(())
