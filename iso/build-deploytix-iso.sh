@@ -366,11 +366,18 @@ install_profile() {
         cp "${PROFILE_SRC}/profile.yaml" "$dest/profile.yaml"
     fi
 
-    # Set root-overlay symlink to common using an absolute path so it resolves
-    # correctly regardless of whether common/ exists in the workspace.
+    # Merge root-overlay: start from the common artools overlay, then layer
+    # our profile-specific overlay on top (e.g. mkinitcpio conf.d drop-ins
+    # for COW persistence).
     local common_dir
     common_dir="$(resolve_common_dir)"
-    ln -sfn "${common_dir}/root-overlay" "$dest/root-overlay"
+    mkdir -p "$dest/root-overlay"
+    if [[ -d "${common_dir}/root-overlay" ]]; then
+        cp -aT "${common_dir}/root-overlay" "$dest/root-overlay"
+    fi
+    if [[ -d "${PROFILE_SRC}/root-overlay" ]]; then
+        cp -aT "${PROFILE_SRC}/root-overlay" "$dest/root-overlay"
+    fi
 
     # Copy live-overlay if it exists in our profile source
     if [[ -d "${PROFILE_SRC}/live-overlay" ]]; then

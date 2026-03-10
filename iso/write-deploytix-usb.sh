@@ -130,9 +130,8 @@ sync
 msg2 "ISO written successfully"
 
 # Wait for kernel to re-read partition table
-sleep 2
 partprobe "${DEVICE}" 2>/dev/null || true
-sleep 1
+udevadm settle --timeout=5 2>/dev/null || sleep 3
 
 # ── Step 2: Determine partition layout ───────────────────────────────────────
 msg "Inspecting partition layout..."
@@ -157,9 +156,10 @@ msg2 "Free space after ISO: $(( FREE_SECTORS * 512 / 1024 / 1024 )) MiB"
 msg "Creating persistence partition..."
 
 # Append partition 3 (Linux, type 83) using all remaining space
-echo ',,83,;' | sfdisk --append "${DEVICE}" --no-reread 2>/dev/null || true
+echo ',,83,;' | sfdisk --append "${DEVICE}" --no-reread \
+    || die "sfdisk --append failed; is the partition table intact?"
 partprobe "${DEVICE}" 2>/dev/null || true
-sleep 2
+udevadm settle --timeout=5 2>/dev/null || sleep 3
 
 # Find the new partition (usually ${DEVICE}3, but handle nvme-style names too)
 PERSIST_PART=""
@@ -169,6 +169,19 @@ for candidate in "${DEVICE}3" "${DEVICE}p3"; do
         break
     fi
 done
+
+# If the device node hasn't appeared yet, give the kernel another chance
+if [[ -z "${PERSIST_PART}" ]]; then
+    msg2 "Waiting for partition device node..."
+    partprobe "${DEVICE}" 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || sleep 3
+    for candidate in "${DEVICE}3" "${DEVICE}p3"; do
+        if [[ -b "${candidate}" ]]; then
+            PERSIST_PART="${candidate}"
+            break
+        fi
+    done
+fi
 
 [[ -n "${PERSIST_PART}" ]] || die "Could not find persistence partition after creation"
 msg2 "Persistence partition: ${PERSIST_PART}"
