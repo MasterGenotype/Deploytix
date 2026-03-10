@@ -371,7 +371,20 @@ install_profile() {
     # for COW persistence).
     local common_dir
     common_dir="$(resolve_common_dir)"
-    mkdir -p "$dest/root-overlay"
+    # If generate_gui_profile left a symlink (DE profiles often symlink
+    # root-overlay to ../common/root-overlay), materialise it into a real
+    # directory so we can layer additional files on top.
+    if [[ -L "$dest/root-overlay" ]]; then
+        local link_target
+        link_target="$(readlink -f "$dest/root-overlay")"
+        rm "$dest/root-overlay"
+        mkdir -p "$dest/root-overlay"
+        if [[ -d "$link_target" ]]; then
+            cp -aT "$link_target" "$dest/root-overlay"
+        fi
+    else
+        mkdir -p "$dest/root-overlay"
+    fi
     if [[ -d "${common_dir}/root-overlay" ]]; then
         cp -aT "${common_dir}/root-overlay" "$dest/root-overlay"
     fi
