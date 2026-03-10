@@ -687,6 +687,17 @@ impl Installer {
                 layout,
                 INSTALL_ROOT,
             )?;
+
+            // Pacman hook to reinstall GRUB on kernel/grub updates.
+            // Without this, a kernel update breaks boot on encrypted systems
+            // because the standalone EFI binary (or GRUB core image) still
+            // references the old kernel and must be rebuilt.
+            configure::bootloader::create_grub_reinstall_hook(
+                &self.cmd,
+                &self.config,
+                &self.config.disk.device,
+                INSTALL_ROOT,
+            )?;
         } else {
             let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader(
