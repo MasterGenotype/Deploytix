@@ -561,10 +561,17 @@ pub fn user_config_panel(
 }
 
 /// Network and desktop configuration panel
+#[allow(clippy::too_many_arguments)]
 pub fn network_desktop_panel(
     ui: &mut Ui,
     network_backend: &mut NetworkBackend,
     desktop_env: &mut DesktopEnvironment,
+    install_yay: &mut bool,
+    install_wine: &mut bool,
+    install_gaming: &mut bool,
+    gpu_nvidia: &mut bool,
+    gpu_amd: &mut bool,
+    gpu_intel: &mut bool,
 ) -> bool {
     ui.heading("Network & Desktop");
     ui.add_space(8.0);
@@ -597,6 +604,38 @@ pub fn network_desktop_panel(
             ui.selectable_value(desktop_env, DesktopEnvironment::Gnome, "GNOME");
             ui.selectable_value(desktop_env, DesktopEnvironment::Xfce, "XFCE");
         });
+    ui.add_space(16.0);
+
+    // Optional Package Collections
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("📦 Optional Package Collections").strong());
+    ui.add_space(8.0);
+
+    // Video/Graphics Drivers
+    ui.label("Video/Graphics Drivers:");
+    ui.add_space(4.0);
+    ui.checkbox(gpu_nvidia, "NVIDIA (nvidia, nvidia-utils, linux-firmware-nvidia)");
+    ui.checkbox(gpu_amd, "AMD (mesa, vulkan-radeon, xf86-video-amdgpu, ...)");
+    ui.checkbox(gpu_intel, "Intel (mesa, vulkan-intel, xf86-video-intel, ...)");
+    ui.add_space(8.0);
+
+    // Wine
+    ui.checkbox(install_wine, "Wine compatibility packages (wine, vkd3d, winetricks, wine-mono, wine-gecko)");
+    ui.add_space(4.0);
+
+    // Gaming
+    ui.checkbox(install_gaming, "Gaming packages (Steam, gamescope)");
+    ui.add_space(4.0);
+
+    // yay
+    ui.checkbox(install_yay, "yay AUR helper (built from source)");
+    if *install_yay {
+        ui.label(
+            RichText::new("Go will be installed as a build dependency. yay is built as your user via makepkg.")
+                .weak(),
+        );
+    }
     ui.add_space(8.0);
 
     true
@@ -621,6 +660,12 @@ pub fn summary_panel(
     encrypt_home: bool,
     network_backend: &NetworkBackend,
     desktop_env: &DesktopEnvironment,
+    gpu_nvidia: bool,
+    gpu_amd: bool,
+    gpu_intel: bool,
+    install_wine: bool,
+    install_gaming: bool,
+    install_yay: bool,
     dry_run: &mut bool,
     confirmed: &mut bool,
     save_config_path: &mut String,
@@ -706,6 +751,27 @@ pub fn summary_panel(
 
             ui.label("Desktop:");
             ui.label(format!("{}", desktop_env));
+            ui.end_row();
+
+            // GPU Drivers
+            let mut gpu_list = Vec::new();
+            if gpu_nvidia { gpu_list.push("NVIDIA"); }
+            if gpu_amd { gpu_list.push("AMD"); }
+            if gpu_intel { gpu_list.push("Intel"); }
+            ui.label("GPU Drivers:");
+            ui.label(if gpu_list.is_empty() { "None".to_string() } else { gpu_list.join(", ") });
+            ui.end_row();
+
+            ui.label("Wine:");
+            ui.label(if install_wine { "Enabled" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("Gaming:");
+            ui.label(if install_gaming { "Enabled" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("yay AUR Helper:");
+            ui.label(if install_yay { "Enabled" } else { "Disabled" });
             ui.end_row();
         });
 

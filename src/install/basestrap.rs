@@ -176,6 +176,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         ]);
     }
 
+    // yay AUR helper build dependency
+    if config.packages.install_yay {
+        packages.push("go".to_string());
+    }
+
     // SecureBoot tools (if enabled)
     if config.system.secureboot {
         match config.system.secureboot_method {

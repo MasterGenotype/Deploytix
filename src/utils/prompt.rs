@@ -1,7 +1,7 @@
 //! User prompt utilities using dialoguer
 
 use crate::utils::error::{DeploytixError, Result};
-use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Password, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, MultiSelect, Password, Select};
 
 /// Prompt for text input
 pub fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String> {
@@ -81,6 +81,18 @@ pub fn prompt_optional(prompt: &str) -> Result<Option<String>> {
     } else {
         Ok(Some(input))
     }
+}
+
+/// Prompt for multiple selections from a list (checkboxes)
+pub fn prompt_multi_select<T: ToString>(prompt: &str, items: &[T], defaults: &[bool]) -> Result<Vec<usize>> {
+    let theme = ColorfulTheme::default();
+    MultiSelect::with_theme(&theme)
+        .with_prompt(prompt)
+        .items(items)
+        .defaults(defaults)
+        .interact_opt()
+        .map_err(|e| DeploytixError::Io(std::io::Error::other(e.to_string())))?
+        .ok_or(DeploytixError::UserCancelled)
 }
 
 /// Display a warning and ask for confirmation

@@ -9,6 +9,7 @@ pub mod keyfiles;
 pub mod locale;
 pub mod mkinitcpio;
 pub mod network;
+pub mod packages;
 pub mod secureboot;
 pub mod services;
 pub mod swap;

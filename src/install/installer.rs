@@ -231,9 +231,33 @@ impl Installer {
             self.setup_secureboot()?;
         }
 
+        // Phase 4.7: GPU drivers (before desktop environment)
+        if !self.config.packages.gpu_drivers.is_empty() {
+            self.report_progress(0.79, "Installing GPU drivers...");
+            self.install_gpu_drivers()?;
+        }
+
         // Phase 5: Desktop environment (if selected)
         self.report_progress(0.80, "Installing desktop environment...");
         self.install_desktop()?;
+
+        // Phase 5.1: Wine packages (after desktop, before gaming)
+        if self.config.packages.install_wine {
+            self.report_progress(0.83, "Installing Wine compatibility packages...");
+            self.install_wine_packages()?;
+        }
+
+        // Phase 5.2: Gaming packages (after wine)
+        if self.config.packages.install_gaming {
+            self.report_progress(0.85, "Installing gaming packages...");
+            self.install_gaming_packages()?;
+        }
+
+        // Phase 5.3: yay AUR helper (after gaming, needs user account)
+        if self.config.packages.install_yay {
+            self.report_progress(0.87, "Building and installing yay AUR helper...");
+            self.install_yay()?;
+        }
 
         // Phase 6: Finalization
         self.report_progress(0.90, "Finalizing installation...");
@@ -709,6 +733,32 @@ impl Installer {
         }
 
         Ok(())
+    }
+
+    // ==================== OPTIONAL PACKAGE COLLECTION METHODS ====================
+
+    /// Install GPU driver packages
+    fn install_gpu_drivers(&self) -> Result<()> {
+        info!("Installing selected GPU driver packages");
+        configure::packages::install_gpu_drivers(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install Wine compatibility packages
+    fn install_wine_packages(&self) -> Result<()> {
+        info!("Installing Wine compatibility packages");
+        configure::packages::install_wine_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install gaming packages
+    fn install_gaming_packages(&self) -> Result<()> {
+        info!("Installing gaming packages");
+        configure::packages::install_gaming_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install yay AUR helper from source
+    fn install_yay(&self) -> Result<()> {
+        info!("Building and installing yay AUR helper from source");
+        configure::packages::install_yay(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Finalize installation

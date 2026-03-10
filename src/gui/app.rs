@@ -2,8 +2,8 @@
 
 use crate::config::{
     Bootloader, CustomPartitionEntry, DeploymentConfig, DesktopConfig, DesktopEnvironment,
-    DiskConfig, Filesystem, InitSystem, NetworkBackend, NetworkConfig, PartitionLayout,
-    SecureBootMethod, SwapType, SystemConfig, UserConfig,
+    DiskConfig, Filesystem, GpuDriverVendor, InitSystem, NetworkBackend, NetworkConfig,
+    PackagesConfig, PartitionLayout, SecureBootMethod, SwapType, SystemConfig, UserConfig,
 };
 use crate::disk::detection::{list_block_devices, BlockDevice};
 use crate::install::Installer;
@@ -130,6 +130,14 @@ pub struct DeploytixGui {
     network_backend: NetworkBackend,
     desktop_env: DesktopEnvironment,
 
+    // Optional package collections
+    install_yay: bool,
+    install_wine: bool,
+    install_gaming: bool,
+    gpu_nvidia: bool,
+    gpu_amd: bool,
+    gpu_intel: bool,
+
     // Summary
     dry_run: bool,
     confirmed: bool,
@@ -196,6 +204,13 @@ impl Default for DeploytixGui {
 
             network_backend: NetworkBackend::Iwd,
             desktop_env: DesktopEnvironment::None,
+
+            install_yay: false,
+            install_wine: false,
+            install_gaming: false,
+            gpu_nvidia: false,
+            gpu_amd: false,
+            gpu_intel: false,
 
             dry_run: false,
             confirmed: false,
@@ -309,6 +324,24 @@ impl DeploytixGui {
             desktop: DesktopConfig {
                 environment: self.desktop_env.clone(),
                 display_manager: None,
+            },
+            packages: PackagesConfig {
+                install_yay: self.install_yay,
+                install_wine: self.install_wine,
+                install_gaming: self.install_gaming,
+                gpu_drivers: {
+                    let mut drivers = Vec::new();
+                    if self.gpu_nvidia {
+                        drivers.push(GpuDriverVendor::Nvidia);
+                    }
+                    if self.gpu_amd {
+                        drivers.push(GpuDriverVendor::Amd);
+                    }
+                    if self.gpu_intel {
+                        drivers.push(GpuDriverVendor::Intel);
+                    }
+                    drivers
+                },
             },
         }
     }
@@ -591,6 +624,12 @@ impl eframe::App for DeploytixGui {
                     ui,
                     &mut self.network_backend,
                     &mut self.desktop_env,
+                    &mut self.install_yay,
+                    &mut self.install_wine,
+                    &mut self.install_gaming,
+                    &mut self.gpu_nvidia,
+                    &mut self.gpu_amd,
+                    &mut self.gpu_intel,
                 ),
                 WizardStep::Summary => {
                     let device_path = self
@@ -617,6 +656,12 @@ impl eframe::App for DeploytixGui {
                         self.encrypt_home,
                         &self.network_backend,
                         &self.desktop_env,
+                        self.gpu_nvidia,
+                        self.gpu_amd,
+                        self.gpu_intel,
+                        self.install_wine,
+                        self.install_gaming,
+                        self.install_yay,
                         &mut self.dry_run,
                         &mut self.confirmed,
                         &mut self.save_config_path,

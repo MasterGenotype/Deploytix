@@ -15,6 +15,9 @@ pub struct DeploymentConfig {
     pub user: UserConfig,
     pub network: NetworkConfig,
     pub desktop: DesktopConfig,
+    /// Optional package collections (AUR helper, Wine, Gaming, GPU drivers)
+    #[serde(default)]
+    pub packages: PackagesConfig,
 }
 
 /// One user-defined data partition for PartitionLayout::Custom.
@@ -214,6 +217,42 @@ pub struct DesktopConfig {
     /// Display manager
     #[serde(default)]
     pub display_manager: Option<String>,
+}
+
+/// Optional package collections
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackagesConfig {
+    /// Install yay AUR helper (built from source; requires go)
+    #[serde(default)]
+    pub install_yay: bool,
+    /// Install Wine compatibility packages
+    #[serde(default)]
+    pub install_wine: bool,
+    /// Install gaming packages (Steam, gamescope)
+    #[serde(default)]
+    pub install_gaming: bool,
+    /// GPU driver vendors to install
+    #[serde(default)]
+    pub gpu_drivers: Vec<GpuDriverVendor>,
+}
+
+/// GPU driver vendor selection
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuDriverVendor {
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+impl std::fmt::Display for GpuDriverVendor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nvidia => write!(f, "NVIDIA"),
+            Self::Amd => write!(f, "AMD"),
+            Self::Intel => write!(f, "Intel"),
+        }
+    }
 }
 
 // Enums for configuration options
@@ -761,6 +800,31 @@ impl DeploymentConfig {
             SecureBootMethod::default()
         };
 
+        // Optional package collections
+        println!("\n📦 Optional Package Collections\n");
+
+        // GPU drivers (multi-select)
+        let gpu_vendors = [GpuDriverVendor::Nvidia, GpuDriverVendor::Amd, GpuDriverVendor::Intel];
+        let gpu_defaults = vec![false; gpu_vendors.len()];
+        let gpu_selected = prompt_multi_select(
+            "Video/Graphics Drivers (space to toggle, enter to confirm)",
+            &gpu_vendors,
+            &gpu_defaults,
+        )?;
+        let gpu_drivers: Vec<GpuDriverVendor> = gpu_selected
+            .iter()
+            .map(|&i| gpu_vendors[i].clone())
+            .collect();
+
+        // Wine
+        let install_wine = prompt_confirm("Install Wine compatibility packages?", false)?;
+
+        // Gaming
+        let install_gaming = prompt_confirm("Install Gaming packages (Steam, gamescope)?", false)?;
+
+        // yay AUR helper
+        let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -810,6 +874,12 @@ impl DeploymentConfig {
             desktop: DesktopConfig {
                 environment,
                 display_manager: None,
+            },
+            packages: PackagesConfig {
+                install_yay,
+                install_wine,
+                install_gaming,
+                gpu_drivers,
             },
         })
     }
@@ -868,6 +938,7 @@ impl DeploymentConfig {
                 environment: DesktopEnvironment::Kde,
                 display_manager: Some("sddm".to_string()),
             },
+            packages: PackagesConfig::default(),
         }
     }
 
