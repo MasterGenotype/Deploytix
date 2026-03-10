@@ -28,11 +28,11 @@ DRY_RUN=false
 RESET_MODE=false
 
 # ── Paths (resolved later) ──────────────────────────────────────────────────
-REPO_ROOT=""          # Deploytix git repo root
-ISO_DIR=""            # iso/ directory inside repo
-PKG_DIR=""            # pkg/ directory inside repo
-LOCAL_REPO_DIR=""     # pacman repository in artools workspace
-PROFILE_SRC=""        # iso/profile/deploytix/
+REPO_ROOT=""
+ISO_DIR=""
+PKG_DIR=""
+LOCAL_REPO_DIR=""
+PROFILE_SRC=""
 WORKSPACE_DIR="${HOME}/artools-workspace"
 WORKSPACE_PROFILES="${WORKSPACE_DIR}/iso-profiles"
 ARTOOLS_CONF_DIR="${HOME}/.config/artools"
@@ -42,8 +42,9 @@ SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
 
 # ── External package sources ─────────────────────────────────────────────────
 TKG_GUI_REPO_URL="https://github.com/MasterGenotype/tkg-gui.git"
-TKG_GUI_CLONE_DIR=""  # resolved in resolve_paths()
-TKG_GUI_PKG_DIR=""    # pkg/ inside the tkg-gui clone
+TKG_GUI_LOCAL_DIR=""   # Resolved to sibling repo if present
+TKG_GUI_CLONE_DIR=""
+TKG_GUI_PKG_DIR=""
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -100,10 +101,9 @@ esac
 
 # ── Resolve paths ────────────────────────────────────────────────────────────
 resolve_paths() {
-    # Find repo root: either we're in it, or in iso/
     if [[ -f "Cargo.toml" && -d "pkg" && -d "iso" ]]; then
         REPO_ROOT="$(pwd)"
-    elif [[ -f "../Cargo.toml" && -d "../pkg" ]]; then
+    elif [[ -f "../Cargo.toml" && -d "../pkg" && -d "../iso" ]]; then
         REPO_ROOT="$(cd .. && pwd)"
     else
         die "Cannot find Deploytix repository root. Run from the repo root or iso/ directory."
@@ -113,8 +113,13 @@ resolve_paths() {
     PKG_DIR="${REPO_ROOT}/pkg"
     LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
+    TKG_GUI_LOCAL_DIR="$(dirname "${REPO_ROOT}")/tkg-gui"
     TKG_GUI_CLONE_DIR="${WORKSPACE_DIR}/tkg-gui-src"
-    TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
+    if [[ -d "${TKG_GUI_LOCAL_DIR}/pkg" && -f "${TKG_GUI_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
+        TKG_GUI_PKG_DIR="${TKG_GUI_LOCAL_DIR}/pkg"
+    else
+        TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
+    fi
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -122,14 +127,15 @@ check_prerequisites() {
     msg "Checking prerequisites..."
     local missing=()
 
-    for cmd in buildiso makepkg repo-add yq; do
+    for cmd in buildiso makepkg repo-add yq git; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
     done
 
     if (( ${#missing[@]} > 0 )); then
-        die "Missing required commands: ${missing[*]}\n  Install: pacman -S artools iso-profiles base-devel go-yq"
+        die "Missing required commands: ${missing[*]}
+  Install: pacman -S artools iso-profiles base-devel go-yq git"
     fi
 
     [[ -f "${PKG_DIR}/PKGBUILD" ]] || die "PKGBUILD not found at ${PKG_DIR}/PKGBUILD"
@@ -139,21 +145,136 @@ check_prerequisites() {
     msg2 "All prerequisites satisfied"
 }
 
+# ── Overlay helpers ──────────────────────────────────────────────────────────
+resolve_de_profile_path() {
+    local de_profile="${WORKSPACE_PROFILES}/${BASE_DE_PROFILE}/profile.yaml"
+
+    if [[ -f "$de_profile" ]]; then
+        printf '%s\n' "$de_profile"
+        return 0
+    fi
+
+    de_profile="/usr/share/artools/iso-profiles/${BASE_DE_PROFILE}/profile.yaml"
+    if [[ -f "$de_profile" ]]; then
+        printf '%s\n' "$de_profile"
+        return 0
+    fi
+
+    die "Desktop profile '${BASE_DE_PROFILE}' not found in workspace or system iso-profiles"
+}
+
+resolve_profile_overlay_dir() {
+    local profile_dir="$1"
+    local overlay_name="$2"
+    local overlay_path="${profile_dir}/${overlay_name}"
+
+    if [[ -L "$overlay_path" ]]; then
+        local resolved
+        resolved="$(readlink -f "$overlay_path")"
+        if [[ -d "$resolved" ]]; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+        warn "Overlay symlink target missing: ${overlay_path} -> ${resolved}"
+        return 1
+    elif [[ -d "$overlay_path" ]]; then
+        printf '%s\n' "$overlay_path"
+        return 0
+    fi
+
+    return 1
+}
+
+merge_overlay_tree() {
+    local src="$1"
+    local dest="$2"
+
+    [[ -d "$src" ]] || return 0
+    mkdir -p "$dest"
+
+    local path rel target
+    while IFS= read -r -d '' path; do
+        rel="${path#"$src"/}"
+        [[ "$rel" == "$path" ]] && continue
+        target="${dest}/${rel}"
+
+        if [[ -e "$target" || -L "$target" ]]; then
+            # cp -a preserves symlinks as-is, so treat them as
+            # non-directories when checking for type conflicts
+            if [[ -d "$path" && ! -L "$path" && ( ! -d "$target" || -L "$target" ) ]]; then
+                rm -f "$target"
+            elif [[ ( ! -d "$path" || -L "$path" ) && -d "$target" && ! -L "$target" ]]; then
+                rm -rf "$target"
+            fi
+        fi
+    done < <(find "$src" -mindepth 1 -print0)
+
+    cp -a "$src"/. "$dest"/
+
+    # Resolve symlinks that became broken after being copied to a new
+    # location (e.g. relative symlinks shared between artools profiles)
+    local link
+    while IFS= read -r -d '' link; do
+        [[ -e "$link" ]] && continue
+        local link_rel="${link#"$dest"/}"
+        local src_link="${src}/${link_rel}"
+        local resolved
+        if resolved="$(readlink -f "$src_link" 2>/dev/null)" && [[ -e "$resolved" ]]; then
+            rm -f "$link"
+            if [[ -d "$resolved" ]]; then
+                mkdir -p "$link"
+                cp -a "$resolved"/. "$link"/
+            else
+                cp -a "$resolved" "$link"
+            fi
+        fi
+    done < <(find "$dest" -type l -print0)
+}
+
+materialize_overlay_symlink() {
+    local path="$1"
+
+    if [[ -L "$path" ]]; then
+        local link_target tmpdir
+        link_target="$(readlink -f "$path")"
+        rm -f "$path"
+
+        if [[ -d "$link_target" ]]; then
+            tmpdir="$(mktemp -d)"
+            cp -aL "$link_target"/. "$tmpdir"/
+            mkdir -p "$path"
+            cp -a "$tmpdir"/. "$path"/
+            rm -rf "$tmpdir"
+        else
+            mkdir -p "$path"
+        fi
+
+        msg2 "Materialised symlinked overlay: $path"
+    else
+        mkdir -p "$path"
+    fi
+}
+
 # ── Step B: Build deploytix packages ─────────────────────────────────────────
 build_packages() {
     if "$SKIP_REBUILD"; then
-        # Verify packages exist in both source dirs
-        local count
-        count=$(find "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" \
-            -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l)
+        local count=0
+
+        if [[ -d "${PKG_DIR}" ]]; then
+            count=$(( count + $(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        fi
+        if [[ -d "${TKG_GUI_PKG_DIR}" ]]; then
+            count=$(( count + $(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        fi
+
         if (( count == 0 )); then
             die "No .pkg.tar.zst found in ${PKG_DIR}/ or ${TKG_GUI_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
+
         msg "Skipping package build (-s); reusing existing packages"
         return 0
     fi
 
-    # ── Deploytix packages ───────────────────────────────────────────────────
     msg "Building deploytix packages..."
     pushd "${PKG_DIR}" >/dev/null
 
@@ -172,20 +293,24 @@ build_packages() {
         msg2 "Built ${count} deploytix package(s)"
     fi
 
-    # ── tkg-gui packages ─────────────────────────────────────────────────────
     build_tkg_gui_packages
 }
 
-# Clone (or update) tkg-gui and build its pkg/PKGBUILD
 build_tkg_gui_packages() {
+    if ! "$INCLUDE_GUI"; then
+        return 0
+    fi
+
     if "$DRY_RUN"; then
-        msg2 "[dry-run] Would clone/update ${TKG_GUI_REPO_URL} and run makepkg"
+        msg2 "[dry-run] Would build tkg-gui from ${TKG_GUI_PKG_DIR}"
         return 0
     fi
 
     msg "Building tkg-gui packages..."
 
-    if [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
+    if [[ "${TKG_GUI_PKG_DIR}" == "${TKG_GUI_LOCAL_DIR}/pkg" ]]; then
+        msg2 "Using local tkg-gui repo at ${TKG_GUI_LOCAL_DIR}"
+    elif [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
         msg2 "Updating tkg-gui repository..."
         git -C "${TKG_GUI_CLONE_DIR}" pull --ff-only
     else
@@ -216,16 +341,14 @@ create_local_repo() {
     fi
 
     sudo mkdir -p "${LOCAL_REPO_DIR}"
-
-    # Clean old repo data
     sudo rm -f "${LOCAL_REPO_DIR}"/*.db* "${LOCAL_REPO_DIR}"/*.files*
-
-    # Clean old packages
     sudo rm -f "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
-    # Copy packages from all source directories
     local pkg_count=0
+    local src_dir pkg
+
     for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
             sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
@@ -238,10 +361,7 @@ create_local_repo() {
         die "No packages found to add to repository"
     fi
 
-    # Make packages world-readable for pacman's alpm user
     sudo chmod 644 "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
-
-    # Create pacman database
     sudo repo-add "${LOCAL_REPO_DIR}/deploytix.db.tar.zst" "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
     msg2 "Repository created with ${pkg_count} package(s) at ${LOCAL_REPO_DIR}"
@@ -261,27 +381,22 @@ install_pacman_conf() {
 
     mkdir -p "${PACMAN_CONF_DIR}"
 
-    # If an override already contains [deploytix], check if it points to the right place
     if [[ -f "$target" ]] && grep -q '^\[deploytix\]' "$target"; then
         if grep -q "Server = file://${LOCAL_REPO_DIR}" "$target"; then
             msg2 "pacman.conf already configured — skipping"
             return 0
         fi
-        # Wrong repo path — rebuild it
         msg2 "Updating existing [deploytix] repo path"
     fi
 
-    # Back up existing override if present and not ours
     if [[ -f "$target" ]] && ! grep -q '^\[deploytix\]' "$target"; then
         PACMAN_CONF_BACKUP="${target}.deploytix-bak"
         cp "$target" "$PACMAN_CONF_BACKUP"
         msg2 "Backed up existing ${PACMAN_CONF_NAME} → $(basename "${PACMAN_CONF_BACKUP}")"
     fi
 
-    # Start from the system config
     cp "${SYSTEM_PACMAN_CONF}" "$target"
 
-    # Append the deploytix local repo
     cat >> "$target" <<EOF
 
 # ── Deploytix local repository (auto-generated by build-deploytix-iso.sh) ──
@@ -299,7 +414,6 @@ reset_artifacts() {
     local target="${PACMAN_CONF_DIR}/${PACMAN_CONF_NAME}"
     local dest="${WORKSPACE_PROFILES}/deploytix"
 
-    # Restore or remove pacman.conf override
     if [[ -f "${target}.deploytix-bak" ]]; then
         mv "${target}.deploytix-bak" "$target"
         msg2 "Restored original ${PACMAN_CONF_NAME}"
@@ -308,20 +422,17 @@ reset_artifacts() {
         msg2 "Removed custom ${PACMAN_CONF_NAME}"
     fi
 
-    # Remove installed profile
     if [[ -d "$dest" ]]; then
         rm -rf "$dest"
         msg2 "Removed profile: ${dest}"
     fi
 
-    # Remove local repo
     if [[ -d "${LOCAL_REPO_DIR}" ]]; then
         sudo rm -rf "${LOCAL_REPO_DIR}"
         msg2 "Removed repo: ${LOCAL_REPO_DIR}"
     fi
 
-    # Remove tkg-gui clone
-    if [[ -d "${TKG_GUI_CLONE_DIR}" ]]; then
+    if [[ -d "${TKG_GUI_CLONE_DIR}" && "${TKG_GUI_PKG_DIR}" != "${TKG_GUI_LOCAL_DIR}/pkg" ]]; then
         rm -rf "${TKG_GUI_CLONE_DIR}"
         msg2 "Removed tkg-gui clone: ${TKG_GUI_CLONE_DIR}"
     fi
@@ -330,14 +441,11 @@ reset_artifacts() {
 }
 
 # ── Resolve common/ directory ────────────────────────────────────────────────
-# artools stores shared overlays and configs in a "common" directory that lives
-# next to the profile directories.  The workspace may or may not have its own
-# copy; prefer it when available, otherwise fall back to the system install.
 resolve_common_dir() {
     if [[ -d "${WORKSPACE_PROFILES}/common" ]]; then
-        printf '%s' "${WORKSPACE_PROFILES}/common"
+        printf '%s\n' "${WORKSPACE_PROFILES}/common"
     elif [[ -d "/usr/share/artools/iso-profiles/common" ]]; then
-        printf '%s' "/usr/share/artools/iso-profiles/common"
+        printf '%s\n' "/usr/share/artools/iso-profiles/common"
     else
         die "Cannot find artools common profile directory"
     fi
@@ -347,6 +455,10 @@ resolve_common_dir() {
 install_profile() {
     msg "Installing deploytix ISO profile..."
     local dest="${WORKSPACE_PROFILES}/deploytix"
+    local common_dir
+    local de_profile=""
+    local de_dir=""
+    local overlay_src=""
 
     if "$DRY_RUN"; then
         msg2 "[dry-run] Would install profile to ${dest}"
@@ -354,47 +466,45 @@ install_profile() {
     fi
 
     mkdir -p "${WORKSPACE_PROFILES}"
-
-    # Remove old profile
     rm -rf "$dest"
     mkdir -p "$dest"
 
+    common_dir="$(resolve_common_dir)"
+
     if "$INCLUDE_GUI"; then
-        generate_gui_profile "$dest"
+        de_profile="$(resolve_de_profile_path)"
+        de_dir="$(dirname "$de_profile")"
+        generate_gui_profile "$dest" "$de_profile"
     else
-        # Copy the base CLI profile
         cp "${PROFILE_SRC}/profile.yaml" "$dest/profile.yaml"
     fi
 
-    # Merge root-overlay: start from the common artools overlay, then layer
-    # our profile-specific overlay on top (e.g. mkinitcpio conf.d drop-ins
-    # for COW persistence).
-    local common_dir
-    common_dir="$(resolve_common_dir)"
-    # If generate_gui_profile left a symlink (DE profiles often symlink
-    # root-overlay to ../common/root-overlay), materialise it into a real
-    # directory so we can layer additional files on top.
-    if [[ -L "$dest/root-overlay" ]]; then
-        local link_target
-        link_target="$(readlink -f "$dest/root-overlay")"
-        rm "$dest/root-overlay"
-        mkdir -p "$dest/root-overlay"
-        if [[ -d "$link_target" ]]; then
-            cp -aT "$link_target" "$dest/root-overlay"
-        fi
-    else
-        mkdir -p "$dest/root-overlay"
-    fi
+    mkdir -p "$dest/root-overlay"
+
     if [[ -d "${common_dir}/root-overlay" ]]; then
-        cp -aT "${common_dir}/root-overlay" "$dest/root-overlay"
-    fi
-    if [[ -d "${PROFILE_SRC}/root-overlay" ]]; then
-        cp -aT "${PROFILE_SRC}/root-overlay" "$dest/root-overlay"
+        merge_overlay_tree "${common_dir}/root-overlay" "$dest/root-overlay"
     fi
 
-    # Copy live-overlay if it exists in our profile source
+    if "$INCLUDE_GUI"; then
+        if overlay_src="$(resolve_profile_overlay_dir "$de_dir" "root-overlay" 2>/dev/null)"; then
+            merge_overlay_tree "$overlay_src" "$dest/root-overlay"
+        fi
+    fi
+
+    if [[ -d "${PROFILE_SRC}/root-overlay" ]]; then
+        merge_overlay_tree "${PROFILE_SRC}/root-overlay" "$dest/root-overlay"
+    fi
+
+    if "$INCLUDE_GUI"; then
+        if overlay_src="$(resolve_profile_overlay_dir "$de_dir" "live-overlay" 2>/dev/null)"; then
+            mkdir -p "$dest/live-overlay"
+            merge_overlay_tree "$overlay_src" "$dest/live-overlay"
+        fi
+    fi
+
     if [[ -d "${PROFILE_SRC}/live-overlay" ]]; then
-        cp -a "${PROFILE_SRC}/live-overlay" "$dest/"
+        mkdir -p "$dest/live-overlay"
+        merge_overlay_tree "${PROFILE_SRC}/live-overlay" "$dest/live-overlay"
     fi
 
     msg2 "Profile installed at ${dest}"
@@ -403,73 +513,19 @@ install_profile() {
 # ── GUI profile generation ───────────────────────────────────────────────────
 generate_gui_profile() {
     local dest="$1"
-    local de_profile="${WORKSPACE_PROFILES}/${BASE_DE_PROFILE}/profile.yaml"
-
-    if [[ ! -f "$de_profile" ]]; then
-        # Fall back to system profiles
-        de_profile="/usr/share/artools/iso-profiles/${BASE_DE_PROFILE}/profile.yaml"
-    fi
-
-    if [[ ! -f "$de_profile" ]]; then
-        die "Desktop profile '${BASE_DE_PROFILE}' not found in workspace or system iso-profiles"
-    fi
+    local de_profile="$2"
 
     msg2 "Merging desktop profile: ${BASE_DE_PROFILE}"
 
-    # Start from the DE profile and inject deploytix packages
     cp "$de_profile" "$dest/profile.yaml"
 
-    # Add deploytix and tkg-gui packages to livefs (live session only) and remove calamares
     yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
-
-    # Copy overlays from the DE profile.
-    # Symlinks in system profiles use relative paths like ../common/root-overlay
-    # which only resolve within that directory tree.  We resolve them to absolute
-    # paths so they remain valid when copied into the workspace.
-    local de_dir
-    de_dir="$(dirname "$de_profile")"
-
-    if [[ -L "${de_dir}/root-overlay" ]]; then
-        local resolved
-        resolved="$(readlink -f "${de_dir}/root-overlay")"
-        if [[ -d "$resolved" ]]; then
-            ln -sfn "$resolved" "$dest/root-overlay"
-        else
-            warn "DE root-overlay symlink target missing: $resolved"
-        fi
-    elif [[ -d "${de_dir}/root-overlay" ]]; then
-        cp -a "${de_dir}/root-overlay" "$dest/"
-    fi
-
-    if [[ -L "${de_dir}/live-overlay" ]]; then
-        local resolved
-        resolved="$(readlink -f "${de_dir}/live-overlay")"
-        if [[ -d "$resolved" ]]; then
-            ln -sfn "$resolved" "$dest/live-overlay"
-        else
-            warn "DE live-overlay symlink target missing: $resolved"
-        fi
-    elif [[ -d "${de_dir}/live-overlay" ]]; then
-        cp -a "${de_dir}/live-overlay" "$dest/"
-    fi
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
 }
 
 # ── Step F: Embed built packages in the live-overlay ─────────────────────────
-# The live ISO's pacman.conf (set up by buildiso) points [deploytix] at the
-# build machine's LOCAL_REPO_DIR, which does not exist on the booted live
-# system.  We embed the .pkg.tar.zst files and a repo database into the
-# live-overlay at /var/lib/deploytix-repo so the Rust installer can discover
-# them at runtime via prepare_deploytix_repo() → ISO_REPO_PATH fallback.
-#
-# We intentionally do NOT override /etc/pacman.conf in the live-overlay.
-# Replacing it would clobber the pacman.conf that artools configured for the
-# rootfs (different mirrors, architecture options, etc.).  Instead the Rust
-# code detects the embedded repo, generates a temporary pacman.conf that
-# appends [deploytix] to the live system's real config, and passes -C to
-# basestrap.
 embed_live_repo() {
     msg "Embedding packages in live-overlay for basestrap use..."
     local dest="${WORKSPACE_PROFILES}/deploytix"
@@ -481,26 +537,14 @@ embed_live_repo() {
         return 0
     fi
 
-    # If the live-overlay is a symlink (e.g. pointing to a DE profile's overlay),
-    # materialise it into a real directory so we can safely add files without
-    # modifying the symlink target.
-    if [[ -L "${live_overlay_dir}" ]]; then
-        local link_target
-        link_target="$(readlink -f "${live_overlay_dir}")"
-        rm "${live_overlay_dir}"
-        if [[ -d "${link_target}" ]]; then
-            cp -aL "${link_target}" "${live_overlay_dir}"
-        else
-            mkdir -p "${live_overlay_dir}"
-        fi
-        msg2 "Materialised live-overlay symlink into real directory"
-    fi
-
+    materialize_overlay_symlink "${live_overlay_dir}"
     mkdir -p "${live_repo_path}"
 
-    # Copy all built packages into the in-ISO repo directory
     local pkg_count=0
+    local src_dir pkg
+
     for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+        [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
             cp -f "$pkg" "${live_repo_path}/"
@@ -511,8 +555,6 @@ embed_live_repo() {
 
     (( pkg_count > 0 )) || die "No packages available to embed in live-overlay"
 
-    # Build a pacman database from the embedded packages so pacman/basestrap
-    # can resolve and install them inside the live environment.
     repo-add "${live_repo_path}/deploytix.db.tar.zst" \
         "${live_repo_path}"/*.pkg.tar.zst
 
@@ -526,9 +568,8 @@ run_buildiso() {
     local args=(-p deploytix -i "$INITSYS")
 
     if ! "$CLEAN_BUILD"; then
-        args+=(-c)  # -c tells buildiso to skip cleaning (preserve previous work)
+        args+=(-c)
     fi
-    # When CLEAN_BUILD is true, omit -c so buildiso performs its default clean
 
     if "$CHROOT_ONLY"; then
         args+=(-x)
@@ -543,7 +584,6 @@ run_buildiso() {
     msg2 "Running: sudo buildiso ${args[*]}"
     sudo buildiso "${args[@]}"
 
-    # Report ISO location
     local iso_pool="${WORKSPACE_DIR}/iso/deploytix"
     if [[ -d "$iso_pool" ]] && ! "$CHROOT_ONLY"; then
         local iso_file
@@ -558,7 +598,6 @@ run_buildiso() {
 main() {
     resolve_paths
 
-    # Handle reset mode early
     if "$RESET_MODE"; then
         reset_artifacts
         exit 0
