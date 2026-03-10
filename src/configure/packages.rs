@@ -92,15 +92,74 @@ pub fn install_gpu_drivers(
 
 // ======================== Wine Packages ========================
 
-const WINE_PACKAGES: &[&str] = &[
-    "wine",
-    "vkd3d",
-    "winetricks",
-    "wine-mono",
-    "wine-gecko",
-];
+/// Wine packages available in Artix repos.
+const WINE_PACKAGES_ARTIX: &[&str] = &["wine", "vkd3d", "winetricks"];
+
+/// Wine packages that live in the Arch Linux [extra] repository.
+const WINE_PACKAGES_ARCH_EXTRA: &[&str] = &["wine-mono", "wine-gecko"];
+
+/// Ensure the Arch Linux `[extra]` repository is configured inside the
+/// chroot so that packages like `wine-mono` and `wine-gecko` (which are
+/// not mirrored in Artix repos) can be installed.
+///
+/// Installs `artix-archlinux-support` (available from Artix repos),
+/// populates the Arch keyring, appends `[extra]` to the chroot's
+/// pacman.conf, and refreshes the package database.
+fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    // Install artix-archlinux-support which provides the Arch mirrorlist
+    // and keyring.  This package is in Artix's own repos.
+    info!("Installing artix-archlinux-support in chroot");
+    cmd.run_in_chroot(
+        install_root,
+        "pacman -S --noconfirm --needed artix-archlinux-support",
+    )?;
+
+    // Trust the Arch Linux package signing keys.
+    info!("Populating Arch Linux keyring in chroot");
+    cmd.run_in_chroot(install_root, "pacman-key --populate archlinux")?;
+
+    // Append [extra] to the chroot's pacman.conf if not already present.
+    let chroot_pacman_conf = format!("{}/etc/pacman.conf", install_root);
+    let conf_content =
+        std::fs::read_to_string(&chroot_pacman_conf).map_err(crate::utils::error::DeploytixError::Io)?;
+
+    if !conf_content.lines().any(|line| line.trim() == "[extra]") {
+        info!("Adding Arch [extra] repository to chroot pacman.conf");
+
+        // artix-archlinux-support installs the mirrorlist at this path
+        // inside the chroot.
+        let mirrorlist = format!("{}/etc/pacman.d/mirrorlist-arch", install_root);
+        let mirror_entry = if std::path::Path::new(&mirrorlist).exists() {
+            "Include = /etc/pacman.d/mirrorlist-arch".to_string()
+        } else {
+            "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch".to_string()
+        };
+
+        let extra_section = format!(
+            "\n\n# Arch Linux [extra] repository (auto-added by deploytix installer)\n\
+             [extra]\n\
+             SigLevel = PackageRequired\n\
+             {}\n",
+            mirror_entry,
+        );
+
+        let updated = format!("{}{}", conf_content.trim_end(), extra_section);
+        std::fs::write(&chroot_pacman_conf, &updated)
+            .map_err(crate::utils::error::DeploytixError::Io)?;
+    }
+
+    // Refresh package databases so the new repo is usable.
+    cmd.run_in_chroot(install_root, "pacman -Sy --noconfirm")?;
+
+    Ok(())
+}
 
 /// Install Wine compatibility packages via pacman in chroot.
+///
+/// `wine-mono` and `wine-gecko` live in the Arch Linux `[extra]`
+/// repository, which is not enabled by default on Artix.  This function
+/// ensures the repo is configured in the chroot (via
+/// `artix-archlinux-support`) before installing the full package set.
 pub fn install_wine_packages(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -113,11 +172,24 @@ pub fn install_wine_packages(
     info!("Installing Wine compatibility packages");
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would install Wine packages: {:?}", WINE_PACKAGES);
+        let all_pkgs: Vec<&str> = WINE_PACKAGES_ARTIX
+            .iter()
+            .chain(WINE_PACKAGES_ARCH_EXTRA.iter())
+            .copied()
+            .collect();
+        println!("  [dry-run] Would install Wine packages: {:?}", all_pkgs);
         return Ok(());
     }
 
-    let pkg_list = WINE_PACKAGES.join(" ");
+    // Enable the Arch [extra] repo in the chroot for wine-mono/wine-gecko.
+    ensure_arch_repos_in_chroot(cmd, install_root)?;
+
+    let all_pkgs: Vec<&str> = WINE_PACKAGES_ARTIX
+        .iter()
+        .chain(WINE_PACKAGES_ARCH_EXTRA.iter())
+        .copied()
+        .collect();
+    let pkg_list = all_pkgs.join(" ");
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     cmd.run_in_chroot(install_root, &install_cmd)?;
 
