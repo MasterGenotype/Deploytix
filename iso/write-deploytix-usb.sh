@@ -188,7 +188,7 @@ msg2 "Persistence partition: ${PERSIST_PART}"
 
 # ── Step 4: Format persistence partition ─────────────────────────────────────
 msg "Formatting ${PERSIST_PART} as ext4 (label=${COW_LABEL})..."
-mkfs.ext4 -q -L "${COW_LABEL}" "${PERSIST_PART}"
+mkfs.ext4 -qF -L "${COW_LABEL}" "${PERSIST_PART}"
 msg2 "Formatted successfully"
 
 # ── Step 5: Patch GRUB kernels.cfg for persistence ──────────────────────────
@@ -197,9 +197,34 @@ msg "Patching GRUB kernel command line for persistence..."
 # The ISO's first partition contains an ISO9660 filesystem with the GRUB config.
 # We patch kernels.cfg in-place on the raw device, adding cow_label to the
 # kernel parameters while trimming a GRUB comment to keep the file size identical.
-ISO_PART="${DEVICE}1"
-[[ -b "${ISO_PART}" ]] || ISO_PART="${DEVICE}p1"
-[[ -b "${ISO_PART}" ]] || die "Cannot find ISO partition (${DEVICE}1)"
+#
+# After sfdisk --append rewrites the partition table, the kernel may briefly
+# remove and re-add partition device nodes. Re-probe and wait before accessing.
+partprobe "${DEVICE}" 2>/dev/null || true
+udevadm settle --timeout=10 2>/dev/null || sleep 5
+
+ISO_PART=""
+for candidate in "${DEVICE}1" "${DEVICE}p1"; do
+    if [[ -b "${candidate}" ]]; then
+        ISO_PART="${candidate}"
+        break
+    fi
+done
+
+if [[ -z "${ISO_PART}" ]]; then
+    msg2 "Waiting for ISO partition device node..."
+    sleep 3
+    partprobe "${DEVICE}" 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || sleep 5
+    for candidate in "${DEVICE}1" "${DEVICE}p1"; do
+        if [[ -b "${candidate}" ]]; then
+            ISO_PART="${candidate}"
+            break
+        fi
+    done
+fi
+
+[[ -n "${ISO_PART}" ]] || die "Cannot find ISO partition (${DEVICE}1)"
 
 python3 - "${ISO_PART}" "${COW_LABEL}" <<'PYEOF'
 import sys, os
