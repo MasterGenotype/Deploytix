@@ -151,14 +151,14 @@ pub fn list_block_devices(all: bool) -> Result<Vec<BlockDevice>> {
         let device_type = determine_device_type(&name);
 
         // Get size
+        // /sys/block/<dev>/size always reports in 512-byte sectors
+        // regardless of the device's logical block size.
         let size_sectors = read_sysfs_u64(&name, "size").unwrap_or(0);
         if size_sectors == 0 {
             continue;
         }
 
-        // Get sector size (default to 512)
-        let sector_size = read_sysfs_u64(&name, "queue/logical_block_size").unwrap_or(512);
-        let size_bytes = size_sectors * sector_size;
+        let size_bytes = size_sectors * 512;
 
         // Skip very small devices (< 1GB) unless showing all
         if !all && size_bytes < 1024 * 1024 * 1024 {
@@ -213,9 +213,10 @@ pub fn get_device_info(device_path: &str) -> Result<BlockDevice> {
         .to_string();
 
     let device_type = determine_device_type(&name);
+    // /sys/block/<dev>/size always reports in 512-byte sectors
+    // regardless of the device's logical block size.
     let size_sectors = read_sysfs_u64(&name, "size").unwrap_or(0);
-    let sector_size = read_sysfs_u64(&name, "queue/logical_block_size").unwrap_or(512);
-    let size_bytes = size_sectors * sector_size;
+    let size_bytes = size_sectors * 512;
 
     let removable = read_sysfs_u64(&name, "removable").unwrap_or(0) == 1;
     let read_only = read_sysfs_u64(&name, "ro").unwrap_or(0) == 1;

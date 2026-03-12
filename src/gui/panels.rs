@@ -623,6 +623,7 @@ pub fn network_desktop_panel(
     install_yay: &mut bool,
     install_wine: &mut bool,
     install_gaming: &mut bool,
+    install_session_switching: &mut bool,
     gpu_nvidia: &mut bool,
     gpu_amd: &mut bool,
     gpu_intel: &mut bool,
@@ -680,6 +681,20 @@ pub fn network_desktop_panel(
 
     // Gaming
     ui.checkbox(install_gaming, "Gaming packages (Steam, gamescope)");
+    if *install_gaming && *desktop_env != DesktopEnvironment::None {
+        ui.indent("session_switching_indent", |ui| {
+            ui.checkbox(install_session_switching, "Game Mode ↔ Desktop switching (via greetd)");
+            if *install_session_switching {
+                ui.label(
+                    RichText::new("Boots into gamescope Game Mode; switch to desktop and back on demand.")
+                        .weak(),
+                );
+            }
+        });
+    } else {
+        // Reset session switching if prerequisites are unset
+        *install_session_switching = false;
+    }
     ui.add_space(4.0);
 
     // yay
@@ -719,6 +734,7 @@ pub fn summary_panel(
     gpu_intel: bool,
     install_wine: bool,
     install_gaming: bool,
+    install_session_switching: bool,
     install_yay: bool,
     dry_run: &mut bool,
     confirmed: &mut bool,
@@ -832,6 +848,10 @@ pub fn summary_panel(
 
             ui.label("Gaming:");
             ui.label(if install_gaming { "Enabled" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("Session Switching:");
+            ui.label(if install_session_switching { "Enabled" } else { "Disabled" });
             ui.end_row();
 
             ui.label("yay AUR Helper:");

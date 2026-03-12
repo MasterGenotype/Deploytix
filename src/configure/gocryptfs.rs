@@ -240,14 +240,15 @@ fn configure_pam(install_root: &str) -> Result<()> {
             modified = true;
         }
 
-        new_lines.push(line.to_string());
-
-        // Insert `session optional pam_mount.so` after `session include system-auth`
+        // Insert `session optional pam_mount.so` before `session include system-auth`
+        // so the encrypted home is mounted before other session modules access it
         if !session_added && trimmed == "session   include   system-auth" {
             new_lines.push("session   optional  pam_mount.so".to_string());
             session_added = true;
             modified = true;
         }
+
+        new_lines.push(line.to_string());
     }
 
     // Fallback: if the expected lines weren't found, append at end
@@ -275,7 +276,6 @@ fn configure_pam(install_root: &str) -> Result<()> {
     if !session_added {
         let mut fallback_lines: Vec<String> = Vec::new();
         for line in new_lines.iter() {
-            fallback_lines.push(line.clone());
             let trimmed = line.trim();
             if !session_added
                 && trimmed.starts_with("session")
@@ -286,6 +286,7 @@ fn configure_pam(install_root: &str) -> Result<()> {
                 session_added = true;
                 modified = true;
             }
+            fallback_lines.push(line.clone());
         }
         if session_added {
             new_lines = fallback_lines;

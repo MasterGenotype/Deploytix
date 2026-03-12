@@ -229,6 +229,10 @@ pub struct PackagesConfig {
     /// Install gaming packages (Steam, gamescope)
     #[serde(default)]
     pub install_gaming: bool,
+    /// Install session switching scripts (gamescope ↔ desktop mode via greetd).
+    /// Requires: install_gaming = true + a desktop environment.
+    #[serde(default)]
+    pub install_session_switching: bool,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -805,6 +809,13 @@ impl DeploymentConfig {
         // Gaming
         let install_gaming = prompt_confirm("Install Gaming packages (Steam, gamescope)?", false)?;
 
+        // Session switching (only if gaming + desktop are both selected)
+        let install_session_switching = if install_gaming && environment != DesktopEnvironment::None {
+            prompt_confirm("Enable session switching (Game Mode ↔ Desktop via greetd)?", true)?
+        } else {
+            false
+        };
+
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
 
@@ -861,6 +872,7 @@ impl DeploymentConfig {
                 install_yay,
                 install_wine,
                 install_gaming,
+                install_session_switching,
                 gpu_drivers,
             },
         })
@@ -1117,6 +1129,20 @@ impl DeploymentConfig {
                     "Partition '{}' has encryption=true but global encryption is disabled",
                     p.mount_point
                 )));
+            }
+        }
+
+        // Session switching requires gaming + a desktop environment
+        if self.packages.install_session_switching {
+            if !self.packages.install_gaming {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching requires install_gaming = true".to_string(),
+                ));
+            }
+            if self.desktop.environment == DesktopEnvironment::None {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching requires a desktop environment".to_string(),
+                ));
             }
         }
 

@@ -255,6 +255,12 @@ impl Installer {
             self.install_gaming_packages()?;
         }
 
+        // Phase 5.25: Session switching scripts (after gaming packages)
+        if self.config.packages.install_session_switching {
+            self.report_progress(0.86, "Installing session switching scripts...");
+            self.install_session_switching()?;
+        }
+
         // Phase 5.3: yay AUR helper (after gaming, needs user account)
         if self.config.packages.install_yay {
             self.report_progress(0.87, "Building and installing yay AUR helper...");
@@ -767,6 +773,12 @@ impl Installer {
     fn install_gaming_packages(&self) -> Result<()> {
         info!("Installing gaming packages");
         configure::packages::install_gaming_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install session switching scripts (gamescope ↔ desktop)
+    fn install_session_switching(&self) -> Result<()> {
+        info!("Installing session switching (gamescope ↔ desktop)");
+        configure::session_switching::setup_session_switching(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install yay AUR helper from source

@@ -13,14 +13,37 @@ use std::fs;
 use std::io::Write;
 use tracing::info;
 
-/// Return the fstab filesystem type string and default mount options for a boot partition.
-fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static str) {
+/// Return the fstab filesystem type string, default mount options, and fsck
+/// pass number for a boot partition.
+///
+/// Only ext4 supports reliable automatic boot-time fsck (pass 2).
+/// btrfs, xfs, f2fs, and zfs must not be fsck'd at boot (pass 0).
+fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static str, u8) {
     match boot_filesystem {
-        Filesystem::Ext4 => ("ext4", "defaults,noatime"),
-        Filesystem::Btrfs => ("btrfs", "defaults,noatime"),
-        Filesystem::Xfs => ("xfs", "defaults,noatime"),
-        Filesystem::F2fs => ("f2fs", "defaults,noatime"),
-        Filesystem::Zfs => ("zfs", "zfsutil,defaults,noatime"),
+        Filesystem::Ext4 => ("ext4", "defaults,noatime", 2),
+        Filesystem::Btrfs => ("btrfs", "defaults,noatime", 0),
+        Filesystem::Xfs => ("xfs", "defaults,noatime", 0),
+        Filesystem::F2fs => ("f2fs", "defaults,noatime", 0),
+        Filesystem::Zfs => ("zfs", "zfsutil,defaults,noatime", 0),
+    }
+}
+
+/// Determine the correct fsck pass number for a data partition.
+///
+/// Only ext4 supports reliable automatic boot-time fsck:
+///   - pass 1 for the root filesystem
+///   - pass 2 for all other ext4 filesystems
+///
+/// btrfs, xfs, f2fs, and zfs must never be automatically fsck'd at boot
+/// (pass 0).  btrfs uses its own internal integrity mechanisms; xfs and
+/// f2fs fsck tools are not safe to run automatically; zfs handles its
+/// own scrubbing.
+fn fsck_pass(filesystem: &Filesystem, mount_point: &str) -> u8 {
+    match filesystem {
+        Filesystem::Ext4 => {
+            if mount_point == "/" { 1 } else { 2 }
+        }
+        _ => 0,
     }
 }
 
@@ -128,7 +151,7 @@ pub fn generate_fstab(
                         Filesystem::Btrfs => "defaults,noatime,compress=zstd".to_string(),
                         _ => "defaults,noatime".to_string(),
                     };
-                    pass = if mount_point == "/" { 1 } else { 2 };
+                    pass = fsck_pass(filesystem, mount_point);
                 }
 
                 fstab_content.push_str(&format!(
@@ -185,7 +208,7 @@ fn generate_fstab_with_subvolumes(
                 sv.mount_point,
                 sv.name,
                 sv.mount_options,
-                if sv.mount_point == "/" { 1 } else { 0 }
+                0 // btrfs: no boot-time fsck
             );
         }
         return Ok(());
@@ -203,7 +226,7 @@ fn generate_fstab_with_subvolumes(
 
     // Add subvolume entries
     for sv in subvolumes {
-        let pass = if sv.mount_point == "/" { 1 } else { 0 };
+        let pass = 0; // btrfs: no boot-time fsck
         content.push_str(&format!(
             "UUID={}  {}  btrfs  subvol={},{}  0  {}\n",
             root_uuid, sv.mount_point, sv.name, sv.mount_options, pass,
@@ -233,7 +256,7 @@ fn generate_fstab_with_subvolumes(
             // is_efi and is_swap are already handled above; any remaining
             // partition with a mount point is a regular data partition.
             content.push_str(&format!(
-                "\nUUID={}  {}  btrfs  defaults,noatime  0  2\n",
+                "\nUUID={}  {}  btrfs  defaults,noatime  0  0\n",
                 uuid, mount_point
             ));
         }
@@ -281,7 +304,7 @@ pub fn generate_fstab_multi_volume(
                 "    {} {} btrfs defaults,noatime,compress=zstd 0 {}",
                 container.mapped_path,
                 mount_point,
-                if mount_point == "/" { 1 } else { 2 }
+                0 // btrfs: no boot-time fsck
             );
         }
         return Ok(());
@@ -301,7 +324,7 @@ pub fn generate_fstab_multi_volume(
             name => format!("/{}", name.to_lowercase()),
         };
 
-        let pass = if mount_point == "/" { 1 } else { 2 };
+        let pass = 0; // btrfs: no boot-time fsck
 
         // Get UUID of the filesystem on the mapped device
         let fs_uuid = get_partition_uuid(&container.mapped_path)?;
@@ -332,11 +355,11 @@ pub fn generate_fstab_multi_volume(
     if let Some(boot) = boot_part {
         let boot_device = partition_path(device, boot.number);
         let boot_uuid = get_partition_uuid(&boot_device)?;
-        let (boot_fstype, boot_opts) = boot_fs_fstab_entry(boot_filesystem);
+        let (boot_fstype, boot_opts, boot_pass) = boot_fs_fstab_entry(boot_filesystem);
         content.push_str(&format!(
             "# Boot partition\n\
-             UUID={}  /boot  {}  {}  0  2\n\n",
-            boot_uuid, boot_fstype, boot_opts
+             UUID={}  /boot  {}  {}  0  {}\n\n",
+            boot_uuid, boot_fstype, boot_opts, boot_pass
         ));
     }
 
@@ -401,7 +424,7 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
                 vg_name,
                 vol.name,
                 vol.mount_point,
-                if vol.mount_point == "/" { 1 } else { 2 }
+                0 // btrfs: no boot-time fsck
             );
         }
         return Ok(());
@@ -418,7 +441,7 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
     for vol in thin_volumes {
         let lv_device = lv_path(vg_name, &vol.name);
         let fs_uuid = get_partition_uuid(&lv_device)?;
-        let pass = if vol.mount_point == "/" { 1 } else { 2 };
+        let pass = 0; // btrfs: no boot-time fsck
 
         content.push_str(&format!(
             "# {} thin volume\n\
@@ -462,13 +485,13 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
     if *params.boot_filesystem == Filesystem::Zfs {
         append_zfs_boot_entry(&mut content);
     } else {
-        let (boot_fstype, boot_opts) = boot_fs_fstab_entry(params.boot_filesystem);
+        let (boot_fstype, boot_opts, boot_pass) = boot_fs_fstab_entry(params.boot_filesystem);
         if let Some(mapped_dev) = boot_mapped_device {
             let boot_uuid = get_partition_uuid(mapped_dev)?;
             content.push_str(&format!(
                 "# Boot partition (LUKS1 encrypted)\n\
-                 UUID={}  /boot  {}  {}  0  2\n\n",
-                boot_uuid, boot_fstype, boot_opts
+                 UUID={}  /boot  {}  {}  0  {}\n\n",
+                boot_uuid, boot_fstype, boot_opts, boot_pass
             ));
         } else {
             let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
@@ -477,8 +500,8 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
                 let boot_uuid = get_partition_uuid(&boot_device)?;
                 content.push_str(&format!(
                     "# Boot partition\n\
-                     UUID={}  /boot  {}  {}  0  2\n\n",
-                    boot_uuid, boot_fstype, boot_opts
+                     UUID={}  /boot  {}  {}  0  {}\n\n",
+                    boot_uuid, boot_fstype, boot_opts, boot_pass
                 ));
             }
         }

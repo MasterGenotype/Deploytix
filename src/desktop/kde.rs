@@ -36,11 +36,14 @@ const KDE_S6_PACKAGES: &[&str] = &["bluez-s6", "power-profiles-daemon-s6"];
 pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing KDE Plasma desktop environment");
 
-    // Get init-specific sddm package
-    let sddm_service = format!("sddm-{}", config.system.init);
+    let use_session_switching = config.packages.install_session_switching;
 
-    // Build package list
-    let mut packages: Vec<&str> = KDE_PACKAGES.to_vec();
+    // Build package list, excluding sddm when session switching is active (greetd replaces it)
+    let mut packages: Vec<&str> = KDE_PACKAGES
+        .iter()
+        .filter(|&&pkg| !(use_session_switching && pkg == "sddm"))
+        .copied()
+        .collect();
 
     // Add s6-specific service packages
     if config.system.init == InitSystem::S6 {
@@ -49,7 +52,12 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would install KDE packages: {:?}", packages);
-        println!("  [dry-run] Would install sddm service: {}", sddm_service);
+        if !use_session_switching {
+            let sddm_service = format!("sddm-{}", config.system.init);
+            println!("  [dry-run] Would install sddm service: {}", sddm_service);
+        } else {
+            println!("  [dry-run] Skipping SDDM (session switching uses greetd)");
+        }
         if config.system.init == InitSystem::S6 {
             println!(
                 "  [dry-run] Would install s6 service packages: {:?}",
@@ -61,7 +69,13 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
 
     // Install packages via pacman in chroot
     let pkg_list = packages.join(" ");
-    let mut install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, sddm_service);
+    let mut install_cmd = if use_session_switching {
+        // No sddm or sddm-{init} when session switching is active
+        format!("pacman -S --noconfirm {}", pkg_list)
+    } else {
+        let sddm_service = format!("sddm-{}", config.system.init);
+        format!("pacman -S --noconfirm {} {}", pkg_list, sddm_service)
+    };
 
     // Add init-specific service packages for non-s6 init systems
     if config.system.init != InitSystem::S6 {
@@ -72,8 +86,10 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
 
     cmd.run_in_chroot(install_root, &install_cmd)?;
 
-    // Configure SDDM
-    configure_sddm(cmd, install_root)?;
+    // Configure SDDM (skip when session switching uses greetd instead)
+    if !use_session_switching {
+        configure_sddm(cmd, install_root)?;
+    }
 
     // Create .xinitrc for startx fallback
     let username = &config.user.name;

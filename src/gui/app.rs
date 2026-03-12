@@ -133,6 +133,7 @@ pub struct DeploytixGui {
     install_yay: bool,
     install_wine: bool,
     install_gaming: bool,
+    install_session_switching: bool,
     gpu_nvidia: bool,
     gpu_amd: bool,
     gpu_intel: bool,
@@ -201,6 +202,7 @@ impl Default for DeploytixGui {
             install_yay: false,
             install_wine: false,
             install_gaming: false,
+            install_session_switching: false,
             gpu_nvidia: false,
             gpu_amd: false,
             gpu_intel: false,
@@ -317,6 +319,7 @@ impl DeploytixGui {
                 install_yay: self.install_yay,
                 install_wine: self.install_wine,
                 install_gaming: self.install_gaming,
+                install_session_switching: self.install_session_switching,
                 gpu_drivers: {
                     let mut drivers = Vec::new();
                     if self.gpu_nvidia {
@@ -622,6 +625,7 @@ impl eframe::App for DeploytixGui {
                     &mut self.install_yay,
                     &mut self.install_wine,
                     &mut self.install_gaming,
+                    &mut self.install_session_switching,
                     &mut self.gpu_nvidia,
                     &mut self.gpu_amd,
                     &mut self.gpu_intel,
@@ -656,6 +660,7 @@ impl eframe::App for DeploytixGui {
                         self.gpu_intel,
                         self.install_wine,
                         self.install_gaming,
+                        self.install_session_switching,
                         self.install_yay,
                         &mut self.dry_run,
                         &mut self.confirmed,

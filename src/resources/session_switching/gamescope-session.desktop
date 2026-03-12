@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Game Mode (Gamescope)
+Comment=Steam Game Mode via gamescope-session
+Exec=gamescope-session
+TryExec=gamescope-session
+Type=Application
+DesktopNames=gamescope

@@ -12,5 +12,6 @@ pub mod network;
 pub mod packages;
 pub mod secureboot;
 pub mod services;
+pub mod session_switching;
 pub mod swap;
 pub mod users;

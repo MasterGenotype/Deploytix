@@ -39,17 +39,36 @@ pub fn configure_greetd(
     // Determine session command based on desktop environment
     let session_cmd = get_session_command(&config.desktop.environment);
 
-    let config_content = format!(
-        r#"[terminal]
+    let config_content = if config.packages.install_session_switching && config.packages.install_gaming {
+        // Session switching mode: gamescope as initial_session, agreety as fallback
+        format!(
+            r#"[terminal]
+vt = 1
+
+[default_session]
+command = "agreety --cmd /bin/bash"
+user = "greeter"
+
+[initial_session]
+command = "gamescope-session"
+user = "{user}"
+"#,
+            user = username,
+        )
+    } else {
+        // Standard mode: desktop session as default
+        format!(
+            r#"[terminal]
 vt = 1
 
 [default_session]
 command = "{session}"
 user = "{user}"
 "#,
-        session = session_cmd,
-        user = username,
-    );
+            session = session_cmd,
+            user = username,
+        )
+    };
 
     let greetd_dir = format!("{}/etc/greetd", install_root);
     fs::create_dir_all(&greetd_dir)?;
