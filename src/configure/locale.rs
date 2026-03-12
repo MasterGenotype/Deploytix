@@ -27,6 +27,9 @@ pub fn configure_locale(
     // Set hostname
     set_hostname(cmd, &config.system.hostname, install_root)?;
 
+    // Write /etc/issue login banner
+    set_issue(install_root)?;
+
     Ok(())
 }
 
@@ -132,6 +135,22 @@ fn set_hostname(cmd: &CommandRunner, hostname: &str, install_root: &str) -> Resu
         hostname, hostname
     );
     fs::write(&hosts_path, hosts_content)?;
+
+    Ok(())
+}
+
+/// Write /etc/issue with agetty escape sequences for the TTY login banner.
+///
+/// Uses `\S` (OS name from os-release NAME field), `\r` (kernel release),
+/// and `\l` (TTY name) which are expanded by agetty at display time.
+fn set_issue(install_root: &str) -> Result<()> {
+    info!("Writing /etc/issue login banner");
+
+    let issue_path = format!("{}/etc/issue", install_root);
+    // \S  → OS name (e.g. "Artix Linux")
+    // \r  → kernel release (e.g. "6.18.13-zen1-1-zen")
+    // \l  → TTY device (e.g. "tty1")
+    fs::write(&issue_path, "\\S \\r (\\l)\n\n")?;
 
     Ok(())
 }

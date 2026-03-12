@@ -181,8 +181,11 @@ fn configure_pam_mount(username: &str, install_root: &str) -> Result<()> {
     let content = fs::read_to_string(&conf_path).unwrap_or_default();
 
     // Build the volume entry
+    // nonempty: allow mounting over a non-empty mount point.  Without this
+    // gocryptfs refuses to mount if any stale files exist in the home
+    // directory (e.g. leftover skel or dotfiles from a prior session).
     let volume_entry = format!(
-        "<volume user=\"{}\" fstype=\"fuse\" options=\"nodev,nosuid,quiet,allow_other\" \
+        "<volume user=\"{}\" fstype=\"fuse\" options=\"nodev,nosuid,quiet,allow_other,nonempty\" \
          path=\"/usr/bin/gocryptfs#/home/%(USER).cipher\" mountpoint=\"/home/%(USER)\" />",
         username
     );
