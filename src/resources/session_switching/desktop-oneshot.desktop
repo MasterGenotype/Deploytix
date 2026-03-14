@@ -1,7 +1,0 @@
-[Desktop Entry]
-Name=Desktop (One-Time Launch)
-Comment=One-time desktop session that returns to Game Mode on exit
-Exec=/usr/bin/desktop-session-oneshot
-TryExec=/usr/bin/desktop-session-oneshot
-Type=Application
-DesktopNames=Desktop

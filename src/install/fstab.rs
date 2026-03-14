@@ -5,7 +5,7 @@ use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::{get_partition_uuid, ZFS_BOOT_DATASET, ZFS_DATASETS};
-use crate::disk::layouts::ComputedLayout;
+use crate::disk::layouts::{multi_volume_subvolumes, ComputedLayout};
 use crate::disk::lvm::{lv_path, ThinVolumeDef};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -20,8 +20,12 @@ use tracing::info;
 /// btrfs, xfs, f2fs, and zfs must not be fsck'd at boot (pass 0).
 fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static str, u8) {
     match boot_filesystem {
-        Filesystem::Ext4 => ("ext4", "defaults,noatime", 2),
-        Filesystem::Btrfs => ("btrfs", "defaults,noatime", 0),
+        Filesystem::Ext4 => ("ext4", "defaults,noatime", 0),
+        Filesystem::Btrfs => (
+            "btrfs",
+            "subvol=@boot,defaults,noatime,compress=zstd",
+            0,
+        ),
         Filesystem::Xfs => ("xfs", "defaults,noatime", 0),
         Filesystem::F2fs => ("f2fs", "defaults,noatime", 0),
         Filesystem::Zfs => ("zfs", "zfsutil,defaults,noatime", 0),
@@ -38,13 +42,8 @@ fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static 
 /// (pass 0).  btrfs uses its own internal integrity mechanisms; xfs and
 /// f2fs fsck tools are not safe to run automatically; zfs handles its
 /// own scrubbing.
-fn fsck_pass(filesystem: &Filesystem, mount_point: &str) -> u8 {
-    match filesystem {
-        Filesystem::Ext4 => {
-            if mount_point == "/" { 1 } else { 2 }
-        }
-        _ => 0,
-    }
+fn fsck_pass(_filesystem: &Filesystem, _mount_point: &str) -> u8 {
+    0
 }
 
 /// Append standard ZFS dataset fstab entries.
@@ -78,10 +77,11 @@ pub fn generate_fstab(
     layout: &ComputedLayout,
     install_root: &str,
     filesystem: &Filesystem,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     // Check if this layout uses subvolumes
     if layout.uses_subvolumes() {
-        return generate_fstab_with_subvolumes(cmd, device, layout, install_root);
+        return generate_fstab_with_subvolumes(cmd, device, layout, install_root, boot_filesystem);
     }
 
     info!(
@@ -118,7 +118,7 @@ pub fn generate_fstab(
             if part.is_efi {
                 let uuid = get_partition_uuid(&part_path)?;
                 fstab_content.push_str(&format!(
-                    "UUID={}\t/boot/efi\tvfat\tdefaults,noatime\t0\t2\n",
+                    "UUID={}\t/boot/efi\tvfat\tdefaults,noatime\t0\t0\n",
                     uuid
                 ));
             } else if part.is_swap {
@@ -145,6 +145,11 @@ pub fn generate_fstab(
                     fstype = "vfat".to_string();
                     options = "defaults,noatime".to_string();
                     pass = 2;
+                } else if part.is_boot_fs {
+                    let (bfs, bopts, bpass) = boot_fs_fstab_entry(boot_filesystem);
+                    fstype = bfs.to_string();
+                    options = bopts.to_string();
+                    pass = bpass;
                 } else {
                     fstype = filesystem.to_string();
                     options = match filesystem {
@@ -178,6 +183,7 @@ fn generate_fstab_with_subvolumes(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
         crate::utils::error::DeploytixError::ConfigError(
@@ -233,7 +239,7 @@ fn generate_fstab_with_subvolumes(
         ));
     }
 
-    // Add other partitions (EFI, swap, etc.)
+    // Add other partitions (BOOT, EFI, swap, etc.)
     for part in &layout.partitions {
         if part.name == "ROOT" {
             continue; // Already handled via subvolumes
@@ -249,12 +255,25 @@ fn generate_fstab_with_subvolumes(
             ));
         } else if part.is_efi {
             content.push_str(&format!(
-                "\n# EFI System Partition\nUUID={}  /boot/efi  vfat  umask=0077,defaults  0  2\n",
+            "\n# EFI System Partition\nUUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
                 uuid
             ));
+        } else if part.is_boot_fs {
+            // BOOT partition: btrfs gets @boot subvolume, others get a plain entry
+            if *boot_filesystem == Filesystem::Btrfs {
+                content.push_str(&format!(
+                    "\n# Boot partition (btrfs @boot subvolume)\nUUID={}  /boot  btrfs  subvol=@boot,defaults,noatime,compress=zstd  0  0\n",
+                    uuid
+                ));
+            } else {
+                let (fstype, opts, pass) = boot_fs_fstab_entry(boot_filesystem);
+                content.push_str(&format!(
+                    "\n# Boot partition\nUUID={}  /boot  {}  {}  0  {}\n",
+                    uuid, fstype, opts, pass
+                ));
+            }
         } else if let Some(ref mount_point) = part.mount_point {
-            // is_efi and is_swap are already handled above; any remaining
-            // partition with a mount point is a regular data partition.
+            // Any remaining partition with a mount point is a regular data partition.
             content.push_str(&format!(
                 "\nUUID={}  {}  btrfs  defaults,noatime  0  0\n",
                 uuid, mount_point
@@ -318,24 +337,39 @@ pub fn generate_fstab_multi_volume(
     );
 
     // Add encrypted volume entries
-    for container in containers {
-        let mount_point = match container.volume_name.as_str() {
-            "Root" => "/".to_string(),
-            name => format!("/{}", name.to_lowercase()),
-        };
+    if layout.uses_subvolumes() {
+        // With subvolumes: each container has named subvolumes (e.g. @, @usr, @var, @home)
+        for container in containers {
+            let fs_uuid = get_partition_uuid(&container.mapped_path)?;
+            let svols = multi_volume_subvolumes(&container.volume_name);
+            for sv in &svols {
+                content.push_str(&format!(
+                    "# {} (LUKS encrypted)\n\
+                     UUID={}  {}  btrfs  subvol={},{}  0  0\n\n",
+                    container.volume_name, fs_uuid, sv.mount_point, sv.name, sv.mount_options,
+                ));
+            }
+        }
+    } else {
+        for container in containers {
+            let mount_point = match container.volume_name.as_str() {
+                "Root" => "/".to_string(),
+                name => format!("/{}", name.to_lowercase()),
+            };
 
-        let pass = 0; // btrfs: no boot-time fsck
+            let pass = 0; // btrfs: no boot-time fsck
 
-        // Get UUID of the filesystem on the mapped device
-        let fs_uuid = get_partition_uuid(&container.mapped_path)?;
+            // Get UUID of the filesystem on the mapped device
+            let fs_uuid = get_partition_uuid(&container.mapped_path)?;
 
-        // Note: ZFS is blocked with multi-volume encryption at validation
-        // time, so this path always uses a traditional filesystem.
-        content.push_str(&format!(
-            "# {} partition (LUKS encrypted)\n\
-             UUID={}  {}  btrfs  defaults,noatime,compress=zstd  0  {}\n\n",
-            container.volume_name, fs_uuid, mount_point, pass
-        ));
+            // Note: ZFS is blocked with multi-volume encryption at validation
+            // time, so this path always uses a traditional filesystem.
+            content.push_str(&format!(
+                "# {} partition (LUKS encrypted)\n\
+                 UUID={}  {}  btrfs  defaults,noatime,compress=zstd  0  {}\n\n",
+                container.volume_name, fs_uuid, mount_point, pass
+            ));
+        }
     }
 
     // Add SWAP partition
@@ -370,7 +404,7 @@ pub fn generate_fstab_multi_volume(
         let efi_uuid = get_partition_uuid(&efi_device)?;
         content.push_str(&format!(
             "# EFI System Partition\n\
-             UUID={}  /boot/efi  vfat  umask=0077,defaults  0  2\n",
+             UUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
             efi_uuid
         ));
     }
@@ -514,7 +548,7 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
         let efi_uuid = get_partition_uuid(&efi_device)?;
         content.push_str(&format!(
             "# EFI System Partition\n\
-             UUID={}  /boot/efi  vfat  umask=0077,defaults  0  2\n",
+             UUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
             efi_uuid
         ));
     }

@@ -2,7 +2,6 @@
 
 pub mod bootloader;
 pub mod encryption;
-pub mod gocryptfs;
 pub mod greetd;
 pub mod hooks;
 pub mod keyfiles;

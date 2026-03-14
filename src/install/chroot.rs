@@ -6,7 +6,7 @@ use crate::disk::formatting::{
     create_btrfs_subvolumes, create_zfs_datasets, create_zfs_pool, mount_btrfs_subvolumes,
     mount_zfs_boot, mount_zfs_datasets,
 };
-use crate::disk::layouts::ComputedLayout;
+use crate::disk::layouts::{ComputedLayout, SubvolumeDef};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use tracing::{info, warn};
@@ -18,8 +18,9 @@ pub fn mount_partitions(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
-    mount_partitions_inner(cmd, device, layout, install_root, false)
+    mount_partitions_inner(cmd, device, layout, install_root, false, boot_filesystem)
 }
 
 /// Mount all partitions with preserve_home support
@@ -29,8 +30,9 @@ pub fn mount_partitions_preserve(
     layout: &ComputedLayout,
     install_root: &str,
     preserve_home: bool,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
-    mount_partitions_inner(cmd, device, layout, install_root, preserve_home)
+    mount_partitions_inner(cmd, device, layout, install_root, preserve_home, boot_filesystem)
 }
 
 fn mount_partitions_inner(
@@ -39,10 +41,18 @@ fn mount_partitions_inner(
     layout: &ComputedLayout,
     install_root: &str,
     preserve_home: bool,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     // Check if this layout uses btrfs subvolumes
     if layout.uses_subvolumes() {
-        return mount_partitions_with_subvolumes(cmd, device, layout, install_root, preserve_home);
+        return mount_partitions_with_subvolumes(
+            cmd,
+            device,
+            layout,
+            install_root,
+            preserve_home,
+            boot_filesystem,
+        );
     }
 
     info!(
@@ -68,6 +78,12 @@ fn mount_partitions_inner(
     for part in mount_order {
         let part_path = partition_path(device, part.number);
         let mount_point = part.mount_point.as_ref().unwrap();
+
+        // Btrfs boot: create @boot subvolume and mount with subvol=@boot
+        if part.is_boot_fs && *boot_filesystem == Filesystem::Btrfs {
+            mount_boot_btrfs_subvolume(cmd, &part_path, install_root)?;
+            continue;
+        }
 
         // Construct full mount path
         let full_mount = if mount_point == "/" {
@@ -137,8 +153,15 @@ pub fn mount_partitions_zfs(
     if *boot_filesystem == Filesystem::Zfs {
         // Boot pool was already created by format_boot_partition()
         mount_zfs_boot(cmd, install_root)?;
+    } else if *boot_filesystem == Filesystem::Btrfs {
+        // Btrfs boot: create @boot subvolume and mount with subvol=@boot
+        let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
+        if let Some(boot) = boot_part {
+            let boot_dev = partition_path(device, boot.number);
+            mount_boot_btrfs_subvolume(cmd, &boot_dev, install_root)?;
+        }
     } else {
-        // Non-ZFS boot: mount the partition normally
+        // Non-ZFS, non-btrfs boot: mount the partition normally
         let boot_part = layout.partitions.iter().find(|p| p.is_boot_fs);
         if let Some(boot) = boot_part {
             let boot_dev = partition_path(device, boot.number);
@@ -174,13 +197,17 @@ pub fn mount_partitions_zfs(
 }
 
 /// Mount partitions for layouts using btrfs subvolumes
-/// Creates subvolumes on the ROOT partition and mounts them
+/// Creates subvolumes on the ROOT partition and mounts them.
+/// When `boot_filesystem` is Btrfs, also creates an @boot subvolume on the
+/// separate BOOT partition (format → mount → create subvol → unmount → remount
+/// with subvol=@boot).
 fn mount_partitions_with_subvolumes(
     cmd: &CommandRunner,
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
     preserve_home: bool,
+    boot_filesystem: &Filesystem,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().unwrap();
     info!("Setting up btrfs subvolumes on {} (root partition)", device);
@@ -206,10 +233,28 @@ fn mount_partitions_with_subvolumes(
     // Now mount the subvolumes to their final locations
     mount_btrfs_subvolumes(cmd, &root_path, subvolumes, install_root)?;
 
-    // Mount other non-subvolume partitions (EFI, etc.)
+    // Handle BOOT partition — must be mounted before EFI (/boot/efi is inside /boot)
+    if let Some(boot_part) = layout.partitions.iter().find(|p| p.is_boot_fs) {
+        let boot_path = partition_path(device, boot_part.number);
+
+        if *boot_filesystem == Filesystem::Btrfs {
+            // BOOT partition is btrfs: create @boot subvolume, then mount it
+            mount_boot_btrfs_subvolume(cmd, &boot_path, install_root)?;
+        } else {
+            // Non-btrfs boot: plain mount
+            let full_mount = format!("{}/boot", install_root);
+            if !cmd.is_dry_run() {
+                std::fs::create_dir_all(&full_mount)?;
+            }
+            info!("Mounting {} to {}", boot_path, full_mount);
+            cmd.run("mount", &[&boot_path, &full_mount])?;
+        }
+    }
+
+    // Mount remaining non-subvolume partitions (EFI, swap, etc.)
     for part in &layout.partitions {
-        if part.name == "ROOT" {
-            continue; // Already handled via subvolumes
+        if part.name == "ROOT" || part.is_boot_fs {
+            continue; // Already handled above
         }
 
         if part.is_swap {
@@ -229,6 +274,33 @@ fn mount_partitions_with_subvolumes(
         }
     }
 
+    Ok(())
+}
+
+/// Setup and mount a btrfs boot partition with an @boot subvolume.
+///
+/// When the boot filesystem is btrfs, the partition needs a subvolume:
+/// 1. Mount the raw btrfs partition to a temporary mountpoint
+/// 2. Create the @boot subvolume
+/// 3. Unmount from the temporary mountpoint
+/// 4. Remount with subvol=@boot at <install_root>/boot
+pub fn mount_boot_btrfs_subvolume(
+    cmd: &CommandRunner,
+    boot_device: &str,
+    install_root: &str,
+) -> Result<()> {
+    info!(
+        "Setting up btrfs @boot subvolume on {} for {}",
+        boot_device, install_root
+    );
+    let boot_subvol = vec![SubvolumeDef {
+        name: "@boot".to_string(),
+        mount_point: "/boot".to_string(),
+        mount_options: "defaults,noatime,compress=zstd".to_string(),
+    }];
+    let boot_temp = "/tmp/deploytix_btrfs_boot";
+    create_btrfs_subvolumes(cmd, boot_device, &boot_subvol, boot_temp, false)?;
+    mount_btrfs_subvolumes(cmd, boot_device, &boot_subvol, install_root)?;
     Ok(())
 }
 

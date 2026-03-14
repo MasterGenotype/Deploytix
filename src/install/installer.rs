@@ -1,6 +1,6 @@
 //! Main installation orchestrator
 
-use crate::config::{DeploymentConfig, SwapType};
+use crate::config::{DeploymentConfig, Filesystem, SwapType};
 use crate::configure;
 use crate::configure::encryption::{
     close_multi_luks, setup_multi_volume_encryption, LuksContainer,
@@ -9,10 +9,12 @@ use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    create_btrfs_filesystem, format_all_partitions, format_boot_partition, format_efi, format_swap,
+    create_btrfs_filesystem, create_btrfs_subvolumes, format_all_partitions, format_boot_partition,
+    format_efi, format_swap, mount_btrfs_subvolumes,
 };
 use crate::disk::layouts::{
-    compute_layout_from_config, get_luks_partitions, print_layout_summary, ComputedLayout,
+    compute_layout_from_config, get_luks_partitions, multi_volume_subvolumes,
+    print_layout_summary, ComputedLayout,
 };
 use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
@@ -22,8 +24,8 @@ use crate::install::fstab::{
     LvmThinFstabParams,
 };
 use crate::install::{
-    generate_fstab, mount_partitions, mount_partitions_preserve, mount_partitions_zfs,
-    run_basestrap, unmount_all,
+    generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_preserve,
+    mount_partitions_zfs, run_basestrap, unmount_all,
 };
 use crate::utils::command::CommandRunner;
 use crate::utils::deps::ensure_dependencies;
@@ -617,9 +619,16 @@ impl Installer {
                 layout,
                 INSTALL_ROOT,
                 true,
+                &self.config.disk.boot_filesystem,
             )?;
         } else {
-            mount_partitions(&self.cmd, &self.config.disk.device, layout, INSTALL_ROOT)?;
+            mount_partitions(
+                &self.cmd,
+                &self.config.disk.device,
+                layout,
+                INSTALL_ROOT,
+                &self.config.disk.boot_filesystem,
+            )?;
         }
 
         Ok(())
@@ -665,6 +674,7 @@ impl Installer {
             layout,
             INSTALL_ROOT,
             &self.config.disk.filesystem,
+            &self.config.disk.boot_filesystem,
         )?;
 
         Ok(())
@@ -679,9 +689,6 @@ impl Installer {
 
         // User creation
         configure::users::create_user(&self.cmd, &self.config, INSTALL_ROOT)?;
-
-        // gocryptfs encrypted home directory (if enabled)
-        configure::gocryptfs::setup_encrypted_home(&self.cmd, &self.config, INSTALL_ROOT)?;
 
         // mkinitcpio
         configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &self.config, INSTALL_ROOT)?;
@@ -996,37 +1003,10 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        // Mount in order: root first, then usr, var, home
-        // Find root container
-        let root_container = self
-            .luks_containers
-            .iter()
-            .find(|c| c.volume_name == "Root")
-            .ok_or_else(|| DeploytixError::ConfigError("No Root container found".to_string()))?;
-
-        // Mount root
-        if !self.cmd.is_dry_run() {
-            fs::create_dir_all(INSTALL_ROOT)?;
-        }
-        self.cmd
-            .run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
-        info!("Mounted {} to {}", root_container.mapped_path, INSTALL_ROOT);
-
-        // Mount other encrypted volumes
-        for container in &self.luks_containers {
-            if container.volume_name == "Root" {
-                continue; // Already mounted
-            }
-
-            let mount_name = container.volume_name.to_lowercase();
-            let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
-
-            if !self.cmd.is_dry_run() {
-                fs::create_dir_all(&mount_point)?;
-            }
-            self.cmd
-                .run("mount", &[&container.mapped_path, &mount_point])?;
-            info!("Mounted {} to {}", container.mapped_path, mount_point);
+        if layout.uses_subvolumes() {
+            self.mount_multi_volume_with_subvolumes()?;
+        } else {
+            self.mount_multi_volume_plain()?;
         }
 
         // Mount BOOT partition
@@ -1042,13 +1022,17 @@ impl Installer {
                 })?;
             partition_path(&self.config.disk.device, boot_part.number)
         };
-        let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
-        if !self.cmd.is_dry_run() {
-            fs::create_dir_all(&boot_mount)?;
+        if self.config.disk.boot_filesystem == Filesystem::Btrfs {
+            mount_boot_btrfs_subvolume(&self.cmd, &boot_source, INSTALL_ROOT)?;
+        } else {
+            let boot_mount = format!("{}/boot", INSTALL_ROOT);
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&boot_mount)?;
+            }
+            self.cmd.run("mount", &[&boot_source, &boot_mount])?;
+            info!("Mounted {} to {}", boot_source, boot_mount);
         }
-        self.cmd.run("mount", &[&boot_source, &boot_mount])?;
-        info!("Mounted {} to {}", boot_source, boot_mount);
 
         // Mount EFI partition
         let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
@@ -1062,6 +1046,100 @@ impl Installer {
         }
         self.cmd.run("mount", &[&efi_device, &efi_mount])?;
         info!("Mounted {} to {}", efi_device, efi_mount);
+
+        Ok(())
+    }
+
+    /// Mount multi-volume encrypted partitions with btrfs subvolumes.
+    ///
+    /// Creates subvolumes on each LUKS-mapped btrfs volume and mounts them:
+    /// - Root: @ (→ /)
+    /// - Usr:  @usr (→ /usr)
+    /// - Var:  @var (→ /var), @log (→ /var/log)
+    /// - Home: @home (→ /home)
+    fn mount_multi_volume_with_subvolumes(&self) -> Result<()> {
+        let temp_mount = "/tmp/deploytix_btrfs_crypto";
+
+        // Root container must be mounted first
+        let root_container = self
+            .luks_containers
+            .iter()
+            .find(|c| c.volume_name == "Root")
+            .ok_or_else(|| DeploytixError::ConfigError("No Root container found".to_string()))?;
+
+        let root_svols = multi_volume_subvolumes("Root");
+        create_btrfs_subvolumes(
+            &self.cmd,
+            &root_container.mapped_path,
+            &root_svols,
+            temp_mount,
+            false,
+        )?;
+        mount_btrfs_subvolumes(
+            &self.cmd,
+            &root_container.mapped_path,
+            &root_svols,
+            INSTALL_ROOT,
+        )?;
+
+        // Mount other encrypted volume subvolumes
+        for container in &self.luks_containers {
+            if container.volume_name == "Root" {
+                continue;
+            }
+
+            let preserve = self.config.disk.preserve_home
+                && container.volume_name.eq_ignore_ascii_case("home");
+
+            let svols = multi_volume_subvolumes(&container.volume_name);
+            create_btrfs_subvolumes(
+                &self.cmd,
+                &container.mapped_path,
+                &svols,
+                temp_mount,
+                preserve,
+            )?;
+            mount_btrfs_subvolumes(
+                &self.cmd,
+                &container.mapped_path,
+                &svols,
+                INSTALL_ROOT,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Mount multi-volume encrypted partitions without subvolumes (plain mount).
+    fn mount_multi_volume_plain(&self) -> Result<()> {
+        let root_container = self
+            .luks_containers
+            .iter()
+            .find(|c| c.volume_name == "Root")
+            .ok_or_else(|| DeploytixError::ConfigError("No Root container found".to_string()))?;
+
+        if !self.cmd.is_dry_run() {
+            fs::create_dir_all(INSTALL_ROOT)?;
+        }
+        self.cmd
+            .run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
+        info!("Mounted {} to {}", root_container.mapped_path, INSTALL_ROOT);
+
+        for container in &self.luks_containers {
+            if container.volume_name == "Root" {
+                continue;
+            }
+
+            let mount_name = container.volume_name.to_lowercase();
+            let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
+
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&mount_point)?;
+            }
+            self.cmd
+                .run("mount", &[&container.mapped_path, &mount_point])?;
+            info!("Mounted {} to {}", container.mapped_path, mount_point);
+        }
 
         Ok(())
     }
@@ -1377,13 +1455,17 @@ impl Installer {
                 })?;
             partition_path(&self.config.disk.device, boot_part.number)
         };
-        let boot_mount = format!("{}/boot", INSTALL_ROOT);
 
-        if !self.cmd.is_dry_run() {
-            fs::create_dir_all(&boot_mount)?;
+        if self.config.disk.boot_filesystem == Filesystem::Btrfs {
+            mount_boot_btrfs_subvolume(&self.cmd, &boot_source, INSTALL_ROOT)?;
+        } else {
+            let boot_mount = format!("{}/boot", INSTALL_ROOT);
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&boot_mount)?;
+            }
+            self.cmd.run("mount", &[&boot_source, &boot_mount])?;
+            info!("Mounted {} to {}", boot_source, boot_mount);
         }
-        self.cmd.run("mount", &[&boot_source, &boot_mount])?;
-        info!("Mounted {} to {}", boot_source, boot_mount);
 
         // Mount EFI partition
         let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {

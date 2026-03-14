@@ -21,6 +21,7 @@ pub enum WizardStep {
     SystemConfig,
     UserConfig,
     NetworkDesktop,
+    HandheldGaming,
     Summary,
     Installing,
 }
@@ -32,7 +33,8 @@ impl WizardStep {
             Self::DiskConfig => Some(Self::SystemConfig),
             Self::SystemConfig => Some(Self::UserConfig),
             Self::UserConfig => Some(Self::NetworkDesktop),
-            Self::NetworkDesktop => Some(Self::Summary),
+            Self::NetworkDesktop => Some(Self::HandheldGaming),
+            Self::HandheldGaming => Some(Self::Summary),
             Self::Summary => Some(Self::Installing),
             Self::Installing => None,
         }
@@ -45,7 +47,8 @@ impl WizardStep {
             Self::SystemConfig => Some(Self::DiskConfig),
             Self::UserConfig => Some(Self::SystemConfig),
             Self::NetworkDesktop => Some(Self::UserConfig),
-            Self::Summary => Some(Self::NetworkDesktop),
+            Self::HandheldGaming => Some(Self::NetworkDesktop),
+            Self::Summary => Some(Self::HandheldGaming),
             Self::Installing => None, // Can't go back during installation
         }
     }
@@ -57,6 +60,7 @@ impl WizardStep {
             Self::SystemConfig => "System",
             Self::UserConfig => "User",
             Self::NetworkDesktop => "Network",
+            Self::HandheldGaming => "Gaming",
             Self::Summary => "Review",
             Self::Installing => "Install",
         }
@@ -123,7 +127,6 @@ pub struct DeploytixGui {
     user_password: String,
     user_password_confirm: String,
     sudoer: bool,
-    encrypt_home: bool,
 
     // Network & Desktop
     network_backend: NetworkBackend,
@@ -194,7 +197,6 @@ impl Default for DeploytixGui {
             user_password: String::new(),
             user_password_confirm: String::new(),
             sudoer: true,
-            encrypt_home: false,
 
             network_backend: NetworkBackend::Iwd,
             desktop_env: DesktopEnvironment::None,
@@ -254,7 +256,7 @@ impl DeploytixGui {
             disk: DiskConfig {
                 device: device_path,
                 filesystem: self.filesystem.clone(),
-                boot_filesystem: crate::config::default_boot_filesystem(),
+                boot_filesystem: crate::config::boot_filesystem_for(&self.filesystem),
                 encryption: self.encryption,
                 encryption_password: if self.encryption {
                     Some(self.encryption_password.clone())
@@ -298,15 +300,8 @@ impl DeploytixGui {
             user: UserConfig {
                 name: self.username.clone(),
                 password: self.user_password.clone(),
-                groups: vec![
-                    "wheel".to_string(),
-                    "video".to_string(),
-                    "audio".to_string(),
-                    "network".to_string(),
-                    "log".to_string(),
-                ],
+                groups: crate::config::default_groups(),
                 sudoer: self.sudoer,
-                encrypt_home: self.encrypt_home,
             },
             network: NetworkConfig {
                 backend: self.network_backend.clone(),
@@ -485,6 +480,7 @@ impl eframe::App for DeploytixGui {
                     WizardStep::SystemConfig,
                     WizardStep::UserConfig,
                     WizardStep::NetworkDesktop,
+                    WizardStep::HandheldGaming,
                     WizardStep::Summary,
                     WizardStep::Installing,
                 ];
@@ -616,7 +612,6 @@ impl eframe::App for DeploytixGui {
                     &mut self.user_password,
                     &mut self.user_password_confirm,
                     &mut self.sudoer,
-                    &mut self.encrypt_home,
                 ),
                 WizardStep::NetworkDesktop => panels::network_desktop_panel(
                     ui,
@@ -624,11 +619,15 @@ impl eframe::App for DeploytixGui {
                     &mut self.desktop_env,
                     &mut self.install_yay,
                     &mut self.install_wine,
-                    &mut self.install_gaming,
-                    &mut self.install_session_switching,
                     &mut self.gpu_nvidia,
                     &mut self.gpu_amd,
                     &mut self.gpu_intel,
+                ),
+                WizardStep::HandheldGaming => panels::handheld_gaming_panel(
+                    ui,
+                    &mut self.install_gaming,
+                    &mut self.install_session_switching,
+                    &self.desktop_env,
                 ),
                 WizardStep::Summary => {
                     let device_path = self
@@ -652,7 +651,6 @@ impl eframe::App for DeploytixGui {
                         self.secureboot,
                         &self.hostname,
                         &self.username,
-                        self.encrypt_home,
                         &self.network_backend,
                         &self.desktop_env,
                         self.gpu_nvidia,

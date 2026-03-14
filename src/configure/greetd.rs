@@ -40,17 +40,15 @@ pub fn configure_greetd(
     let session_cmd = get_session_command(&config.desktop.environment);
 
     let config_content = if config.packages.install_session_switching && config.packages.install_gaming {
-        // Session switching mode: gamescope as initial_session, agreety as fallback
+        // Session switching mode: greetd auto-logins the user into
+        // deploytix-session-manager, which handles the gamescope ↔ desktop
+        // loop internally via a sentinel file.
         format!(
             r#"[terminal]
 vt = 1
 
 [default_session]
-command = "agreety --cmd /bin/bash"
-user = "greeter"
-
-[initial_session]
-command = "gamescope-session"
+command = "deploytix-session-manager"
 user = "{user}"
 "#,
             user = username,

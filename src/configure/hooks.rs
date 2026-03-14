@@ -1,7 +1,7 @@
 //! Custom mkinitcpio hook generation
 
-use crate::config::DeploymentConfig;
-use crate::disk::layouts::ComputedLayout;
+use crate::config::{DeploymentConfig, Filesystem};
+use crate::disk::layouts::{multi_volume_subvolumes, ComputedLayout};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -369,16 +369,23 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
         .filter(|p| p.is_luks && !p.is_efi && !p.is_boot_fs && !p.is_swap && !p.is_bios_boot)
         .collect();
 
+    // Boot mount options: include subvol=@boot when boot filesystem is btrfs
+    let boot_extra_opts = if config.disk.boot_filesystem == Filesystem::Btrfs {
+        " \"subvol=@boot,noatime,compress=zstd\""
+    } else {
+        ""
+    };
+
     // Generate /boot mount section depending on boot encryption
     let boot_mount_section = if config.disk.boot_encryption {
         format!(
             r#"    # Mount encrypted /boot from LUKS1 container
-    mount_volume "/dev/mapper/{boot_mapper}" "$new_root/boot" "boot" || true"#,
-            boot_mapper = boot_mapper_name
+    mount_volume "/dev/mapper/{boot_mapper}" "$new_root/boot" "boot"{boot_opts} || true"#,
+            boot_mapper = boot_mapper_name,
+            boot_opts = boot_extra_opts,
         )
     } else {
-        // Auto-detect boot partition
-        String::from(
+        format!(
             r#"    # Mount unencrypted /boot partition
     boot_partition=""
     for dev in $(blkid -t LABEL=BOOT -o device 2>/dev/null); do
@@ -387,37 +394,59 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     done
 
     if [ -n "$boot_partition" ] && [ -b "$boot_partition" ]; then
-        mount_volume "$boot_partition" "$new_root/boot" "boot" || true
+        mount_volume "$boot_partition" "$new_root/boot" "boot"{boot_opts} || true
     else
         echo "[mountcrypt] Warning: BOOT partition not found" >&2
     fi"#,
+            boot_opts = boot_extra_opts,
         )
     };
 
     // Build the dynamic volume mount section from layout partitions.
     // Root is mounted first (fatal on failure). Other volumes are best-effort.
     let mut volume_mounts = String::new();
+    let use_subvolumes = layout.uses_subvolumes();
 
     // Root must always be first
     let has_root = luks_data_parts
         .iter()
         .any(|p| p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT"));
     if has_root {
-        volume_mounts.push_str(
-            r#"    # Mount root first (required)
+        if use_subvolumes {
+            // Mount root with @ subvolume
+            let root_svols = multi_volume_subvolumes("Root");
+            volume_mounts.push_str(&format!(
+                r#"    # Mount root first (required) — subvol={sv_name}
+    echo "[mountcrypt] === Mounting root (subvol={sv_name}) ==="
+    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol={sv_name},{sv_opts}"; then
+        echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
+        return 1
+    fi
+"#,
+                sv_name = root_svols[0].name,
+                sv_opts = root_svols[0].mount_options,
+            ));
+        } else {
+            volume_mounts.push_str(
+                r#"    # Mount root first (required)
     echo "[mountcrypt] === Mounting root ==="
     if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root"; then
         echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
         return 1
     fi
 "#,
-        );
+            );
+        }
     }
 
     // Remaining encrypted volumes
     for part in &luks_data_parts {
+        if part.mount_point.as_deref() == Some("/")
+            || part.name.eq_ignore_ascii_case("ROOT")
+        {
+            continue; // Already handled above
+        }
         let mp = match part.mount_point.as_deref() {
-            Some("/") => continue, // Already handled above
             Some(mp) => mp,
             None => continue,
         };
@@ -430,15 +459,45 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
             }
         };
         let mapper = format!("Crypt-{}", title);
-        // /usr failure is a hard error; everything else is a warning
-        let severity = if mp == "/usr" { "ERROR" } else { "WARNING" };
-        let fail_action = if mp == "/usr" {
-            "        ret=1".to_string()
+
+        if use_subvolumes {
+            let svols = multi_volume_subvolumes(&title);
+            for sv in &svols {
+                // /usr failure is a hard error; everything else is a warning
+                let severity = if sv.mount_point == "/usr" { "ERROR" } else { "WARNING" };
+                let fail_action = if sv.mount_point == "/usr" {
+                    "        ret=1".to_string()
+                } else {
+                    String::new()
+                };
+                volume_mounts.push_str(&format!(
+                    r#"
+    # Mount {mp} (subvol={sv_name})
+    echo "[mountcrypt] === Mounting {mp} ==="
+    if ! mount_volume "/dev/mapper/{mapper}" "$new_root{mp}" "{name}" "subvol={sv_name},{sv_opts}"; then
+        echo "[mountcrypt] {severity}: Failed to mount {mp}" >&2
+{fail_action}
+    fi
+"#,
+                    mp = sv.mount_point,
+                    mapper = mapper,
+                    sv_name = sv.name,
+                    sv_opts = sv.mount_options,
+                    name = sv.name.trim_start_matches('@'),
+                    severity = severity,
+                    fail_action = fail_action,
+                ));
+            }
         } else {
-            String::new()
-        };
-        volume_mounts.push_str(&format!(
-            r#"
+            // /usr failure is a hard error; everything else is a warning
+            let severity = if mp == "/usr" { "ERROR" } else { "WARNING" };
+            let fail_action = if mp == "/usr" {
+                "        ret=1".to_string()
+            } else {
+                String::new()
+            };
+            volume_mounts.push_str(&format!(
+                r#"
     # Mount {mp}
     echo "[mountcrypt] === Mounting {mp} ==="
     if ! mount_volume "/dev/mapper/{mapper}" "$new_root{mp}" "{name}"; then
@@ -446,12 +505,13 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 {fail_action}
     fi
 "#,
-            mp = mp,
-            mapper = mapper,
-            name = part.name.to_lowercase(),
-            severity = severity,
-            fail_action = fail_action,
-        ));
+                mp = mp,
+                mapper = mapper,
+                name = part.name.to_lowercase(),
+                severity = severity,
+                fail_action = fail_action,
+            ));
+        }
     }
 
     // Build description comment listing actual volumes
@@ -501,10 +561,12 @@ is_mounted() {{
 }}
 
 # Mount a volume with checks
+# Args: device mount_point name [extra_opts]
 mount_volume() {{
     local device="$1"
     local mount_point="$2"
     local name="$3"
+    local extra_opts="${{4:-}}"
 
     # Wait for device
     echo "[mountcrypt] Waiting for $device ($name)..."
@@ -519,10 +581,16 @@ mount_volume() {{
         return 0
     fi
 
+    # Build mount options
+    local opts="rw"
+    if [ -n "$extra_opts" ]; then
+        opts="$opts,$extra_opts"
+    fi
+
     # Create mount point and mount
     mkdir -p "$mount_point"
-    if mount -o rw "$device" "$mount_point"; then
-        echo "[mountcrypt] Mounted $device -> $mount_point"
+    if mount -o "$opts" "$device" "$mount_point"; then
+        echo "[mountcrypt] Mounted $device -> $mount_point ($opts)"
         return 0
     else
         echo "[mountcrypt] ERROR: Failed to mount $device -> $mount_point" >&2

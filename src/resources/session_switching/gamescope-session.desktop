@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Game Mode (Gamescope)
-Comment=Steam Game Mode via gamescope-session
-Exec=gamescope-session
-TryExec=gamescope-session
+Comment=Steam Game Mode via gamescope-session-plus
+Exec=/usr/share/gamescope-session-plus/gamescope-session-plus steam
+TryExec=/usr/share/gamescope-session-plus/gamescope-session-plus
 Type=Application
 DesktopNames=gamescope

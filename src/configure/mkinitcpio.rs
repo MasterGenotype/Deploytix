@@ -121,7 +121,6 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         }
 
         hooks.push("filesystems".to_string());
-        hooks.push("fsck".to_string());
 
         // LVM thin has a separate /usr thin volume that must be mounted before init.
         hooks.push("usr".to_string());
@@ -143,7 +142,6 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         }
 
         hooks.push("filesystems".to_string());
-        hooks.push("fsck".to_string());
 
         // Separate /usr partition requires the usr hook for early mount
         if config.disk.partitions.iter().any(|p| p.mount_point == "/usr") {

@@ -85,3 +85,14 @@ The `ref/` directory contains shell script references from the original implemen
 The `docs/` directory contains detailed specifications:
 - `INTEGRATION_GUIDE_CRYPTO_BTRFS.md` - Multi-volume LUKS + BTRFS encryption implementation
 - `CRYPTTAB_HOOKS_DOCUMENTATION.md` - Custom mkinitcpio hooks for keyfile-based unlocking
+
+## Filesystem Rules
+
+### Btrfs Boot Partition
+
+When btrfs is selected as the filesystem for the boot partition, the boot partition must be set up using a subvolume. The procedure is:
+1. Format the boot partition as btrfs
+2. Mount the boot partition to the temporary mountpoint
+3. Create the `@boot` subvolume
+4. Unmount the boot partition
+5. Remount with `subvol=@boot`

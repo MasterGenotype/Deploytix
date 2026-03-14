@@ -28,8 +28,7 @@ The installer executes a **6-phase pipeline**, where each phase builds on the pr
 **Phase 4 — System Configuration.** Enters the target via `artix-chroot` and configures:
 - Locale, timezone, keymap, hostname
 - User account creation (with optional `chown -R` fixup for preserved home directories)
-- Encrypted home directory setup via gocryptfs + pam_mount (if enabled)
-- mkinitcpio configuration with dynamically generated hooks for the specific encryption and filesystem setup
+- mkinitcpio configuration
 - GRUB bootloader installation with kernel parameters for encrypted root, integrity, and hibernation
 - Network backend (iwd standalone or NetworkManager + iwd)
 - Init system service enablement (runit/OpenRC/s6/dinit)
@@ -66,7 +65,6 @@ The installer executes a **6-phase pipeline**, where each phase builds on the pr
 - **LVM Thin Provisioning**: Space-efficient overprovisioned layout with LUKS + LVM
 - **Btrfs Subvolumes**: Automatic subvolume creation (`@`, `@home`, `@var`, `@log`, `@snapshots`)
 - **Preserve Home**: Reinstall the system without overwriting `/home` — works across partition, subvolume, and multi-volume LUKS layouts
-- **Encrypted Home**: Per-user gocryptfs encryption with automatic pam_mount unlock on login
 - **Secure Boot**: Optional signing via sbctl, shim (MOK), or manual keys
 - **Swap Options**: Traditional partition, swap file + ZRAM, or ZRAM-only
 - **Custom Partitions**: Define your own partition layout with per-partition encryption overrides
@@ -218,7 +216,6 @@ secureboot = false        # optional Secure Boot signing
 name = "user"
 password = "changeme"
 groups = ["wheel", "video", "audio", "network", "log"]
-encrypt_home = false      # gocryptfs encrypted home directory
 
 [network]
 backend = "iwd"           # iwd, networkmanager
@@ -304,7 +301,7 @@ src/
 ├── install/             # Installer orchestrator (6-phase pipeline), basestrap,
 │                        #   chroot mounting, fstab/crypttab generation
 ├── configure/           # In-chroot system configuration: bootloader (GRUB),
-│                        #   encryption (LUKS2/LUKS1), users, gocryptfs, locale,
+│                        #   encryption (LUKS2/LUKS1), users, locale,
 │                        #   mkinitcpio hooks, network services, swap (ZRAM/file),
 │                        #   keyfiles, Secure Boot
 ├── desktop/             # Desktop environment package lists and post-install setup
@@ -329,7 +326,6 @@ All system commands execute through a `CommandRunner` abstraction that respects 
 - `grub-install` / `grub-mkconfig` (if using GRUB bootloader)
 - `cryptsetup` (if using LUKS2 encryption)
 - `pvcreate` / `vgcreate` / `lvcreate` from `lvm2` (if using LVM Thin layout)
-- `gocryptfs` + `pam_mount` (if using encrypted home directories)
 - Root privileges
 
 Deploytix will check for missing dependencies at startup and offer to install them automatically via `pacman`.

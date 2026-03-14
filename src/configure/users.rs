@@ -25,12 +25,10 @@ pub fn create_user(
         preserve_home,
     );
 
-    let encrypt_home = config.user.encrypt_home;
-
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create user {} with groups {:?} (encrypt_home={}, preserve_home={})",
-            username, groups, encrypt_home, preserve_home,
+            "  [dry-run] Would create user {} with groups {:?} (preserve_home={})",
+            username, groups, preserve_home,
         );
         return Ok(());
     }
@@ -38,25 +36,8 @@ pub fn create_user(
     // Build groups string
     let groups_str = groups.join(",");
 
-    // Create user: skip home dir creation (-M) when gocryptfs will handle it
-    let useradd_cmd = if encrypt_home {
-        format!("useradd -M -G {} -s /bin/bash {}", groups_str, username)
-    } else {
-        format!("useradd -m -G {} -s /bin/bash {}", groups_str, username)
-    };
+    let useradd_cmd = format!("useradd -m -G {} -s /bin/bash {}", groups_str, username);
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
-
-    // For encrypted home: create the mount point directory
-    if encrypt_home {
-        let home_dir = format!("{}/home/{}", install_root, username);
-        fs::create_dir_all(&home_dir)?;
-        // Set ownership and permissions via chroot
-        cmd.run_in_chroot(
-            install_root,
-            &format!("chown {}:{} /home/{}", username, username, username),
-        )?;
-        cmd.run_in_chroot(install_root, &format!("chmod 700 /home/{}", username))?;
-    }
 
     // When preserve_home is enabled the preserved /home/<user> directory has
     // file ownership from the old system (potentially a different UID/GID).
@@ -79,7 +60,7 @@ pub fn create_user(
     // avoid shell injection when the password contains single quotes or
     // other shell metacharacters.
     let temp_path = format!("{}/var/tmp/.deploytix_chpasswd", install_root);
-    fs::write(&temp_path, format!("{}:{}", username, password))?;
+    fs::write(&temp_path, format!("{}:{}\n", username, password))?;
     let mut perms = fs::metadata(&temp_path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&temp_path, perms)?;
@@ -92,7 +73,29 @@ pub fn create_user(
         configure_sudoers(cmd, install_root)?;
     }
 
+    // Raise nofile ulimit so gamescope-session-plus can set ulimit -n 524288
+    configure_ulimits(install_root)?;
+
     info!("User {} created successfully", username);
+    Ok(())
+}
+
+/// Write /etc/security/limits.d drop-in to raise the nofile limit.
+///
+/// gamescope-session-plus calls `ulimit -n 524288`; PAM must allow this.
+fn configure_ulimits(install_root: &str) -> Result<()> {
+    let limits_dir = format!("{}/etc/security/limits.d", install_root);
+    fs::create_dir_all(&limits_dir)?;
+
+    let limits_path = format!("{}/99-deploytix-nofile.conf", limits_dir);
+    info!("Writing nofile limits to {}", limits_path);
+    fs::write(
+        &limits_path,
+        "# Deploytix: raise file descriptor limit for gamescope-session-plus\n\
+         * soft nofile 524288\n\
+         * hard nofile 524288\n",
+    )?;
+
     Ok(())
 }
 
@@ -143,7 +146,7 @@ pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str
 
     // Pass credentials via a temp file to avoid shell injection.
     let temp_path = format!("{}/var/tmp/.deploytix_chpasswd", install_root);
-    fs::write(&temp_path, format!("root:{}", password))?;
+    fs::write(&temp_path, format!("root:{}\n", password))?;
     let mut perms = fs::metadata(&temp_path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&temp_path, perms)?;

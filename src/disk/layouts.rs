@@ -34,7 +34,7 @@ pub struct SubvolumeDef {
 }
 
 /// Create standard btrfs subvolume definitions
-/// Following the common convention: @=root, @home, @var, @log, @snapshots
+/// Following the common convention: @=root, @home, @usr, @var, @log
 pub fn standard_subvolumes() -> Vec<SubvolumeDef> {
     let default_opts = "defaults,noatime,compress=zstd".to_string();
     vec![
@@ -49,6 +49,11 @@ pub fn standard_subvolumes() -> Vec<SubvolumeDef> {
             mount_options: default_opts.clone(),
         },
         SubvolumeDef {
+            name: "@usr".to_string(),
+            mount_point: "/usr".to_string(),
+            mount_options: default_opts.clone(),
+        },
+        SubvolumeDef {
             name: "@var".to_string(),
             mount_point: "/var".to_string(),
             mount_options: default_opts.clone(),
@@ -56,14 +61,49 @@ pub fn standard_subvolumes() -> Vec<SubvolumeDef> {
         SubvolumeDef {
             name: "@log".to_string(),
             mount_point: "/var/log".to_string(),
-            mount_options: default_opts.clone(),
-        },
-        SubvolumeDef {
-            name: "@snapshots".to_string(),
-            mount_point: "/.snapshots".to_string(),
             mount_options: default_opts,
         },
     ]
+}
+
+/// Create btrfs subvolume definitions for a multi-volume encrypted container.
+///
+/// Unlike `standard_subvolumes()` (which places all subvolumes on a single
+/// ROOT partition), multi-volume layouts distribute subvolumes across
+/// separate encrypted containers:
+/// - Root: @ (→ /)
+/// - Usr:  @usr (→ /usr)
+/// - Var:  @var (→ /var), @log (→ /var/log)
+/// - Home: @home (→ /home)
+pub fn multi_volume_subvolumes(volume_name: &str) -> Vec<SubvolumeDef> {
+    let default_opts = "defaults,noatime,compress=zstd".to_string();
+    match volume_name {
+        "Root" => vec![SubvolumeDef {
+            name: "@".to_string(),
+            mount_point: "/".to_string(),
+            mount_options: default_opts,
+        }],
+        "Var" => vec![
+            SubvolumeDef {
+                name: "@var".to_string(),
+                mount_point: "/var".to_string(),
+                mount_options: default_opts.clone(),
+            },
+            SubvolumeDef {
+                name: "@log".to_string(),
+                mount_point: "/var/log".to_string(),
+                mount_options: default_opts,
+            },
+        ],
+        other => {
+            let name_lower = other.to_lowercase();
+            vec![SubvolumeDef {
+                name: format!("@{}", name_lower),
+                mount_point: format!("/{}", name_lower),
+                mount_options: default_opts,
+            }]
+        }
+    }
 }
 
 /// A single partition definition
@@ -548,6 +588,7 @@ mod tests {
         let mounts: Vec<&str> = svols.iter().map(|s| s.mount_point.as_str()).collect();
         assert!(mounts.contains(&"/"), "must include root subvolume");
         assert!(mounts.contains(&"/home"), "must include /home subvolume");
+        assert!(mounts.contains(&"/usr"), "must include /usr subvolume");
         assert!(!svols.is_empty());
     }
 

@@ -5,19 +5,16 @@ use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use tracing::info;
+use tracing::{info, warn};
 
 // Embedded script resources (compiled into the binary)
+const SESSION_MANAGER: &str =
+    include_str!("../resources/session_switching/deploytix-session-manager.sh");
 const SESSION_SELECT: &str = include_str!("../resources/session_switching/session-select.sh");
 const RETURN_TO_GAMEMODE: &str =
     include_str!("../resources/session_switching/return-to-gamemode.sh");
-const DESKTOP_SESSION_ONESHOT: &str =
-    include_str!("../resources/session_switching/desktop-session-oneshot.sh");
-const DESKTOP_ONESHOT_DESKTOP: &str =
-    include_str!("../resources/session_switching/desktop-oneshot.desktop");
 const GAMESCOPE_SESSION_DESKTOP: &str =
     include_str!("../resources/session_switching/gamescope-session.desktop");
-const POLKIT_RULES: &str = include_str!("../resources/session_switching/session-switching.rules");
 
 /// File to deploy with its destination path (relative to install root) and permissions
 struct DeployFile {
@@ -27,6 +24,11 @@ struct DeployFile {
 }
 
 const DEPLOY_FILES: &[DeployFile] = &[
+    DeployFile {
+        dest: "usr/bin/deploytix-session-manager",
+        content: SESSION_MANAGER,
+        mode: 0o755,
+    },
     DeployFile {
         dest: "usr/bin/session-select",
         content: SESSION_SELECT,
@@ -38,35 +40,21 @@ const DEPLOY_FILES: &[DeployFile] = &[
         mode: 0o755,
     },
     DeployFile {
-        dest: "usr/bin/desktop-session-oneshot",
-        content: DESKTOP_SESSION_ONESHOT,
-        mode: 0o755,
-    },
-    DeployFile {
-        dest: "usr/share/wayland-sessions/desktop-oneshot.desktop",
-        content: DESKTOP_ONESHOT_DESKTOP,
-        mode: 0o644,
-    },
-    DeployFile {
         dest: "usr/share/wayland-sessions/gamescope-session.desktop",
         content: GAMESCOPE_SESSION_DESKTOP,
-        mode: 0o644,
-    },
-    DeployFile {
-        dest: "usr/share/polkit-1/rules.d/session-switching.rules",
-        content: POLKIT_RULES,
         mode: 0o644,
     },
 ];
 
 /// Deploy session switching scripts and configuration to the target system.
 ///
-/// This writes the helper scripts (`session-select`, `return-to-gamemode`,
-/// `desktop-session-oneshot`), wayland session `.desktop` files, and polkit
-/// rules into `install_root`.
+/// This writes `deploytix-session-manager`, `session-select`,
+/// `return-to-gamemode`, and the gamescope wayland session `.desktop`
+/// file into `install_root`, then builds `gamescope-session-git` from
+/// the AUR.
 pub fn setup_session_switching(
-    _cmd: &CommandRunner,
-    _config: &DeploymentConfig,
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
     info!("Deploying session switching scripts to {}", install_root);
@@ -85,6 +73,58 @@ pub fn setup_session_switching(
         info!("  Installed {} (mode {:o})", file.dest, file.mode);
     }
 
+    // Build gamescope-session-git from AUR (provides the gamescope-session
+    // command that greetd's initial_session and the .desktop file reference).
+    install_gamescope_session(cmd, config, install_root)?;
+
     info!("Session switching scripts deployed successfully");
+    Ok(())
+}
+
+/// Build and install `gamescope-session-git` from the AUR.
+///
+/// Uses the same pattern as the yay AUR build: clone into a temp
+/// directory, build as the configured user via `makepkg -si`, then
+/// clean up.
+fn install_gamescope_session(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let username = &config.user.name;
+
+    info!("Building gamescope-session-git from AUR as {}", username);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would build gamescope-session-git from AUR as {}", username);
+        return Ok(());
+    }
+
+    // Ensure base-devel and git are present (should already be from basestrap)
+    cmd.run_in_chroot(
+        install_root,
+        "pacman -S --noconfirm --needed git base-devel",
+    )?;
+
+    let build_cmd = format!(
+        "mkdir -p /tmp/aur-build && \
+         chown {0}:{0} /tmp/aur-build && \
+         sudo -u {0} bash -c '\
+           cd /tmp/aur-build && \
+           git clone https://aur.archlinux.org/gamescope-session-git.git && \
+           cd gamescope-session-git && \
+           makepkg -si --noconfirm' && \
+         rm -rf /tmp/aur-build/gamescope-session-git",
+        username
+    );
+
+    match cmd.run_in_chroot(install_root, &build_cmd) {
+        Ok(_) => info!("gamescope-session-git installed successfully"),
+        Err(e) => {
+            warn!("Failed to build gamescope-session-git from AUR: {}", e);
+            warn!("Session switching may not work until gamescope-session is installed manually");
+        }
+    }
+
     Ok(())
 }

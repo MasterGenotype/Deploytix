@@ -556,7 +556,6 @@ pub fn user_config_panel(
     password: &mut String,
     password_confirm: &mut String,
     sudoer: &mut bool,
-    encrypt_home: &mut bool,
 ) -> bool {
     ui.heading("User Configuration");
     ui.add_space(8.0);
@@ -580,17 +579,6 @@ pub fn user_config_panel(
     ui.add_space(8.0);
 
     ui.checkbox(sudoer, "Add user to wheel group (sudo access)");
-    ui.add_space(4.0);
-
-    ui.checkbox(encrypt_home, "Encrypt home directory with gocryptfs");
-    if *encrypt_home {
-        ui.label(
-            RichText::new(
-                "Home directory will be encrypted and auto-unlocked on login via pam_mount.",
-            )
-            .weak(),
-        );
-    }
     ui.add_space(8.0);
 
     // Validation
@@ -622,8 +610,6 @@ pub fn network_desktop_panel(
     desktop_env: &mut DesktopEnvironment,
     install_yay: &mut bool,
     install_wine: &mut bool,
-    install_gaming: &mut bool,
-    install_session_switching: &mut bool,
     gpu_nvidia: &mut bool,
     gpu_amd: &mut bool,
     gpu_intel: &mut bool,
@@ -677,25 +663,7 @@ pub fn network_desktop_panel(
 
     // Wine
     ui.checkbox(install_wine, "Wine compatibility packages (wine, vkd3d, winetricks, wine-mono, wine-gecko)");
-    ui.add_space(4.0);
-
-    // Gaming
-    ui.checkbox(install_gaming, "Gaming packages (Steam, gamescope)");
-    if *install_gaming && *desktop_env != DesktopEnvironment::None {
-        ui.indent("session_switching_indent", |ui| {
-            ui.checkbox(install_session_switching, "Game Mode ↔ Desktop switching (via greetd)");
-            if *install_session_switching {
-                ui.label(
-                    RichText::new("Boots into gamescope Game Mode; switch to desktop and back on demand.")
-                        .weak(),
-                );
-            }
-        });
-    } else {
-        // Reset session switching if prerequisites are unset
-        *install_session_switching = false;
-    }
-    ui.add_space(4.0);
+    ui.add_space(8.0);
 
     // yay
     ui.checkbox(install_yay, "yay AUR helper (built from source)");
@@ -704,6 +672,52 @@ pub fn network_desktop_panel(
             RichText::new("Go will be installed as a build dependency. yay is built as your user via makepkg.")
                 .weak(),
         );
+    }
+    ui.add_space(8.0);
+
+    true
+}
+
+/// Handheld gaming device configuration panel
+pub fn handheld_gaming_panel(
+    ui: &mut Ui,
+    install_gaming: &mut bool,
+    install_session_switching: &mut bool,
+    desktop_env: &DesktopEnvironment,
+) -> bool {
+    ui.heading("Handheld Gaming Device");
+    ui.add_space(8.0);
+
+    ui.label(
+        RichText::new(
+            "⚠ This section is intended for handheld gaming devices \
+             (e.g. Steam Deck, GPD, AYANEO). These features may not \
+             work correctly on non-gaming hardware.",
+        )
+        .color(egui::Color32::YELLOW),
+    );
+    ui.add_space(16.0);
+
+    ui.checkbox(install_gaming, "Gaming packages (Steam, gamescope)");
+    ui.add_space(4.0);
+
+    if *install_gaming && *desktop_env != DesktopEnvironment::None {
+        ui.indent("session_switching_indent", |ui| {
+            ui.checkbox(
+                install_session_switching,
+                "Game Mode ↔ Desktop switching",
+            );
+            if *install_session_switching {
+                ui.label(
+                    RichText::new(
+                        "Boots into gamescope Game Mode; switch to desktop and back on demand.",
+                    )
+                    .weak(),
+                );
+            }
+        });
+    } else {
+        *install_session_switching = false;
     }
     ui.add_space(8.0);
 
@@ -726,7 +740,6 @@ pub fn summary_panel(
     secureboot: bool,
     hostname: &str,
     username: &str,
-    encrypt_home: bool,
     network_backend: &NetworkBackend,
     desktop_env: &DesktopEnvironment,
     gpu_nvidia: bool,
@@ -815,14 +828,6 @@ pub fn summary_panel(
 
             ui.label("Username:");
             ui.label(username);
-            ui.end_row();
-
-            ui.label("Encrypted Home:");
-            ui.label(if encrypt_home {
-                "Enabled (gocryptfs)"
-            } else {
-                "Disabled"
-            });
             ui.end_row();
 
             ui.label("Network:");

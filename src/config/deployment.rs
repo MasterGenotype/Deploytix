@@ -195,9 +195,6 @@ pub struct UserConfig {
     /// Create as sudoer (wheel group)
     #[serde(default = "default_true")]
     pub sudoer: bool,
-    /// Encrypt home directory with gocryptfs (auto-unlocks on login via pam_mount)
-    #[serde(default)]
-    pub encrypt_home: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,13 +478,14 @@ fn default_zram_algorithm() -> String {
     "zstd".to_string()
 }
 
-fn default_groups() -> Vec<String> {
+pub fn default_groups() -> Vec<String> {
     vec![
         "wheel".to_string(),
         "video".to_string(),
         "audio".to_string(),
         "network".to_string(),
         "log".to_string(),
+        "seat".to_string(),
     ]
 }
 
@@ -526,6 +524,15 @@ pub fn default_partitions() -> Vec<CustomPartitionEntry> {
 
 pub fn default_boot_filesystem() -> Filesystem {
     Filesystem::Ext4
+}
+
+/// Derive the boot filesystem from the data filesystem.
+/// Btrfs data → Btrfs boot (with @boot subvolume); everything else → Ext4.
+pub fn boot_filesystem_for(fs: &Filesystem) -> Filesystem {
+    match fs {
+        Filesystem::Btrfs => Filesystem::Btrfs,
+        _ => Filesystem::Ext4,
+    }
 }
 
 fn default_true() -> bool {
@@ -667,20 +674,9 @@ impl DeploymentConfig {
         let fs_idx = prompt_select("Data filesystem", &filesystems, 0)?;
         let filesystem = filesystems[fs_idx].clone();
 
-        // Boot filesystem (/boot partition - where kernel, initramfs, and grub config live)
-        let boot_filesystems = [
-            Filesystem::Ext4,
-            Filesystem::Btrfs,
-            Filesystem::Xfs,
-            Filesystem::Zfs,
-            Filesystem::F2fs,
-        ];
-        let boot_fs_idx = prompt_select(
-            "Boot filesystem (/boot - ext4 recommended for widest GRUB support)",
-            &boot_filesystems,
-            0,
-        )?;
-        let boot_filesystem = boot_filesystems[boot_fs_idx].clone();
+        // Boot filesystem is derived from the data filesystem:
+        // btrfs → btrfs boot (with @boot subvolume), everything else → ext4
+        let boot_filesystem = boot_filesystem_for(&filesystem);
 
         // Encryption option (available on all layouts)
         let encryption = prompt_confirm("Enable LUKS encryption on data partitions?", false)?;
@@ -739,11 +735,6 @@ impl DeploymentConfig {
         println!("\n👤 User Configuration\n");
         let username = prompt_input("Username", None)?;
         let password = prompt_password("User password", true)?;
-        let encrypt_home = prompt_confirm(
-            "Encrypt home directory with gocryptfs? (auto-unlocks on login)",
-            false,
-        )?;
-
         // Network
         let backends = [NetworkBackend::Iwd, NetworkBackend::NetworkManager];
         let net_idx = prompt_select("Network backend", &backends, 0)?;
@@ -861,7 +852,6 @@ impl DeploymentConfig {
                 password,
                 groups: default_groups(),
                 sudoer: true,
-                encrypt_home,
             },
             network: NetworkConfig { backend },
             desktop: DesktopConfig {
@@ -884,7 +874,7 @@ impl DeploymentConfig {
             disk: DiskConfig {
                 device: "/dev/sda".to_string(),
                 filesystem: Filesystem::Btrfs,
-                boot_filesystem: Filesystem::Ext4,
+                boot_filesystem: Filesystem::Btrfs,
                 encryption: false,
                 encryption_password: None,
                 luks_mapper_name: default_luks_mapper_name(),
@@ -922,7 +912,6 @@ impl DeploymentConfig {
                 password: "changeme".to_string(),
                 groups: default_groups(),
                 sudoer: true,
-                encrypt_home: false,
             },
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,

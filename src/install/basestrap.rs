@@ -74,11 +74,13 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Bootloader
     packages.extend(["efibootmgr".to_string(), "grub".to_string()]);
 
-    // Deploytix — install itself and tkg-gui on the target system so they
-    // remain available after first boot for re-deployment and kernel builds.
+    // Deploytix — install itself (CLI + GUI) and tkg-gui on the target
+    // system so they remain available after first boot for re-deployment
+    // and kernel builds.
     // dosfstools is always required for the FAT32 EFI partition.
     packages.extend([
         "deploytix-git".to_string(),
+        "deploytix-gui-git".to_string(),
         "tkg-gui-git".to_string(),
         "dosfstools".to_string(),
     ]);
@@ -167,15 +169,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("thin-provisioning-tools".to_string());
     }
 
-    // gocryptfs encrypted home directory (if enabled)
-    if config.user.encrypt_home {
-        packages.extend([
-            "gocryptfs".to_string(),
-            "pam_mount".to_string(),
-            "fuse2".to_string(),
-        ]);
-    }
-
     // yay AUR helper build dependency
     if config.packages.install_yay {
         packages.push("go".to_string());
@@ -212,7 +205,7 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-git-", "deploytix-gui-git-", "
 
 /// Packages from the [deploytix] repo that are in the basestrap list
 /// and must be resolvable.
-const REQUIRED_CUSTOM_PACKAGES: &[&str] = &["deploytix-git", "tkg-gui-git"];
+const REQUIRED_CUSTOM_PACKAGES: &[&str] = &["deploytix-git", "deploytix-gui-git", "tkg-gui-git"];
 
 /// Path where the ISO live-overlay embeds the deploytix repo.
 const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
@@ -225,10 +218,10 @@ const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
 
 // === Arch Linux [extra] repository support ===
 //
-// Some packages required by deploytix (e.g. pam_mount for encrypted
-// home directories) live in Arch Linux's [extra] repository, which is
-// not enabled by default on Artix.  The functions below detect this
-// and append the repo to the pacman.conf used by basestrap.
+// Some packages required by deploytix may live in Arch Linux's
+// [extra] repository, which is not enabled by default on Artix.
+// The functions below detect this and append the repo to the
+// pacman.conf used by basestrap.
 
 /// Geo-balanced Arch Linux mirror used as a fallback when the
 /// `mirrorlist-arch` file is not available on the host.
@@ -545,8 +538,8 @@ fn conf_has_arch_extra(conf: &str) -> bool {
 /// Ensure the Arch Linux `[extra]` repository is available in the
 /// pacman configuration used by basestrap.
 ///
-/// Packages like `pam_mount` live in Arch's `[extra]` repo and are not
-/// mirrored in the Artix repositories.  If the effective config already
+/// Some packages live in Arch's `[extra]` repo and are not mirrored
+/// in the Artix repositories.  If the effective config already
 /// contains `[extra]` this is a no-op; otherwise a custom pacman.conf
 /// is written (or updated) with the repo appended.
 fn ensure_arch_repos(
@@ -569,7 +562,7 @@ fn ensure_arch_repos(
     }
 
     info!(
-        "Arch [extra] repository not configured; adding it for packages like pam_mount"
+        "Arch [extra] repository not configured; adding it"
     );
 
     let mirror_entry = if Path::new(ARCH_MIRRORLIST_PATH).exists() {
@@ -642,8 +635,8 @@ pub fn run_basestrap_with_retries(
     // Ensure the custom [deploytix] packages are available.
     let custom_conf = prepare_deploytix_repo(cmd)?;
 
-    // Ensure the Arch [extra] repo is available for packages like
-    // pam_mount that are not mirrored in the Artix repositories.
+    // Ensure the Arch [extra] repo is available for packages that
+    // are not mirrored in the Artix repositories.
     let custom_conf = ensure_arch_repos(custom_conf, cmd)?;
 
     let packages = build_package_list(config);
