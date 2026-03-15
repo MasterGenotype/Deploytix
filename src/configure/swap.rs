@@ -103,7 +103,12 @@ echo 1 > /sys/block/zram0/reset 2>/dev/null
     perms.set_mode(0o755);
     fs::set_permissions(&finish_path, perms)?;
 
-    info!("Created runit ZRAM service at {}", sv_dir);
+    // Enable the service by creating a symlink in the default runsvdir
+    let link_dir = format!("{}/etc/runit/runsvdir/default", install_root);
+    fs::create_dir_all(&link_dir)?;
+    std::os::unix::fs::symlink(&format!("/etc/runit/sv/zram"), &format!("{}/zram", link_dir))?;
+
+    info!("Created and enabled runit ZRAM service at {}", sv_dir);
     Ok(())
 }
 
@@ -154,7 +159,12 @@ stop() {{
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms)?;
 
-    info!("Created OpenRC ZRAM service at {}", script_path);
+    // Enable the service in the default runlevel
+    let runlevel_dir = format!("{}/etc/runlevels/default", install_root);
+    fs::create_dir_all(&runlevel_dir)?;
+    std::os::unix::fs::symlink(&format!("/etc/init.d/zram"), &format!("{}/zram", runlevel_dir))?;
+
+    info!("Created and enabled OpenRC ZRAM service at {}", script_path);
     Ok(())
 }
 
@@ -275,7 +285,12 @@ depends-on = mount.local
     let service_path = format!("{}/zram", dinit_dir);
     fs::write(&service_path, service_content)?;
 
-    info!("Created dinit ZRAM service at {}", service_path);
+    // Enable the service by creating a symlink in boot.d
+    let boot_d = format!("{}/etc/dinit.d/boot.d", install_root);
+    fs::create_dir_all(&boot_d)?;
+    std::os::unix::fs::symlink(&format!("/etc/dinit.d/zram"), &format!("{}/zram", boot_d))?;
+
+    info!("Created and enabled dinit ZRAM service at {}", service_path);
     Ok(())
 }
 

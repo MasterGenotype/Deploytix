@@ -1218,6 +1218,7 @@ impl Installer {
             &self.luks_containers,
             &self.config.disk.device,
             layout,
+            &self.config.disk.filesystem,
             &self.config.disk.boot_filesystem,
             INSTALL_ROOT,
         )
@@ -1514,6 +1515,15 @@ impl Installer {
         self.cmd.run("mount", &[&efi_device, &efi_mount])?;
         info!("Mounted {} to {}", efi_device, efi_mount);
 
+        // Enable swap partitions
+        for part in &layout.partitions {
+            if part.is_swap {
+                let swap_device = partition_path(&self.config.disk.device, part.number);
+                info!("Enabling swap on {}", swap_device);
+                self.cmd.run("swapon", &[&swap_device])?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1536,6 +1546,7 @@ impl Installer {
             thin_volumes: &self.lvm_thin_volumes,
             device: &self.config.disk.device,
             layout,
+            filesystem: &self.config.disk.filesystem,
             swap_type: &self.config.disk.swap_type,
             boot_mapped_device: boot_mapped,
             boot_filesystem: &self.config.disk.boot_filesystem,
@@ -1567,11 +1578,12 @@ impl Installer {
                 "none".to_string()
             };
 
+            let lvm_options = crate::install::crypttab::crypttab_options_pub(self.config.disk.integrity);
             let mut content = format!(
                 "# /etc/crypttab: LUKS containers for LVM thin provisioning\n\
                  # <target name>  <source device>  <key file>  <options>\n\
-                 {}  UUID={}  {}  luks\n",
-                container.volume_name, luks_uuid, lvm_keyfile
+                 {}  UUID={}  {}  {}\n",
+                container.mapper_name, luks_uuid, lvm_keyfile, lvm_options
             );
 
             // Add boot LUKS1 entry if boot encryption is enabled

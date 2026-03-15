@@ -485,19 +485,21 @@ pub fn install_autostart_entries(
     fs::set_permissions(&audio_desktop_path, fs::Permissions::from_mode(0o644))?;
     info!("  Installed ~/.config/autostart/audio-startup.desktop");
 
-    // Deploy nm-applet.desktop
-    let nm_desktop = "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Network Manager Applet\n\
-         Exec=/bin/nm-applet\n\
-         Hidden=false\n\
-         NoDisplay=false\n\
-         X-GNOME-Autostart-enabled=true\n\
-         Comment=NetworkManager system tray applet\n";
-    let nm_desktop_path = format!("{}/nm-applet.desktop", autostart_dir);
-    fs::write(&nm_desktop_path, nm_desktop)?;
-    fs::set_permissions(&nm_desktop_path, fs::Permissions::from_mode(0o644))?;
-    info!("  Installed ~/.config/autostart/nm-applet.desktop");
+    // Deploy nm-applet.desktop only when NetworkManager is the chosen backend
+    if config.network.backend == crate::config::NetworkBackend::NetworkManager {
+        let nm_desktop = "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Network Manager Applet\n\
+             Exec=/bin/nm-applet\n\
+             Hidden=false\n\
+             NoDisplay=false\n\
+             X-GNOME-Autostart-enabled=true\n\
+             Comment=NetworkManager system tray applet\n";
+        let nm_desktop_path = format!("{}/nm-applet.desktop", autostart_dir);
+        fs::write(&nm_desktop_path, nm_desktop)?;
+        fs::set_permissions(&nm_desktop_path, fs::Permissions::from_mode(0o644))?;
+        info!("  Installed ~/.config/autostart/nm-applet.desktop");
+    }
 
     // Fix ownership: all deployed files should belong to the user, not root
     let chown_cmd = format!(

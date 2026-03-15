@@ -168,15 +168,34 @@ pub fn wipe_partition_table(cmd: &CommandRunner, device: &str) -> Result<()> {
 
     // Also zero the first and last MB to ensure clean state
     if !cmd.is_dry_run() {
-        let _ = std::process::Command::new("dd")
-            .args([
+        // Zero first MB
+        let _ = cmd.run(
+            "dd",
+            &[
                 "if=/dev/zero",
                 &format!("of={}", device),
                 "bs=1M",
                 "count=1",
                 "conv=notrunc",
-            ])
-            .output();
+            ],
+        );
+
+        // Zero last MB (removes stale backup GPT headers)
+        let device_info = get_device_info(device)?;
+        if device_info.size_bytes > 1024 * 1024 {
+            let last_mb_offset = (device_info.size_bytes / (1024 * 1024)) - 1;
+            let _ = cmd.run(
+                "dd",
+                &[
+                    "if=/dev/zero",
+                    &format!("of={}", device),
+                    "bs=1M",
+                    "count=1",
+                    &format!("seek={}", last_mb_offset),
+                    "conv=notrunc",
+                ],
+            );
+        }
     }
 
     Ok(())

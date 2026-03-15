@@ -250,8 +250,11 @@ pub fn lv_path(vg_name: &str, lv_name: &str) -> String {
 ///
 /// Some tools prefer `/dev/mapper/vg-lv` format over `/dev/vg/lv`.
 /// Both formats work, but mapper paths are canonical for device-mapper.
+/// Device-mapper doubles hyphens in VG/LV names (e.g. `my-vg` becomes `my--vg`).
 pub fn lv_mapper_path(vg_name: &str, lv_name: &str) -> String {
-    format!("/dev/mapper/{}-{}", vg_name, lv_name)
+    let escaped_vg = vg_name.replace('-', "--");
+    let escaped_lv = lv_name.replace('-', "--");
+    format!("/dev/mapper/{}-{}", escaped_vg, escaped_lv)
 }
 
 /// Get LV path in either format

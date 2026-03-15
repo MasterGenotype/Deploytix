@@ -549,6 +549,9 @@ fn configure_grub_defaults(
         // The mountcrypt hook's mount_handler handles all mounting.
         // Set root= to the mapper device so mkinitcpio knows what to pass to mount_handler.
         cmdline_parts.push(format!("root=/dev/mapper/{}", mapper));
+        if uses_subvolumes {
+            cmdline_parts.push("rootflags=subvol=@".to_string());
+        }
         cmdline_parts.push("rw".to_string());
     } else if config.disk.filesystem == crate::config::Filesystem::Zfs {
         // ZFS root: the zfs hook reads the root dataset from the kernel cmdline
