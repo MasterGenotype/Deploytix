@@ -27,6 +27,10 @@ const KDE_PACKAGES: &[&str] = &[
     "kscreen",
     "kwallet-pam",
     "xdg-desktop-portal-kde",
+    // Application store
+    "discover",
+    "flatpak",
+    "kate",
 ];
 
 /// s6-specific service packages for KDE

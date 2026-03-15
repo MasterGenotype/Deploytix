@@ -342,6 +342,50 @@ pub fn install_yay(
     Ok(())
 }
 
+// ======================== AUR Packages (via yay) ========================
+
+/// AUR packages to install via yay when the AUR helper is available.
+const YAY_AUR_PACKAGES: &[&str] = &["zen-browser-bin"];
+
+/// Install additional AUR packages via yay in chroot.
+///
+/// Runs unconditionally when yay is installed.  These are AUR packages
+/// that are not available in the official Artix or Arch repositories.
+pub fn install_aur_packages(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_yay {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+    info!(
+        "Installing AUR packages via yay as {}: {}",
+        username,
+        YAY_AUR_PACKAGES.join(", ")
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install AUR packages via yay as {}: {:?}",
+            username, YAY_AUR_PACKAGES
+        );
+        return Ok(());
+    }
+
+    let pkg_list = YAY_AUR_PACKAGES.join(" ");
+    let install_cmd = format!(
+        "sudo -u {} yay -S --noconfirm --needed {}",
+        username, pkg_list
+    );
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+
+    info!("AUR packages installed successfully");
+    Ok(())
+}
+
 // ======================== Btrfs Snapshot Tools ========================
 
 /// Btrfs snapshot tool packages to install via yay.

@@ -269,6 +269,12 @@ impl Installer {
             self.install_yay()?;
         }
 
+        // Phase 5.35: AUR packages via yay (after yay)
+        if self.config.packages.install_yay {
+            self.report_progress(0.875, "Installing AUR packages (zen-browser)...");
+            self.install_aur_packages()?;
+        }
+
         // Phase 5.4: Btrfs snapshot tools via yay (after yay, requires btrfs)
         if self.config.packages.install_btrfs_tools {
             self.report_progress(0.88, "Installing btrfs snapshot tools (snapper, btrfs-assistant)...");
@@ -802,6 +808,12 @@ impl Installer {
     fn install_yay(&self) -> Result<()> {
         info!("Building and installing yay AUR helper from source");
         configure::packages::install_yay(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install AUR packages via yay
+    fn install_aur_packages(&self) -> Result<()> {
+        info!("Installing AUR packages via yay");
+        configure::packages::install_aur_packages(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay
