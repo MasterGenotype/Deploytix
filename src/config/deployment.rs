@@ -230,6 +230,10 @@ pub struct PackagesConfig {
     /// Requires: install_gaming = true + a desktop environment.
     #[serde(default)]
     pub install_session_switching: bool,
+    /// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay.
+    /// Requires: install_yay = true + btrfs filesystem.
+    #[serde(default)]
+    pub install_btrfs_tools: bool,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -810,6 +814,13 @@ impl DeploymentConfig {
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
 
+        // Btrfs tools (snapper + btrfs-assistant) via yay — only when btrfs + yay
+        let install_btrfs_tools = if install_yay && filesystem == Filesystem::Btrfs {
+            prompt_confirm("Install btrfs snapshot tools (snapper, btrfs-assistant) via yay?", false)?
+        } else {
+            false
+        };
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -863,6 +874,7 @@ impl DeploymentConfig {
                 install_wine,
                 install_gaming,
                 install_session_switching,
+                install_btrfs_tools,
                 gpu_drivers,
             },
         })
@@ -1131,6 +1143,20 @@ impl DeploymentConfig {
             if self.desktop.environment == DesktopEnvironment::None {
                 return Err(DeploytixError::ValidationError(
                     "Session switching requires a desktop environment".to_string(),
+                ));
+            }
+        }
+
+        // Btrfs tools require yay + btrfs filesystem
+        if self.packages.install_btrfs_tools {
+            if !self.packages.install_yay {
+                return Err(DeploytixError::ValidationError(
+                    "Btrfs tools (snapper, btrfs-assistant) require install_yay = true".to_string(),
+                ));
+            }
+            if self.disk.filesystem != Filesystem::Btrfs {
+                return Err(DeploytixError::ValidationError(
+                    "Btrfs tools require btrfs filesystem".to_string(),
                 ));
             }
         }

@@ -98,6 +98,14 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Build tools
     packages.extend(["gcc".to_string(), "rustup".to_string()]);
 
+    // Seat management — always include seatd and its init service package
+    // to resolve provider conflicts (e.g. elogind vs seatd) deterministically.
+    packages.push("seatd".to_string());
+    if config.system.init != crate::config::InitSystem::S6 {
+        let seatd_service = format!("seatd-{}", config.system.init);
+        packages.push(seatd_service);
+    }
+
     // Network packages based on config
     match config.network.backend {
         NetworkBackend::Iwd => {
@@ -127,13 +135,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // Desktop environment prerequisites (display server, seat management, display manager, audio)
+    // Desktop environment prerequisites (display server, display manager, audio)
     if config.desktop.environment != DesktopEnvironment::None {
         packages.extend([
             // Display
             "xorg-server".to_string(),
             "xorg-xinit".to_string(),
-            "seatd".to_string(),
             // Audio - ALSA base
             "alsa-utils".to_string(),
             "alsa-tools".to_string(),
@@ -147,9 +154,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
             // Official s6 service packages from Artix repos
             packages.push("alsa-utils-s6".to_string());
         } else {
-            let seatd_service = format!("seatd-{}", config.system.init);
             let greetd_service = format!("greetd-{}", config.system.init);
-            packages.push(seatd_service);
             packages.push(greetd_service);
         }
     }

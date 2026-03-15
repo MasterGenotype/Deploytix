@@ -269,6 +269,16 @@ impl Installer {
             self.install_yay()?;
         }
 
+        // Phase 5.4: Btrfs snapshot tools via yay (after yay, requires btrfs)
+        if self.config.packages.install_btrfs_tools {
+            self.report_progress(0.88, "Installing btrfs snapshot tools (snapper, btrfs-assistant)...");
+            self.install_btrfs_tools()?;
+        }
+
+        // Phase 5.5: User autostart entries (unconditional, after user creation)
+        self.report_progress(0.89, "Installing user autostart entries...");
+        self.install_autostart_entries()?;
+
         // Phase 6: Finalization
         self.report_progress(0.90, "Finalizing installation...");
         self.finalize()?;
@@ -792,6 +802,18 @@ impl Installer {
     fn install_yay(&self) -> Result<()> {
         info!("Building and installing yay AUR helper from source");
         configure::packages::install_yay(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay
+    fn install_btrfs_tools(&self) -> Result<()> {
+        info!("Installing btrfs snapshot tools via yay");
+        configure::packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install user autostart entries (audio-startup, nm-applet)
+    fn install_autostart_entries(&self) -> Result<()> {
+        info!("Installing user autostart entries");
+        configure::packages::install_autostart_entries(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Finalize installation

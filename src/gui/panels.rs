@@ -610,6 +610,8 @@ pub fn network_desktop_panel(
     desktop_env: &mut DesktopEnvironment,
     install_yay: &mut bool,
     install_wine: &mut bool,
+    install_btrfs_tools: &mut bool,
+    filesystem: &Filesystem,
     gpu_nvidia: &mut bool,
     gpu_amd: &mut bool,
     gpu_intel: &mut bool,
@@ -674,6 +676,14 @@ pub fn network_desktop_panel(
         );
     }
     ui.add_space(8.0);
+
+    // Btrfs tools (only when yay + btrfs are selected)
+    if *install_yay && *filesystem == Filesystem::Btrfs {
+        ui.checkbox(install_btrfs_tools, "Btrfs snapshot tools (snapper, btrfs-assistant) via yay");
+        ui.add_space(8.0);
+    } else {
+        *install_btrfs_tools = false;
+    }
 
     true
 }
@@ -749,6 +759,7 @@ pub fn summary_panel(
     install_gaming: bool,
     install_session_switching: bool,
     install_yay: bool,
+    install_btrfs_tools: bool,
     dry_run: &mut bool,
     confirmed: &mut bool,
     save_config_path: &mut String,
@@ -861,6 +872,10 @@ pub fn summary_panel(
 
             ui.label("yay AUR Helper:");
             ui.label(if install_yay { "Enabled" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("Btrfs Tools:");
+            ui.label(if install_btrfs_tools { "Enabled (snapper, btrfs-assistant)" } else { "Disabled" });
             ui.end_row();
         });
 

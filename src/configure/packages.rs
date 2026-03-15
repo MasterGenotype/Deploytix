@@ -5,10 +5,14 @@
 //! - Wine compatibility layer
 //! - Gaming packages (Steam, gamescope)
 //! - yay AUR helper (built from source)
+//! - Btrfs snapshot tools (snapper, btrfs-assistant) via yay
+//! - User autostart entries (audio-startup, nm-applet)
 
 use crate::config::{DeploymentConfig, GpuDriverVendor};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
 // ======================== GPU Driver Packages ========================
@@ -335,5 +339,129 @@ pub fn install_yay(
     cmd.run_in_chroot(install_root, &build_cmd)?;
 
     info!("yay AUR helper installed successfully");
+    Ok(())
+}
+
+// ======================== Btrfs Snapshot Tools ========================
+
+/// Btrfs snapshot tool packages to install via yay.
+const BTRFS_TOOL_PACKAGES: &[&str] = &["snapper", "btrfs-assistant"];
+
+/// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay in chroot.
+///
+/// Requires yay to already be installed and btrfs as the filesystem.
+pub fn install_btrfs_tools(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_btrfs_tools {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+    info!(
+        "Installing btrfs snapshot tools via yay as {}: {}",
+        username,
+        BTRFS_TOOL_PACKAGES.join(", ")
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install btrfs tools via yay as {}: {:?}",
+            username, BTRFS_TOOL_PACKAGES
+        );
+        return Ok(());
+    }
+
+    let pkg_list = BTRFS_TOOL_PACKAGES.join(" ");
+    let install_cmd = format!(
+        "sudo -u {} yay -S --noconfirm --needed {}",
+        username, pkg_list
+    );
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+
+    info!("Btrfs snapshot tools installed successfully");
+    Ok(())
+}
+
+// ======================== Autostart Entries ========================
+
+/// Embedded audio-startup script (compiled into binary).
+const AUDIO_STARTUP_SCRIPT: &str = include_str!("../resources/autostart/audio-startup.sh");
+
+/// Deploy user autostart entries to the target system.
+///
+/// Installs unconditionally:
+/// - `~/.local/bin/audio-startup` — PipeWire audio startup script
+/// - `~/.config/autostart/audio-startup.desktop` — autostart entry for the above
+/// - `~/.config/autostart/nm-applet.desktop` — autostart entry for nm-applet
+pub fn install_autostart_entries(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let username = &config.user.name;
+    let home = format!("{}/home/{}", install_root, username);
+
+    info!("Installing autostart entries for user {}", username);
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would install audio-startup to /home/{}/.local/bin/", username);
+        println!("  [dry-run] Would install autostart .desktop entries to /home/{}/.config/autostart/", username);
+        return Ok(());
+    }
+
+    // Create directories
+    let bin_dir = format!("{}/.local/bin", home);
+    let autostart_dir = format!("{}/.config/autostart", home);
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&autostart_dir)?;
+
+    // Deploy audio-startup script
+    let script_path = format!("{}/audio-startup", bin_dir);
+    fs::write(&script_path, AUDIO_STARTUP_SCRIPT)?;
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
+    info!("  Installed ~/.local/bin/audio-startup");
+
+    // Deploy audio-startup.desktop
+    let audio_desktop = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Audio Startup\n\
+         Exec=/home/{}/.local/bin/audio-startup\n\
+         Hidden=false\n\
+         NoDisplay=false\n\
+         X-GNOME-Autostart-enabled=true\n\
+         Comment=Start PipeWire audio services\n",
+        username
+    );
+    let audio_desktop_path = format!("{}/audio-startup.desktop", autostart_dir);
+    fs::write(&audio_desktop_path, &audio_desktop)?;
+    fs::set_permissions(&audio_desktop_path, fs::Permissions::from_mode(0o644))?;
+    info!("  Installed ~/.config/autostart/audio-startup.desktop");
+
+    // Deploy nm-applet.desktop
+    let nm_desktop = "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Network Manager Applet\n\
+         Exec=/bin/nm-applet\n\
+         Hidden=false\n\
+         NoDisplay=false\n\
+         X-GNOME-Autostart-enabled=true\n\
+         Comment=NetworkManager system tray applet\n";
+    let nm_desktop_path = format!("{}/nm-applet.desktop", autostart_dir);
+    fs::write(&nm_desktop_path, nm_desktop)?;
+    fs::set_permissions(&nm_desktop_path, fs::Permissions::from_mode(0o644))?;
+    info!("  Installed ~/.config/autostart/nm-applet.desktop");
+
+    // Fix ownership: all deployed files should belong to the user, not root
+    let chown_cmd = format!(
+        "chown -R {0}:{0} /home/{0}/.local /home/{0}/.config",
+        username
+    );
+    cmd.run_in_chroot(install_root, &chown_cmd)?;
+
+    info!("Autostart entries installed successfully");
     Ok(())
 }
