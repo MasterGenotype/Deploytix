@@ -54,8 +54,16 @@ impl Cleaner {
     fn unmount_all(&self) -> Result<()> {
         info!("Unmounting all filesystems under {}", INSTALL_ROOT);
 
-        // Disable swap first
-        let _ = self.cmd.run("swapoff", &["-a"]);
+        // Disable swap devices that were set up for the installation
+        // (avoid disabling all host swap with -a)
+        let mounts = fs::read_to_string("/proc/swaps").unwrap_or_default();
+        for line in mounts.lines().skip(1) {
+            if let Some(device) = line.split_whitespace().next() {
+                if device.starts_with(INSTALL_ROOT) || device.contains("/dev/mapper/Crypt-") {
+                    let _ = self.cmd.run("swapoff", &[device]);
+                }
+            }
+        }
 
         // Get mount points under install root
         let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
@@ -77,7 +85,12 @@ impl Cleaner {
         // Unmount each
         for mp in mount_points {
             info!("Unmounting {}", mp);
-            let _ = self.cmd.run("umount", &[mp]);
+            if let Err(e) = self.cmd.run("umount", &[mp]) {
+                tracing::warn!("Failed to unmount {}: {} (trying lazy unmount)", mp, e);
+                if let Err(e2) = self.cmd.run("umount", &["-l", mp]) {
+                    tracing::warn!("Lazy unmount of {} also failed: {}", mp, e2);
+                }
+            }
         }
 
         Ok(())
@@ -116,7 +129,9 @@ impl Cleaner {
 
             for name in names {
                 info!("Closing {}", name);
-                let _ = self.cmd.run("cryptsetup", &["close", &name]);
+                if let Err(e) = self.cmd.run("cryptsetup", &["close", &name]) {
+                    tracing::warn!("Failed to close LUKS volume {}: {}", name, e);
+                }
             }
         }
 

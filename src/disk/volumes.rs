@@ -179,7 +179,11 @@ impl VolumeSet {
     /// This ordering is required for mounting (parent dirs before children)
     /// and fstab generation.
     pub fn entries_mount_order(&self) -> Vec<&VolumeEntry> {
-        let mut sorted: Vec<&VolumeEntry> = self.entries.iter().collect();
+        let mut sorted: Vec<&VolumeEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !e.mount_point.is_empty())
+            .collect();
         sorted.sort_by_key(|e| e.mount_point.matches('/').count());
         sorted
     }
@@ -188,7 +192,11 @@ impl VolumeSet {
     ///
     /// Used for unmounting.
     pub fn entries_unmount_order(&self) -> Vec<&VolumeEntry> {
-        let mut sorted: Vec<&VolumeEntry> = self.entries.iter().collect();
+        let mut sorted: Vec<&VolumeEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !e.mount_point.is_empty())
+            .collect();
         sorted.sort_by(|a, b| {
             b.mount_point
                 .matches('/')

@@ -19,6 +19,11 @@ fn crypttab_options(integrity: bool) -> &'static str {
     }
 }
 
+/// Public accessor for crypttab options (used by LVM thin crypttab generation).
+pub fn crypttab_options_pub(integrity: bool) -> &'static str {
+    crypttab_options(integrity)
+}
+
 /// Generate /etc/crypttab for the installed system (legacy single-volume)
 ///
 /// If `boot_luks_partition` is Some, an additional entry for the encrypted

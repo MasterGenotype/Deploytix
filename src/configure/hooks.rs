@@ -112,7 +112,7 @@ wait_for_device() {
     local timeout=30
 
     while [ ! -e "$devpath" ] && [ $timeout -gt 0 ]; do
-        sleep 0.5
+        sleep 1
         timeout=$((timeout - 1))
     done
 
@@ -129,7 +129,7 @@ wait_for_mapper() {
     local timeout=20
 
     while [ ! -b "$mapper_path" ] && [ $timeout -gt 0 ]; do
-        sleep 0.5
+        sleep 1
         timeout=$((timeout - 1))
     done
 
@@ -547,7 +547,7 @@ wait_for_block_device() {{
     local timeout=30
 
     while [ ! -b "$device" ] && [ $timeout -gt 0 ]; do
-        sleep 0.5
+        sleep 1
         timeout=$((timeout - 1))
     done
 

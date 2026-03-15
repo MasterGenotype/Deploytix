@@ -653,15 +653,24 @@ impl DeploymentConfig {
 
         // Ensure at least one entry with mount_point == "/"
         if !partitions.iter().any(|e| e.mount_point == "/") {
+            // If another partition already claims the remainder (size_mib == 0),
+            // give the auto-inserted root a default size instead.
+            let has_remainder = partitions.iter().any(|e| e.size_mib == 0);
+            let root_size = if has_remainder { 20480 } else { 0 };
             println!(
-                "  Warning: No root (/) partition defined. Adding one with remaining space."
+                "  Warning: No root (/) partition defined. Adding one with {} space.",
+                if root_size == 0 {
+                    "remaining"
+                } else {
+                    "20 GiB"
+                }
             );
             partitions.insert(
                 0,
                 CustomPartitionEntry {
                     mount_point: "/".to_string(),
                     label: None,
-                    size_mib: 0,
+                    size_mib: root_size,
                     encryption: None,
                 },
             );
@@ -1044,6 +1053,17 @@ impl DeploymentConfig {
             return Err(DeploytixError::ValidationError(format!(
                 "lvm_thin_pool_percent must be between 1 and 100, got {}",
                 self.disk.lvm_thin_pool_percent
+            )));
+        }
+
+        // zram_percent must be 1–100 when ZRAM is used
+        if (self.disk.swap_type == SwapType::ZramOnly
+            || self.disk.swap_type == SwapType::FileZram)
+            && (self.disk.zram_percent == 0 || self.disk.zram_percent > 100)
+        {
+            return Err(DeploytixError::ValidationError(format!(
+                "zram_percent must be between 1 and 100, got {}",
+                self.disk.zram_percent
             )));
         }
 
