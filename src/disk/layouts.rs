@@ -5,7 +5,7 @@
 //! Layouts define the *partition table* only. Storage features (encryption,
 //! LVM thin, subvolumes) are applied as layers by the installer pipeline.
 
-use crate::config::{CustomPartitionEntry, DiskConfig, SwapType};
+use crate::config::{CustomPartitionEntry, DiskConfig, Filesystem, SwapType};
 use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
 
@@ -131,6 +131,11 @@ pub struct PartitionDef {
     pub is_boot_fs: bool,
     /// Additional attributes (e.g., LegacyBIOSBootable)
     pub attributes: Option<String>,
+    /// Btrfs subvolume name for this partition (e.g. "@" for root, "@usr" for /usr).
+    /// When Some, a subvolume is created on this btrfs partition and it is mounted via
+    /// `subvol=<name>` instead of as a raw filesystem.
+    /// Set unconditionally for all data partitions when the filesystem is btrfs.
+    pub subvolume_name: Option<String>,
 }
 
 /// Planned thin volume definition (saved when LVM thin collapses partitions)
@@ -210,6 +215,22 @@ pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
     layout.partitions.iter().filter(|p| p.is_luks).collect()
 }
 
+/// Derive the btrfs subvolume name for a given mount point.
+///
+/// Convention: `@` for root, `@<last-component>` for everything else.
+/// Examples: "/" → "@", "/usr" → "@usr", "/home" → "@home", "/var/log" → "@log"
+pub fn mount_point_to_subvol_name(mount_point: &str) -> String {
+    if mount_point == "/" {
+        "@".to_string()
+    } else {
+        let component = mount_point
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("data");
+        format!("@{}", component)
+    }
+}
+
 /// Compute partition layout from user-defined entries.
 ///
 /// Always prepends EFI + Boot. Swap is prepended only when
@@ -265,6 +286,7 @@ pub fn compute_layout_from_entries(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            subvolume_name: None,
         },
         PartitionDef {
             number: 2,
@@ -278,6 +300,7 @@ pub fn compute_layout_from_entries(
             is_bios_boot: true,
             is_boot_fs: true,
             attributes: None,
+            subvolume_name: None,
         },
     ];
 
@@ -297,6 +320,7 @@ pub fn compute_layout_from_entries(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            subvolume_name: None,
         });
         next_part_num += 1;
     }
@@ -335,6 +359,7 @@ pub fn compute_layout_from_entries(
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            subvolume_name: None,
         });
         next_part_num += 1;
     }
@@ -375,11 +400,57 @@ pub fn compute_layout_from_config(
         apply_encryption_flags(&mut layout);
     }
 
-    // Apply subvolumes if requested.
-    // When subvolumes are active, the raw ROOT partition is not mounted directly;
-    // clear its mount_point so that subvolumes are mounted instead.
-    if disk_config.use_subvolumes {
-        layout.subvolumes = Some(standard_subvolumes());
+    // Apply btrfs subvolumes unconditionally when the filesystem is btrfs.
+    //
+    // Each data partition gets its own named subvolume (e.g. "@" for root,
+    // "@usr" for /usr, "@var" for /var, "@home" for /home).  The boot
+    // partition always gets "@boot" via `mount_boot_btrfs_subvolume` when
+    // `boot_filesystem == Btrfs` (which is derived automatically).
+    //
+    // When the layout has only a ROOT partition and no other data partitions,
+    // `standard_subvolumes()` is used so that @home / @usr / @var / @log all
+    // live inside a single btrfs filesystem — the traditional single-device
+    // subvolume layout.  When separate data partitions exist (the default),
+    // each partition receives exactly one subvolume so that snapshots and
+    // rollbacks can be applied per-partition without interference.
+    if disk_config.filesystem == Filesystem::Btrfs {
+        // Collect mount points of *non-root* data partitions
+        let non_root_data_mounts: std::collections::HashSet<String> = disk_config
+            .partitions
+            .iter()
+            .filter(|p| p.mount_point != "/")
+            .map(|p| p.mount_point.clone())
+            .collect();
+
+        if non_root_data_mounts.is_empty() {
+            // Single-partition layout: all subvolumes live on ROOT.
+            layout.subvolumes = Some(standard_subvolumes());
+        } else {
+            // Multi-partition layout: ROOT gets only "@"; every other data
+            // partition gets its own "@<name>" subvolume.
+            layout.subvolumes = Some(vec![SubvolumeDef {
+                name: "@".to_string(),
+                mount_point: "/".to_string(),
+                mount_options: "defaults,noatime,compress=zstd".to_string(),
+            }]);
+            let default_opts = "defaults,noatime,compress=zstd".to_string();
+            for part in &mut layout.partitions {
+                if part.is_efi || part.is_boot_fs || part.is_swap || part.is_bios_boot {
+                    continue;
+                }
+                if let Some(ref mp) = part.mount_point.clone() {
+                    if mp != "/" {
+                        part.subvolume_name = Some(mount_point_to_subvol_name(mp));
+                        // For /var, also record @log under the same partition
+                        // subvolume (handled at mount time via separate SubvolumeDef).
+                        let _ = default_opts.as_str(); // suppress unused warning
+                    }
+                }
+            }
+        }
+
+        // Clear the ROOT partition's mount_point so it is mounted via its
+        // subvolume rather than as a raw filesystem.
         for part in &mut layout.partitions {
             if part.mount_point.as_deref() == Some("/") && !part.is_efi && !part.is_boot_fs {
                 part.mount_point = None;
@@ -467,6 +538,7 @@ pub fn apply_lvm_thin_to_layout(
         is_bios_boot: false,
         is_boot_fs: false,
         attributes: None,
+        subvolume_name: None,
     });
 
     Ok(ComputedLayout {
@@ -547,6 +619,7 @@ mod tests {
             is_bios_boot: false,
             is_boot_fs: false,
             attributes: None,
+            subvolume_name: None,
         }
     }
 

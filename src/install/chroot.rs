@@ -251,7 +251,9 @@ fn mount_partitions_with_subvolumes(
         }
     }
 
-    // Mount remaining non-subvolume partitions (EFI, swap, etc.)
+    // Mount remaining partitions (EFI, swap, and other btrfs data partitions).
+    // Data partitions that carry a per-partition btrfs subvolume (subvolume_name.is_some())
+    // are mounted via `subvol=@name` instead of a raw filesystem mount.
     for part in &layout.partitions {
         if part.name == "ROOT" || part.is_boot_fs {
             continue; // Already handled above
@@ -263,14 +265,43 @@ fn mount_partitions_with_subvolumes(
             cmd.run("swapon", &[&part_path])?;
         } else if let Some(ref mount_point) = part.mount_point {
             let part_path = partition_path(device, part.number);
-            let full_mount = format!("{}{}", install_root, mount_point);
 
-            if !cmd.is_dry_run() {
-                std::fs::create_dir_all(&full_mount)?;
+            if let Some(ref subvol_name) = part.subvolume_name {
+                // Btrfs partition with a dedicated subvolume: create the subvolume
+                // then mount it with `subvol=@name`.
+                //
+                // /var is special: in addition to its own "@var" subvolume it
+                // also hosts "@log" (→ /var/log) so that logs can be excluded
+                // from snapshots independently.
+                let mut part_subvols = vec![SubvolumeDef {
+                    name: subvol_name.clone(),
+                    mount_point: mount_point.clone(),
+                    mount_options: "defaults,noatime,compress=zstd".to_string(),
+                }];
+                if mount_point == "/var" {
+                    part_subvols.push(SubvolumeDef {
+                        name: "@log".to_string(),
+                        mount_point: "/var/log".to_string(),
+                        mount_options: "defaults,noatime,compress=zstd".to_string(),
+                    });
+                }
+
+                let temp_mount = format!(
+                    "/tmp/deploytix_btrfs_{}",
+                    subvol_name.trim_start_matches('@')
+                );
+                let skip_home = preserve_home && mount_point == "/home";
+                create_btrfs_subvolumes(cmd, &part_path, &part_subvols, &temp_mount, skip_home)?;
+                mount_btrfs_subvolumes(cmd, &part_path, &part_subvols, install_root)?;
+            } else {
+                // Non-btrfs (or plain-mount) partition.
+                let full_mount = format!("{}{}", install_root, mount_point);
+                if !cmd.is_dry_run() {
+                    std::fs::create_dir_all(&full_mount)?;
+                }
+                info!("Mounting {} to {}", part_path, full_mount);
+                cmd.run("mount", &[&part_path, &full_mount])?;
             }
-
-            info!("Mounting {} to {}", part_path, full_mount);
-            cmd.run("mount", &[&part_path, &full_mount])?;
         }
     }
 

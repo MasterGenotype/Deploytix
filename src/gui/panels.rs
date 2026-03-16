@@ -139,13 +139,8 @@ pub fn disk_config_panel(
         ui.add_space(8.0);
     }
 
-    // Subvolumes (btrfs only)
-    if *filesystem == Filesystem::Btrfs {
-        ui.checkbox(use_subvolumes, "Use btrfs subvolumes (@, @home, @var, ...)");
-        ui.add_space(8.0);
-    } else {
-        *use_subvolumes = false;
-    }
+    // Subvolumes are enabled unconditionally for btrfs; no user opt-in required.
+    *use_subvolumes = *filesystem == Filesystem::Btrfs;
 
     // Preserve home (reinstall without overwriting /home)
     ui.checkbox(preserve_home, "Preserve existing /home (reinstall without overwriting user data)");

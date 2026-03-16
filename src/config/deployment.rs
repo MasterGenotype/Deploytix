@@ -101,7 +101,10 @@ pub struct DiskConfig {
     /// Enable keyfile-based automatic unlocking (default: true when encryption enabled)
     #[serde(default = "default_true")]
     pub keyfile_enabled: bool,
-    /// Use btrfs subvolumes within partitions (Standard layout only)
+    /// Use btrfs subvolumes within partitions.
+    /// Automatically set to true whenever `filesystem == Btrfs`; no manual
+    /// opt-in is required.  Kept as a serialisable field for backwards
+    /// compatibility with existing configuration files.
     #[serde(default)]
     pub use_subvolumes: bool,
 
@@ -694,12 +697,8 @@ impl DeploymentConfig {
         // Encryption option (available on all layouts)
         let encryption = prompt_confirm("Enable LUKS encryption on data partitions?", false)?;
 
-        // Subvolumes option (available on any layout with btrfs)
-        let use_subvolumes = if filesystem == Filesystem::Btrfs {
-            prompt_confirm("Use btrfs subvolumes within partitions?", false)?
-        } else {
-            false
-        };
+        // Subvolumes are enabled unconditionally for btrfs. No prompt needed.
+        let use_subvolumes = filesystem == Filesystem::Btrfs;
 
         // Integrity (dm-integrity alongside LUKS2 encryption)
         let integrity = if encryption {
