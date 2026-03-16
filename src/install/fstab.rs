@@ -5,7 +5,7 @@ use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::{get_partition_uuid, ZFS_BOOT_DATASET, ZFS_DATASETS};
-use crate::disk::layouts::{multi_volume_subvolumes, ComputedLayout};
+use crate::disk::layouts::{multi_volume_subvolumes, mount_point_to_subvol_name, ComputedLayout};
 use crate::disk::lvm::{lv_path, ThinVolumeDef};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -259,10 +259,10 @@ fn generate_fstab_with_subvolumes(
         ));
     }
 
-    // Add other partitions (BOOT, EFI, swap, etc.)
+    // Add other partitions (BOOT, EFI, swap, and per-partition btrfs subvolumes).
     for part in &layout.partitions {
         if part.name == "ROOT" {
-            continue; // Already handled via subvolumes
+            continue; // Already handled via subvolumes above
         }
 
         let part_path = partition_path(device, part.number);
@@ -293,13 +293,29 @@ fn generate_fstab_with_subvolumes(
                 ));
             }
         } else if let Some(ref mount_point) = part.mount_point {
-            // Any remaining partition with a mount point is a regular data partition.
-            let (fstype, options) = fs_fstab_entry(filesystem);
-            let pass = fsck_pass(filesystem, mount_point);
-            content.push_str(&format!(
-                "\nUUID={}  {}  {}  {}  0  {}\n",
-                uuid, mount_point, fstype, options, pass
-            ));
+            if let Some(ref subvol_name) = part.subvolume_name {
+                // Btrfs data partition with its own dedicated subvolume.
+                content.push_str(&format!(
+                    "\n# {} partition (btrfs {} subvolume)\nUUID={}  {}  btrfs  subvol={},defaults,noatime,compress=zstd  0  0\n",
+                    part.name, subvol_name, uuid, mount_point, subvol_name
+                ));
+                // /var also hosts @log (→ /var/log) on the same btrfs filesystem.
+                if mount_point == "/var" {
+                    let log_subvol = mount_point_to_subvol_name("/var/log");
+                    content.push_str(&format!(
+                        "UUID={}  /var/log  btrfs  subvol={},defaults,noatime,compress=zstd  0  0\n",
+                        uuid, log_subvol
+                    ));
+                }
+            } else {
+                // Non-btrfs data partition or btrfs partition without a named subvolume.
+                let (fstype, options) = fs_fstab_entry(filesystem);
+                let pass = fsck_pass(filesystem, mount_point);
+                content.push_str(&format!(
+                    "\nUUID={}  {}  {}  {}  0  {}\n",
+                    uuid, mount_point, fstype, options, pass
+                ));
+            }
         }
     }
 
