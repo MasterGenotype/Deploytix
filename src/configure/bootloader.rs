@@ -48,6 +48,25 @@ pub fn install_bootloader_with_layout(
     }
 }
 
+/// Get the swap partition UUID from the layout, if a swap partition exists.
+fn get_swap_uuid_from_layout(
+    cmd: &CommandRunner,
+    device: &str,
+    layout: &ComputedLayout,
+) -> Result<Option<String>> {
+    if let Some(swap_part) = layout.partitions.iter().find(|p| p.is_swap) {
+        let swap_device = partition_path(device, swap_part.number);
+        let uuid = if cmd.is_dry_run() {
+            "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
+        } else {
+            get_partition_uuid(&swap_device)?
+        };
+        Ok(Some(uuid))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Install GRUB bootloader (non-encrypted, uses layout detection)
 fn install_grub(
     cmd: &CommandRunner,
@@ -85,6 +104,7 @@ fn install_grub(
 
     // Configure GRUB defaults
     let uses_subvolumes = config.disk.use_subvolumes;
+    let swap_uuid = get_swap_uuid_from_layout(cmd, device, layout)?;
     configure_grub_defaults(
         cmd,
         config,
@@ -93,6 +113,7 @@ fn install_grub(
         uses_subvolumes,
         false,
         install_root,
+        swap_uuid.as_deref(),
     )?;
 
     run_grub_install(cmd, device, install_root)?;
@@ -117,6 +138,9 @@ fn install_grub_with_layout(
     // Find LUKS partition from layout
     let luks_part = layout.partitions.iter().find(|p| p.is_luks);
 
+    // Get swap UUID for hibernation resume parameter
+    let swap_uuid = get_swap_uuid_from_layout(cmd, device, layout)?;
+
     if config.disk.use_lvm_thin && config.disk.encryption {
         // LVM thin + encryption: encrypt hook needs cryptdevice= parameter,
         // root is on an LVM LV, not a mapper device
@@ -131,7 +155,7 @@ fn install_grub_with_layout(
         } else {
             get_luks_uuid(&luks_device)?
         };
-        configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root)?;
+        configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root, swap_uuid.as_deref())?;
     } else if config.disk.use_lvm_thin {
         // LVM thin without encryption: root is on an LVM LV
         let vg_name = &config.disk.lvm_vg_name;
@@ -149,6 +173,7 @@ fn install_grub_with_layout(
             layout.uses_subvolumes(),
             false,
             install_root,
+            swap_uuid.as_deref(),
         )?;
     } else if let Some(luks) = luks_part {
         // Multi-LUKS: configure with mapper name for root
@@ -166,6 +191,7 @@ fn install_grub_with_layout(
             layout.uses_subvolumes(),
             config.disk.boot_encryption,
             install_root,
+            swap_uuid.as_deref(),
         )?;
     } else {
         // No LUKS, no LVM thin — should not reach here from install_bootloader_with_layout
@@ -525,6 +551,7 @@ fn configure_grub_defaults(
     uses_subvolumes: bool,
     boot_encryption: bool,
     install_root: &str,
+    swap_uuid: Option<&str>,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
 
@@ -572,8 +599,9 @@ fn configure_grub_defaults(
 
     // Add resume for hibernation
     if config.system.hibernation {
-        // TODO: Get swap UUID and add resume parameter
-        // cmdline_parts.push(format!("resume=UUID={}", swap_uuid));
+        if let Some(uuid) = swap_uuid {
+            cmdline_parts.push(format!("resume=UUID={}", uuid));
+        }
     }
 
     let cmdline = cmdline_parts.join(" ");
@@ -615,6 +643,7 @@ fn configure_grub_defaults_lvm_thin(
     config: &DeploymentConfig,
     luks_uuid: &str,
     install_root: &str,
+    swap_uuid: Option<&str>,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
     let vg_name = &config.disk.lvm_vg_name;
@@ -651,7 +680,9 @@ fn configure_grub_defaults_lvm_thin(
 
     // Add resume for hibernation
     if config.system.hibernation {
-        // TODO: Get swap UUID and add resume parameter
+        if let Some(uuid) = swap_uuid {
+            cmdline_parts.push(format!("resume=UUID={}", uuid));
+        }
     }
 
     let cmdline = cmdline_parts.join(" ");
