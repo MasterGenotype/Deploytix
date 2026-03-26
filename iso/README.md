@@ -57,7 +57,7 @@ The ISO is written to `~/artools-workspace/iso/deploytix/`.
 
 ## What the Script Does
 
-1. **Builds deploytix packages** — runs `makepkg` in `pkg/` and clones/builds `tkg-gui-git`
+1. **Builds deploytix packages** — runs `makepkg` in `pkg/` and clones/builds `tkg-gui-git` and `modular-git`
 2. **Creates a local pacman repository** — copies packages to `/var/lib/artools/repos/deploytix/` and runs `repo-add`
 3. **Configures pacman** — installs a custom `iso-x86_64.conf` in `~/.config/artools/pacman.conf.d/` with a `[deploytix]` repo pointing to the local repository
 4. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`

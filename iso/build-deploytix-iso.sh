@@ -45,6 +45,12 @@ TKG_GUI_REPO_URL="https://github.com/MasterGenotype/tkg-gui.git"
 TKG_GUI_LOCAL_DIR=""   # Resolved to sibling repo if present
 TKG_GUI_CLONE_DIR=""
 TKG_GUI_PKG_DIR=""
+MODULAR_REPO_URL="https://github.com/MasterGenotype/Modular-1.git"
+MODULAR_LOCAL_DIR=""   # Resolved to sibling repo if present
+MODULAR_CLONE_DIR=""
+MODULAR_PKG_DIR=""
+UNL0KR_LOCAL_DIR=""    # Resolved to sibling unl0kr repo if present
+UNL0KR_PKG_DIR=""
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -119,6 +125,19 @@ resolve_paths() {
         TKG_GUI_PKG_DIR="${TKG_GUI_LOCAL_DIR}/pkg"
     else
         TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
+    fi
+    MODULAR_LOCAL_DIR="$(dirname "${REPO_ROOT}")/Modular-1"
+    MODULAR_CLONE_DIR="${WORKSPACE_DIR}/modular-src"
+    if [[ -d "${MODULAR_LOCAL_DIR}/pkg" && -f "${MODULAR_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
+        MODULAR_PKG_DIR="${MODULAR_LOCAL_DIR}/pkg"
+    else
+        MODULAR_PKG_DIR="${MODULAR_CLONE_DIR}/pkg"
+    fi
+    UNL0KR_LOCAL_DIR="$(dirname "${REPO_ROOT}")/unl0kr"
+    if [[ -d "${UNL0KR_LOCAL_DIR}/pkg" && -f "${UNL0KR_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
+        UNL0KR_PKG_DIR="${UNL0KR_LOCAL_DIR}/pkg"
+    else
+        UNL0KR_PKG_DIR=""
     fi
 }
 
@@ -266,9 +285,15 @@ build_packages() {
         if [[ -d "${TKG_GUI_PKG_DIR}" ]]; then
             count=$(( count + $(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
         fi
+        if [[ -n "${MODULAR_PKG_DIR}" && -d "${MODULAR_PKG_DIR}" ]]; then
+            count=$(( count + $(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        fi
+        if [[ -n "${UNL0KR_PKG_DIR}" && -d "${UNL0KR_PKG_DIR}" ]]; then
+            count=$(( count + $(find "${UNL0KR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        fi
 
         if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/ or ${TKG_GUI_PKG_DIR}/ and -s (skip rebuild) was set"
+            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, ${MODULAR_PKG_DIR}/, or ${UNL0KR_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
 
         msg "Skipping package build (-s); reusing existing packages"
@@ -294,6 +319,7 @@ build_packages() {
     fi
 
     build_tkg_gui_packages
+    build_modular_packages
 }
 
 build_tkg_gui_packages() {
@@ -331,6 +357,37 @@ build_tkg_gui_packages() {
     msg2 "Built ${count} tkg-gui package(s)"
 }
 
+build_modular_packages() {
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would build modular from ${MODULAR_PKG_DIR}"
+        return 0
+    fi
+
+    msg "Building Modular packages..."
+
+    if [[ "${MODULAR_PKG_DIR}" == "${MODULAR_LOCAL_DIR}/pkg" ]]; then
+        msg2 "Using local Modular repo at ${MODULAR_LOCAL_DIR}"
+    elif [[ -d "${MODULAR_CLONE_DIR}/.git" ]]; then
+        msg2 "Updating Modular repository..."
+        git -C "${MODULAR_CLONE_DIR}" pull --ff-only
+    else
+        msg2 "Cloning Modular repository..."
+        git clone "${MODULAR_REPO_URL}" "${MODULAR_CLONE_DIR}"
+    fi
+
+    [[ -f "${MODULAR_PKG_DIR}/PKGBUILD" ]] \
+        || die "Modular pkg/PKGBUILD not found at ${MODULAR_PKG_DIR}/PKGBUILD"
+
+    pushd "${MODULAR_PKG_DIR}" >/dev/null
+    makepkg -sf --noconfirm
+    popd >/dev/null
+
+    local count
+    count=$(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
+    (( count > 0 )) || die "makepkg produced no Modular packages"
+    msg2 "Built ${count} Modular package(s)"
+}
+
 # ── Step C: Create local pacman repository ───────────────────────────────────
 create_local_repo() {
     msg "Creating local pacman repository..."
@@ -347,7 +404,7 @@ create_local_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${UNL0KR_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
@@ -437,6 +494,11 @@ reset_artifacts() {
         msg2 "Removed tkg-gui clone: ${TKG_GUI_CLONE_DIR}"
     fi
 
+    if [[ -d "${MODULAR_CLONE_DIR}" && "${MODULAR_PKG_DIR}" != "${MODULAR_LOCAL_DIR}/pkg" ]]; then
+        rm -rf "${MODULAR_CLONE_DIR}"
+        msg2 "Removed Modular clone: ${MODULAR_CLONE_DIR}"
+    fi
+
     msg "Reset complete"
 }
 
@@ -519,7 +581,7 @@ generate_gui_profile() {
 
     cp "$de_profile" "$dest/profile.yaml"
 
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "unl0kr"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
@@ -543,7 +605,7 @@ embed_live_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${UNL0KR_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
