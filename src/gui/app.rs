@@ -138,6 +138,7 @@ pub struct DeploytixGui {
     install_gaming: bool,
     install_session_switching: bool,
     install_btrfs_tools: bool,
+    install_modular: bool,
     gpu_nvidia: bool,
     gpu_amd: bool,
     gpu_intel: bool,
@@ -207,6 +208,7 @@ impl Default for DeploytixGui {
             install_gaming: false,
             install_session_switching: false,
             install_btrfs_tools: false,
+            install_modular: false,
             gpu_nvidia: false,
             gpu_amd: false,
             gpu_intel: false,
@@ -318,6 +320,7 @@ impl DeploytixGui {
                 install_gaming: self.install_gaming,
                 install_session_switching: self.install_session_switching,
                 install_btrfs_tools: self.install_btrfs_tools,
+                install_modular: self.install_modular,
                 gpu_drivers: {
                     let mut drivers = Vec::new();
                     if self.gpu_nvidia {
@@ -623,6 +626,7 @@ impl eframe::App for DeploytixGui {
                     &mut self.install_yay,
                     &mut self.install_wine,
                     &mut self.install_btrfs_tools,
+                    &mut self.install_modular,
                     &self.filesystem,
                     &mut self.gpu_nvidia,
                     &mut self.gpu_amd,
@@ -666,6 +670,7 @@ impl eframe::App for DeploytixGui {
                         self.install_session_switching,
                         self.install_yay,
                         self.install_btrfs_tools,
+                        self.install_modular,
                         &mut self.dry_run,
                         &mut self.confirmed,
                         &mut self.save_config_path,

@@ -606,6 +606,7 @@ pub fn network_desktop_panel(
     install_yay: &mut bool,
     install_wine: &mut bool,
     install_btrfs_tools: &mut bool,
+    install_modular: &mut bool,
     filesystem: &Filesystem,
     gpu_nvidia: &mut bool,
     gpu_amd: &mut bool,
@@ -679,6 +680,16 @@ pub fn network_desktop_panel(
     } else {
         *install_btrfs_tools = false;
     }
+
+    // Modular mod manager
+    ui.checkbox(install_modular, "Modular mod manager (CLI + GUI for NexusMods, GameBanana)");
+    if *install_modular {
+        ui.label(
+            RichText::new("Extensible mod manager with plugin support for downloading and organizing game mods.")
+                .weak(),
+        );
+    }
+    ui.add_space(8.0);
 
     true
 }
@@ -755,6 +766,7 @@ pub fn summary_panel(
     install_session_switching: bool,
     install_yay: bool,
     install_btrfs_tools: bool,
+    install_modular: bool,
     dry_run: &mut bool,
     confirmed: &mut bool,
     save_config_path: &mut String,
@@ -871,6 +883,10 @@ pub fn summary_panel(
 
             ui.label("Btrfs Tools:");
             ui.label(if install_btrfs_tools { "Enabled (snapper, btrfs-assistant)" } else { "Disabled" });
+            ui.end_row();
+
+            ui.label("Modular Mod Manager:");
+            ui.label(if install_modular { "Enabled" } else { "Disabled" });
             ui.end_row();
         });
 

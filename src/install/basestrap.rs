@@ -162,6 +162,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Encryption tools (if enabled)
     if config.disk.encryption {
         packages.push("cryptsetup".to_string());
+        packages.push("unl0kr".to_string());
     }
 
     // lvm2 provides device-mapper, required by mkinitcpio encrypt/lvm2 hooks
@@ -177,6 +178,11 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // yay AUR helper build dependency
     if config.packages.install_yay {
         packages.push("go".to_string());
+    }
+
+    // Modular mod manager (optional)
+    if config.packages.install_modular {
+        packages.push("modular-git".to_string());
     }
 
     // SecureBoot tools (if enabled)
@@ -206,7 +212,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 
 /// Filename prefixes (with trailing dash) for package archives that
 /// belong to the custom [deploytix] repository.
-const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-git-", "deploytix-gui-git-", "tkg-gui-git-"];
+const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-git-", "deploytix-gui-git-", "tkg-gui-git-", "modular-git-", "unl0kr-"];
 
 /// Packages from the [deploytix] repo that are in the basestrap list
 /// and must be resolvable.
@@ -356,9 +362,11 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             .and_then(|p| p.parent()) // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
-            // Sibling tkg-gui repo (mirrors the ISO build script's TKG_GUI_LOCAL_DIR).
+            // Sibling tkg-gui, Modular-1, and unl0kr repos.
             if let Some(parent) = repo_root.parent() {
                 search_dirs.push(parent.join("tkg-gui/pkg"));
+                search_dirs.push(parent.join("Modular-1/pkg"));
+                search_dirs.push(parent.join("unl0kr/pkg"));
             }
         }
     }
@@ -367,6 +375,8 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     if let Some(home) = resolve_invoking_user_home() {
         search_dirs.push(home.join(".gitrepos/Deploytix/pkg"));
         search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
+        search_dirs.push(home.join(".gitrepos/Modular-1/pkg"));
+        search_dirs.push(home.join(".gitrepos/unl0kr/pkg"));
         search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
     }
 

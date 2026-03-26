@@ -237,6 +237,9 @@ pub struct PackagesConfig {
     /// Requires: install_yay = true + btrfs filesystem.
     #[serde(default)]
     pub install_btrfs_tools: bool,
+    /// Install Modular mod manager (CLI + GUI) for game mod management
+    #[serde(default)]
+    pub install_modular: bool,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -829,6 +832,8 @@ impl DeploymentConfig {
             false
         };
 
+        let install_modular = prompt_confirm("Install Modular mod manager? (CLI + GUI for NexusMods, GameBanana)", false)?;
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -883,6 +888,7 @@ impl DeploymentConfig {
                 install_gaming,
                 install_session_switching,
                 install_btrfs_tools,
+                install_modular,
                 gpu_drivers,
             },
         })
