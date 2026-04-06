@@ -113,6 +113,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
+    // Start looping theme music (runs in background; stops when handle drops)
+    let _audio = resources::audio::play_theme_loop();
+
     let dry_run = cli.dry_run;
     if dry_run {
         info!("Running in dry-run mode - no changes will be made");
