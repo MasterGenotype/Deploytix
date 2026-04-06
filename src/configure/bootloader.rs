@@ -416,6 +416,7 @@ pub fn create_grub_reinstall_hook(
         r#"[Trigger]
 Operation = Install
 Operation = Upgrade
+Operation = Remove
 Type = Path
 Target = usr/lib/modules/*/vmlinuz
 Target = usr/lib/grub/*
