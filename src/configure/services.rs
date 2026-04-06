@@ -120,8 +120,12 @@ fn install_service_packages(
     Ok(())
 }
 
-/// Enable a service for the configured init system
-fn enable_service(
+/// Enable a service for the configured init system.
+///
+/// Also called directly from `installer.rs` for services whose package and
+/// service-file setup is handled by a dedicated install function (HHD, Decky
+/// Loader) rather than by the generic `install_service_packages()` path.
+pub(crate) fn enable_service(
     cmd: &CommandRunner,
     init: &InitSystem,
     service: &str,

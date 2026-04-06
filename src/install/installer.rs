@@ -285,6 +285,36 @@ impl Installer {
         self.report_progress(0.89, "Installing user autostart entries...");
         self.install_autostart_entries()?;
 
+        // Phase 5.6: Gaming sysctl performance tweaks
+        if self.config.packages.sysctl_gaming_tweaks {
+            self.report_progress(0.895, "Applying gaming sysctl performance settings...");
+            self.install_sysctl_gaming()?;
+        }
+
+        // Phase 5.7: Handheld Daemon (HHD)
+        if self.config.packages.install_hhd {
+            self.report_progress(0.910, "Installing Handheld Daemon (HHD)...");
+            self.install_hhd()?;
+            configure::services::enable_service(
+                &self.cmd,
+                &self.config.system.init,
+                "hhd",
+                INSTALL_ROOT,
+            )?;
+        }
+
+        // Phase 5.8: Decky Loader
+        if self.config.packages.install_decky_loader {
+            self.report_progress(0.925, "Installing Decky Loader...");
+            self.install_decky_loader()?;
+            configure::services::enable_service(
+                &self.cmd,
+                &self.config.system.init,
+                "plugin_loader",
+                INSTALL_ROOT,
+            )?;
+        }
+
         // Phase 6: Finalization
         self.report_progress(0.90, "Finalizing installation...");
         self.finalize()?;
@@ -826,6 +856,24 @@ impl Installer {
     fn install_autostart_entries(&self) -> Result<()> {
         info!("Installing user autostart entries");
         configure::packages::install_autostart_entries(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Write /etc/sysctl.d/99-gaming.conf with gaming performance tweaks
+    fn install_sysctl_gaming(&self) -> Result<()> {
+        info!("Installing gaming sysctl tweaks");
+        configure::packages::install_sysctl_gaming(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install Handheld Daemon (HHD) via yay + init-specific service file
+    fn install_hhd(&self) -> Result<()> {
+        info!("Installing Handheld Daemon (HHD)");
+        configure::packages::install_hhd(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install Decky Loader + init-specific service file
+    fn install_decky_loader(&self) -> Result<()> {
+        info!("Installing Decky Loader");
+        configure::packages::install_decky_loader(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Finalize installation

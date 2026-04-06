@@ -240,6 +240,20 @@ pub struct PackagesConfig {
     /// Install Modular mod manager (CLI + GUI) for game mod management
     #[serde(default)]
     pub install_modular: bool,
+    /// Apply gaming/handheld sysctl performance tweaks.
+    /// Writes /etc/sysctl.d/99-gaming.conf with vm.max_map_count, swappiness, etc.
+    #[serde(default)]
+    pub sysctl_gaming_tweaks: bool,
+    /// Install Handheld Daemon (HHD) — gamepad remapping, TDP control, per-game profiles.
+    /// Requires: install_yay = true (AUR packages: hhd, adjustor, hhd-ui).
+    /// Writes an init-specific service file for runit/s6/dinit/openrc.
+    #[serde(default)]
+    pub install_hhd: bool,
+    /// Install Decky Loader (Steam plugin framework).
+    /// Requires: install_gaming = true. Downloads the PluginLoader binary at install time.
+    /// Writes an init-specific service file for runit/s6/dinit/openrc.
+    #[serde(default)]
+    pub install_decky_loader: bool,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -834,6 +848,32 @@ impl DeploymentConfig {
 
         let install_modular = prompt_confirm("Install Modular mod manager? (CLI + GUI for NexusMods, GameBanana)", false)?;
 
+        // sysctl gaming tweaks (standalone — no prerequisites)
+        let sysctl_gaming_tweaks = prompt_confirm(
+            "Apply gaming sysctl performance tweaks? (vm.max_map_count, swappiness, etc.)",
+            false,
+        )?;
+
+        // HHD — requires yay (AUR)
+        let install_hhd = if install_yay {
+            prompt_confirm(
+                "Install Handheld Daemon (HHD)? (gamepad remapping, TDP, profiles — for handhelds)",
+                false,
+            )?
+        } else {
+            false
+        };
+
+        // Decky Loader — requires gaming packages (Steam must be present)
+        let install_decky_loader = if install_gaming {
+            prompt_confirm(
+                "Install Decky Loader? (Steam plugin framework — downloads binary at install time)",
+                false,
+            )?
+        } else {
+            false
+        };
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -889,6 +929,9 @@ impl DeploymentConfig {
                 install_session_switching,
                 install_btrfs_tools,
                 install_modular,
+                sysctl_gaming_tweaks,
+                install_hhd,
+                install_decky_loader,
                 gpu_drivers,
             },
         })

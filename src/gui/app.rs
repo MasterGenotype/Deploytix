@@ -121,6 +121,9 @@ impl DeploytixGui {
                 install_session_switching: self.packages.install_session_switching,
                 install_btrfs_tools: self.packages.install_btrfs_tools,
                 install_modular: self.packages.install_modular,
+                sysctl_gaming_tweaks: self.packages.sysctl_gaming_tweaks,
+                install_hhd: self.packages.install_hhd,
+                install_decky_loader: self.packages.install_decky_loader,
                 gpu_drivers: {
                     let mut drivers = Vec::new();
                     if self.packages.gpu_nvidia {

@@ -7,6 +7,9 @@
 //! - yay AUR helper (built from source)
 //! - Btrfs snapshot tools (snapper, btrfs-assistant) via yay
 //! - User autostart entries (audio-startup, nm-applet)
+//! - Gaming sysctl performance tweaks (/etc/sysctl.d/99-gaming.conf)
+//! - Handheld Daemon (HHD) via AUR + init-specific service file
+//! - Decky Loader (Steam plugin framework) + init-specific service file
 
 use crate::config::{DeploymentConfig, GpuDriverVendor};
 use crate::utils::command::CommandRunner;
@@ -509,5 +512,446 @@ pub fn install_autostart_entries(
     cmd.run_in_chroot(install_root, &chown_cmd)?;
 
     info!("Autostart entries installed successfully");
+    Ok(())
+}
+
+// ======================== Gaming sysctl Tweaks ========================
+
+/// Sysctl configuration content for gaming/handheld performance.
+const GAMING_SYSCTL_CONF: &str = "\
+# Gaming performance tweaks — written by Deploytix
+#
+# vm.max_map_count: critical for Windows games via Proton/WINE.
+# Matches the Steam Deck default (MAX_INT - 5).
+vm.max_map_count = 2147483642
+
+# Reduce kernel swap-out aggressiveness for interactive/gaming workloads.
+vm.swappiness = 10
+
+# Improve CPU scheduling responsiveness for desktop and gaming tasks.
+kernel.sched_autogroup_enabled = 1
+
+# Enable TCP Fast Open (client + server) for improved network latency.
+net.ipv4.tcp_fastopen = 3
+
+# Raise the maximum number of open file descriptors.
+fs.file-max = 524288
+";
+
+/// Write `/etc/sysctl.d/99-gaming.conf` to the target system with
+/// gaming/handheld performance tuning parameters.
+pub fn install_sysctl_gaming(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.sysctl_gaming_tweaks {
+        return Ok(());
+    }
+
+    info!("Writing gaming sysctl configuration");
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would write /etc/sysctl.d/99-gaming.conf");
+        println!("    vm.max_map_count = 2147483642");
+        println!("    vm.swappiness    = 10");
+        return Ok(());
+    }
+
+    let sysctl_dir = format!("{}/etc/sysctl.d", install_root);
+    fs::create_dir_all(&sysctl_dir)?;
+
+    let conf_path = format!("{}/99-gaming.conf", sysctl_dir);
+    fs::write(&conf_path, GAMING_SYSCTL_CONF)?;
+    fs::set_permissions(&conf_path, fs::Permissions::from_mode(0o644))?;
+
+    info!("  Written /etc/sysctl.d/99-gaming.conf");
+    Ok(())
+}
+
+// ======================== Handheld Daemon (HHD) ========================
+
+/// Install Handheld Daemon (HHD) via yay and write an init-specific service
+/// file so that HHD starts automatically on boot.
+///
+/// HHD is available on the AUR as `hhd`, `adjustor`, and `hhd-ui`.
+/// Upstream only ships a systemd service; we generate the appropriate file
+/// for whichever init system the user has chosen.
+///
+/// Requires `install_yay = true` — the caller (`installer.rs`) checks this.
+pub fn install_hhd(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_hhd {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+
+    info!("Installing Handheld Daemon (HHD) for user {}", username);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install AUR packages via yay as {}: hhd adjustor hhd-ui",
+            username
+        );
+        println!("  [dry-run] Would write /etc/modules-load.d/hhd.conf (uhid)");
+        println!(
+            "  [dry-run] Would write HHD service file for init: {}",
+            config.system.init
+        );
+        return Ok(());
+    }
+
+    // Step 1: Install AUR packages via yay
+    let install_cmd = format!(
+        "sudo -u {} yay -S --noconfirm --needed hhd adjustor hhd-ui",
+        username
+    );
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+    info!("  HHD AUR packages installed");
+
+    // Step 2: Ensure the uhid kernel module is loaded at boot.
+    // uhid provides a user-space HID interface used by HHD to emulate
+    // controllers; without it HHD gets permission errors on startup.
+    let modules_dir = format!("{}/etc/modules-load.d", install_root);
+    fs::create_dir_all(&modules_dir)?;
+    let modules_conf = format!("{}/hhd.conf", modules_dir);
+    fs::write(
+        &modules_conf,
+        "# Load uhid on startup — required by Handheld Daemon (HHD)\nuhid\n",
+    )?;
+    fs::set_permissions(&modules_conf, fs::Permissions::from_mode(0o644))?;
+    info!("  Written /etc/modules-load.d/hhd.conf");
+
+    // Step 3: Write init-specific service file
+    write_hhd_service(config, install_root, username)?;
+
+    info!("HHD installation complete");
+    Ok(())
+}
+
+/// Write the HHD service file for the configured init system.
+fn write_hhd_service(
+    config: &DeploymentConfig,
+    install_root: &str,
+    username: &str,
+) -> Result<()> {
+    use crate::config::InitSystem;
+
+    match config.system.init {
+        InitSystem::Runit => {
+            let sv_dir = format!("{}/etc/runit/sv/hhd", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 exec 2>&1\n\
+                 exec chpst -u {user} /usr/bin/hhd --user {user}\n",
+                user = username
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            // log/run — pipe to logger
+            let log_dir = format!("{}/log", sv_dir);
+            fs::create_dir_all(&log_dir)?;
+            let log_run = "#!/bin/sh\nexec svlogd -tt /var/log/hhd\n";
+            let log_run_path = format!("{}/run", log_dir);
+            fs::write(&log_run_path, log_run)?;
+            fs::set_permissions(&log_run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written runit service: /etc/runit/sv/hhd/");
+        }
+
+        InitSystem::OpenRC => {
+            let init_d = format!("{}/etc/init.d", install_root);
+            fs::create_dir_all(&init_d)?;
+
+            let script = format!(
+                "#!/sbin/openrc-run\n\
+                 description=\"Handheld Daemon Service\"\n\
+                 command=\"/usr/bin/hhd\"\n\
+                 command_args=\"--user {user}\"\n\
+                 command_user=\"{user}\"\n\
+                 command_background=true\n\
+                 pidfile=\"/var/run/hhd.pid\"\n\
+                 \n\
+                 depend() {{\n\
+                 \tneed udev\n\
+                 \tafter seatd\n\
+                 }}\n",
+                user = username
+            );
+            let script_path = format!("{}/hhd", init_d);
+            fs::write(&script_path, &script)?;
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written OpenRC service: /etc/init.d/hhd");
+        }
+
+        InitSystem::S6 => {
+            let sv_dir = format!("{}/etc/s6/sv/hhd", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            // type file declares this a long-running service
+            fs::write(format!("{}/type", sv_dir), "longrun\n")?;
+
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 exec s6-setuidgid {user} /usr/bin/hhd --user {user} 2>&1\n",
+                user = username
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written s6 service: /etc/s6/sv/hhd/");
+        }
+
+        InitSystem::Dinit => {
+            let dinit_d = format!("{}/etc/dinit.d", install_root);
+            fs::create_dir_all(&dinit_d)?;
+
+            let service = format!(
+                "type = process\n\
+                 command = /usr/bin/hhd --user {user}\n\
+                 run-as = {user}\n\
+                 restart = true\n",
+                user = username
+            );
+            let service_path = format!("{}/hhd", dinit_d);
+            fs::write(&service_path, &service)?;
+            fs::set_permissions(&service_path, fs::Permissions::from_mode(0o644))?;
+
+            info!("  Written dinit service: /etc/dinit.d/hhd");
+        }
+    }
+
+    Ok(())
+}
+
+// ======================== Decky Loader ========================
+
+/// Install Decky Loader — the Steam plugin framework — by downloading the
+/// latest `PluginLoader` binary from the GitHub releases API and writing an
+/// init-specific service file.
+///
+/// Layout created on the target system:
+/// ```
+/// /home/{user}/homebrew/
+///   services/
+///     PluginLoader          (executable binary, downloaded at install time)
+///     .loader.version       (tag of the installed release)
+///   plugins/                (empty; populated at runtime by Steam/Decky)
+/// ~/.steam/steam/.cef-enable-remote-debugging   (flag file for Steam's CEF)
+/// ```
+///
+/// Requires `install_gaming = true` (Steam must be present).
+pub fn install_decky_loader(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_decky_loader {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+    let homebrew = format!("/home/{}/homebrew", username);
+    let homebrew_host = format!("{}{}", install_root, homebrew);
+
+    info!("Installing Decky Loader for user {}", username);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would create {}/services/ and {}/plugins/",
+            homebrew, homebrew
+        );
+        println!("  [dry-run] Would download PluginLoader from GitHub releases");
+        println!(
+            "  [dry-run] Would write Decky Loader service file for init: {}",
+            config.system.init
+        );
+        return Ok(());
+    }
+
+    // Step 1: Create directory structure
+    fs::create_dir_all(format!("{}/services", homebrew_host))?;
+    fs::create_dir_all(format!("{}/plugins", homebrew_host))?;
+    info!("  Created homebrew directory structure");
+
+    // Step 2: Enable Steam CEF remote debugging (required by Decky's frontend)
+    let steam_dir = format!("{}/home/{}/.steam/steam", install_root, username);
+    fs::create_dir_all(&steam_dir)?;
+    fs::write(format!("{steam_dir}/.cef-enable-remote-debugging"), "")?;
+
+    // Also handle Flatpak Steam if present (no-op when the dir doesn't exist)
+    let flatpak_steam = format!(
+        "{}/home/{}/.var/app/com.valvesoftware.Steam/data/Steam",
+        install_root, username
+    );
+    if std::path::Path::new(&flatpak_steam).exists() {
+        fs::write(format!("{flatpak_steam}/.cef-enable-remote-debugging"), "")?;
+    }
+    info!("  Enabled Steam CEF remote debugging");
+
+    // Step 3: Download PluginLoader binary via the GitHub releases API.
+    // We fetch the releases list with curl, parse it with jq to find the
+    // latest non-prerelease asset URL, then pipe that into a second curl.
+    let download_cmd = format!(
+        r#"curl -sL "https://api.github.com/repos/SteamDeckHomebrew/decky-loader/releases" \
+  | jq -r 'first(.[] | select(.prerelease == false)) | .assets[] | .browser_download_url | select(endswith("PluginLoader"))' \
+  | xargs -I{{}} curl -Lo {homebrew}/services/PluginLoader {{}} \
+  && chmod +x {homebrew}/services/PluginLoader"#,
+        homebrew = homebrew
+    );
+    cmd.run_in_chroot(install_root, &download_cmd)?;
+    info!("  Downloaded PluginLoader binary");
+
+    // Step 4: Record the installed version tag
+    let version_cmd = format!(
+        r#"curl -sL "https://api.github.com/repos/SteamDeckHomebrew/decky-loader/releases" \
+  | jq -r 'first(.[] | select(.prerelease == false)) | .tag_name' \
+  > {homebrew}/services/.loader.version"#,
+        homebrew = homebrew
+    );
+    cmd.run_in_chroot(install_root, &version_cmd)?;
+    info!("  Recorded loader version");
+
+    // Step 5: Write init-specific service file
+    write_decky_service(config, install_root, username, &homebrew)?;
+
+    // Step 6: Fix ownership of everything under ~/homebrew
+    let chown_cmd = format!(
+        "chown -R {user}:{user} /home/{user}/homebrew /home/{user}/.steam",
+        user = username
+    );
+    cmd.run_in_chroot(install_root, &chown_cmd)?;
+
+    info!("Decky Loader installation complete");
+    Ok(())
+}
+
+/// Write the plugin_loader service file for the configured init system.
+fn write_decky_service(
+    config: &DeploymentConfig,
+    install_root: &str,
+    _username: &str,
+    homebrew: &str,
+) -> Result<()> {
+    use crate::config::InitSystem;
+
+    // Decky Loader must run as root so it can inject into Steam's process.
+    // The UNPRIVILEGED_PATH/PRIVILEGED_PATH env vars tell it where the
+    // homebrew directory lives.
+
+    match config.system.init {
+        InitSystem::Runit => {
+            let sv_dir = format!("{}/etc/runit/sv/plugin_loader", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 export UNPRIVILEGED_PATH={hb}\n\
+                 export PRIVILEGED_PATH={hb}\n\
+                 export LOG_LEVEL=INFO\n\
+                 exec {hb}/services/PluginLoader 2>&1\n",
+                hb = homebrew
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            let log_dir = format!("{}/log", sv_dir);
+            fs::create_dir_all(&log_dir)?;
+            let log_run = "#!/bin/sh\nexec svlogd -tt /var/log/plugin_loader\n";
+            let log_run_path = format!("{}/run", log_dir);
+            fs::write(&log_run_path, log_run)?;
+            fs::set_permissions(&log_run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written runit service: /etc/runit/sv/plugin_loader/");
+        }
+
+        InitSystem::OpenRC => {
+            let init_d = format!("{}/etc/init.d", install_root);
+            fs::create_dir_all(&init_d)?;
+
+            let script = format!(
+                "#!/sbin/openrc-run\n\
+                 description=\"SteamDeck Plugin Loader\"\n\
+                 command=\"{hb}/services/PluginLoader\"\n\
+                 command_background=true\n\
+                 pidfile=\"/var/run/plugin_loader.pid\"\n\
+                 \n\
+                 export UNPRIVILEGED_PATH={hb}\n\
+                 export PRIVILEGED_PATH={hb}\n\
+                 export LOG_LEVEL=INFO\n\
+                 \n\
+                 depend() {{\n\
+                 \tneed net\n\
+                 }}\n",
+                hb = homebrew
+            );
+            let script_path = format!("{}/plugin_loader", init_d);
+            fs::write(&script_path, &script)?;
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written OpenRC service: /etc/init.d/plugin_loader");
+        }
+
+        InitSystem::S6 => {
+            let sv_dir = format!("{}/etc/s6/sv/plugin_loader", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            fs::write(format!("{}/type", sv_dir), "longrun\n")?;
+
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 export UNPRIVILEGED_PATH={hb}\n\
+                 export PRIVILEGED_PATH={hb}\n\
+                 export LOG_LEVEL=INFO\n\
+                 exec {hb}/services/PluginLoader 2>&1\n",
+                hb = homebrew
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written s6 service: /etc/s6/sv/plugin_loader/");
+        }
+
+        InitSystem::Dinit => {
+            let dinit_d = format!("{}/etc/dinit.d", install_root);
+            fs::create_dir_all(&dinit_d)?;
+
+            // Write env file referenced by the service descriptor
+            let env_content = format!(
+                "UNPRIVILEGED_PATH={hb}\nPRIVILEGED_PATH={hb}\nLOG_LEVEL=INFO\n",
+                hb = homebrew
+            );
+            let env_path = format!("{}/plugin_loader.env", dinit_d);
+            fs::write(&env_path, &env_content)?;
+            fs::set_permissions(&env_path, fs::Permissions::from_mode(0o644))?;
+
+            let service = format!(
+                "type = process\n\
+                 command = {hb}/services/PluginLoader\n\
+                 working-dir = {hb}/services\n\
+                 env-file = /etc/dinit.d/plugin_loader.env\n\
+                 restart = true\n",
+                hb = homebrew
+            );
+            let service_path = format!("{}/plugin_loader", dinit_d);
+            fs::write(&service_path, &service)?;
+            fs::set_permissions(&service_path, fs::Permissions::from_mode(0o644))?;
+
+            info!("  Written dinit service: /etc/dinit.d/plugin_loader");
+        }
+    }
+
     Ok(())
 }
