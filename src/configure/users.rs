@@ -76,6 +76,9 @@ pub fn create_user(
     // Raise nofile ulimit so gamescope-session-plus can set ulimit -n 524288
     configure_ulimits(install_root)?;
 
+    // Ensure ~/.local/bin is in PATH via .bashrc
+    configure_bashrc_path(install_root, username)?;
+
     info!("User {} created successfully", username);
     Ok(())
 }
@@ -96,6 +99,29 @@ fn configure_ulimits(install_root: &str) -> Result<()> {
          * hard nofile 524288\n",
     )?;
 
+    Ok(())
+}
+
+/// Append `~/.local/bin` to PATH in the user's `.bashrc` if not already present.
+fn configure_bashrc_path(install_root: &str, username: &str) -> Result<()> {
+    let bashrc_path = format!("{}/home/{}/.bashrc", install_root, username);
+
+    let existing = fs::read_to_string(&bashrc_path).unwrap_or_default();
+
+    // Skip if the export is already present
+    if existing.contains("$HOME/.local/bin") {
+        info!("~/.local/bin PATH export already present in .bashrc");
+        return Ok(());
+    }
+
+    let snippet = "\n# Add ~/.local/bin to PATH\n\
+                    export PATH=\"$HOME/.local/bin${PATH:+:$PATH}\"\n";
+
+    let mut content = existing;
+    content.push_str(snippet);
+    fs::write(&bashrc_path, content)?;
+
+    info!("Added ~/.local/bin PATH export to /home/{}/.bashrc", username);
     Ok(())
 }
 
