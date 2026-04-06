@@ -1,7 +1,6 @@
 [Desktop Entry]
-Name=Game Mode (Gamescope)
-Comment=Steam Game Mode via gamescope-session-plus
-Exec=/usr/share/gamescope-session-plus/gamescope-session-plus steam
-TryExec=/usr/share/gamescope-session-plus/gamescope-session-plus
+Name=Steam Gamescope Adaptive
+Comment=Full Steam session via Gamescope with auto FSR scaling
+Exec=/usr/local/bin/steam-gamescope-session
 Type=Application
-DesktopNames=gamescope
+DesktopNames=SteamGamescope

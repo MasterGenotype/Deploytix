@@ -45,9 +45,8 @@ while true; do
 
     case "$session" in
         gamescope)
-            echo "[session-manager] Launching gamescope-session-plus"
-            # Call the real script directly, bypassing the systemd wrapper
-            /usr/share/gamescope-session-plus/gamescope-session-plus steam || true
+            echo "[session-manager] Launching steam-gamescope-session"
+            /usr/local/bin/steam-gamescope-session || true
             ;;
         desktop)
             desktop_cmd="$(detect_desktop_command)"
@@ -60,7 +59,7 @@ while true; do
             ;;
         *)
             echo >&2 "[session-manager] Unknown session '$session', falling back to gamescope"
-            /usr/share/gamescope-session-plus/gamescope-session-plus steam || true
+            /usr/local/bin/steam-gamescope-session || true
             ;;
     esac
 

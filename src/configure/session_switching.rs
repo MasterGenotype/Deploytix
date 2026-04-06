@@ -13,6 +13,8 @@ const SESSION_MANAGER: &str =
 const SESSION_SELECT: &str = include_str!("../resources/session_switching/session-select.sh");
 const RETURN_TO_GAMEMODE: &str =
     include_str!("../resources/session_switching/return-to-gamemode.sh");
+const STEAM_GAMESCOPE_SESSION: &str =
+    include_str!("../resources/session_switching/steam-gamescope-session.sh");
 const GAMESCOPE_SESSION_DESKTOP: &str =
     include_str!("../resources/session_switching/gamescope-session.desktop");
 
@@ -37,6 +39,11 @@ const DEPLOY_FILES: &[DeployFile] = &[
     DeployFile {
         dest: "usr/bin/return-to-gamemode",
         content: RETURN_TO_GAMEMODE,
+        mode: 0o755,
+    },
+    DeployFile {
+        dest: "usr/local/bin/steam-gamescope-session",
+        content: STEAM_GAMESCOPE_SESSION,
         mode: 0o755,
     },
     DeployFile {
