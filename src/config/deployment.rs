@@ -811,7 +811,11 @@ impl DeploymentConfig {
         println!("\n📦 Optional Package Collections\n");
 
         // GPU drivers (multi-select)
-        let gpu_vendors = [GpuDriverVendor::Nvidia, GpuDriverVendor::Amd, GpuDriverVendor::Intel];
+        let gpu_vendors = [
+            GpuDriverVendor::Nvidia,
+            GpuDriverVendor::Amd,
+            GpuDriverVendor::Intel,
+        ];
         let gpu_defaults = vec![false; gpu_vendors.len()];
         let gpu_selected = prompt_multi_select(
             "Video/Graphics Drivers (space to toggle, enter to confirm)",
@@ -830,8 +834,12 @@ impl DeploymentConfig {
         let install_gaming = prompt_confirm("Install Gaming packages (Steam, gamescope)?", false)?;
 
         // Session switching (only if gaming + desktop are both selected)
-        let install_session_switching = if install_gaming && environment != DesktopEnvironment::None {
-            prompt_confirm("Enable session switching (Game Mode ↔ Desktop via greetd)?", true)?
+        let install_session_switching = if install_gaming && environment != DesktopEnvironment::None
+        {
+            prompt_confirm(
+                "Enable session switching (Game Mode ↔ Desktop via greetd)?",
+                true,
+            )?
         } else {
             false
         };
@@ -841,12 +849,18 @@ impl DeploymentConfig {
 
         // Btrfs tools (snapper + btrfs-assistant) via yay — only when btrfs + yay
         let install_btrfs_tools = if install_yay && filesystem == Filesystem::Btrfs {
-            prompt_confirm("Install btrfs snapshot tools (snapper, btrfs-assistant) via yay?", false)?
+            prompt_confirm(
+                "Install btrfs snapshot tools (snapper, btrfs-assistant) via yay?",
+                false,
+            )?
         } else {
             false
         };
 
-        let install_modular = prompt_confirm("Install Modular mod manager? (CLI + GUI for NexusMods, GameBanana)", false)?;
+        let install_modular = prompt_confirm(
+            "Install Modular mod manager? (CLI + GUI for NexusMods, GameBanana)",
+            false,
+        )?;
 
         // sysctl gaming tweaks (standalone — no prerequisites)
         let sysctl_gaming_tweaks = prompt_confirm(
@@ -1074,7 +1088,11 @@ impl DeploymentConfig {
 
         // preserve_home without a dedicated /home partition requires subvolumes
         // (there must be an @home subvolume to preserve).
-        let has_home_partition = self.disk.partitions.iter().any(|p| p.mount_point == "/home");
+        let has_home_partition = self
+            .disk
+            .partitions
+            .iter()
+            .any(|p| p.mount_point == "/home");
         if self.disk.preserve_home && !has_home_partition && !self.disk.use_subvolumes {
             return Err(DeploytixError::ValidationError(
                 "preserve_home requires either a /home partition or use_subvolumes = true"
@@ -1105,8 +1123,7 @@ impl DeploymentConfig {
         }
 
         // zram_percent must be 1–100 when ZRAM is used
-        if (self.disk.swap_type == SwapType::ZramOnly
-            || self.disk.swap_type == SwapType::FileZram)
+        if (self.disk.swap_type == SwapType::ZramOnly || self.disk.swap_type == SwapType::FileZram)
             && (self.disk.zram_percent == 0 || self.disk.zram_percent > 100)
         {
             return Err(DeploytixError::ValidationError(format!(

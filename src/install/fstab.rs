@@ -5,7 +5,7 @@ use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::{get_partition_uuid, ZFS_BOOT_DATASET, ZFS_DATASETS};
-use crate::disk::layouts::{multi_volume_subvolumes, mount_point_to_subvol_name, ComputedLayout};
+use crate::disk::layouts::{mount_point_to_subvol_name, multi_volume_subvolumes, ComputedLayout};
 use crate::disk::lvm::{lv_path, ThinVolumeDef};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -21,11 +21,7 @@ use tracing::info;
 fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static str, u8) {
     match boot_filesystem {
         Filesystem::Ext4 => ("ext4", "defaults,noatime", 0),
-        Filesystem::Btrfs => (
-            "btrfs",
-            "subvol=@boot,defaults,noatime,compress=zstd",
-            0,
-        ),
+        Filesystem::Btrfs => ("btrfs", "subvol=@boot,defaults,noatime,compress=zstd", 0),
         Filesystem::Xfs => ("xfs", "defaults,noatime", 0),
         Filesystem::F2fs => ("f2fs", "defaults,noatime", 0),
         Filesystem::Zfs => ("zfs", "zfsutil,defaults,noatime", 0),
@@ -275,7 +271,7 @@ fn generate_fstab_with_subvolumes(
             ));
         } else if part.is_efi {
             content.push_str(&format!(
-            "\n# EFI System Partition\nUUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
+                "\n# EFI System Partition\nUUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
                 uuid
             ));
         } else if part.is_boot_fs {
@@ -335,15 +331,27 @@ fn generate_fstab_with_subvolumes(
 ///
 /// Creates entries for separate encrypted partitions (ROOT, USR, VAR, HOME)
 /// mounted from /dev/mapper/Crypt-* devices.
-pub fn generate_fstab_multi_volume(
-    cmd: &CommandRunner,
-    containers: &[LuksContainer],
-    device: &str,
-    layout: &ComputedLayout,
-    filesystem: &Filesystem,
-    boot_filesystem: &Filesystem,
-    install_root: &str,
-) -> Result<()> {
+/// Parameters for multi-volume encrypted fstab generation
+pub struct MultiVolumeFstabParams<'a> {
+    pub cmd: &'a CommandRunner,
+    pub containers: &'a [LuksContainer],
+    pub device: &'a str,
+    pub layout: &'a ComputedLayout,
+    pub filesystem: &'a Filesystem,
+    pub boot_filesystem: &'a Filesystem,
+    pub swap_type: &'a SwapType,
+    pub install_root: &'a str,
+}
+
+pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()> {
+    let cmd = params.cmd;
+    let containers = params.containers;
+    let device = params.device;
+    let layout = params.layout;
+    let filesystem = params.filesystem;
+    let boot_filesystem = params.boot_filesystem;
+    let swap_type = params.swap_type;
+    let install_root = params.install_root;
     info!(
         "Generating /etc/fstab for {} encrypted volumes",
         containers.len()
@@ -412,16 +420,31 @@ pub fn generate_fstab_multi_volume(
         }
     }
 
-    // Add SWAP partition
-    let swap_part = layout.partitions.iter().find(|p| p.is_swap);
-    if let Some(swap) = swap_part {
-        let swap_device = partition_path(device, swap.number);
-        let swap_uuid = get_partition_uuid(&swap_device)?;
-        content.push_str(&format!(
-            "# Swap partition\n\
-             UUID={}  none  swap  defaults  0  0\n\n",
-            swap_uuid
-        ));
+    // Add swap based on swap_type
+    match swap_type {
+        SwapType::Partition => {
+            let swap_part = layout.partitions.iter().find(|p| p.is_swap);
+            if let Some(swap) = swap_part {
+                let swap_device = partition_path(device, swap.number);
+                let swap_uuid = get_partition_uuid(&swap_device)?;
+                content.push_str(&format!(
+                    "# Swap partition\n\
+                     UUID={}  none  swap  defaults  0  0\n\n",
+                    swap_uuid
+                ));
+            }
+        }
+        SwapType::FileZram => {
+            content.push_str(&format!(
+                "# Swap file (ZRAM provides additional compressed swap)\n\
+                 {}  none  swap  defaults  0  0\n\n",
+                SWAP_FILE_PATH
+            ));
+        }
+        SwapType::ZramOnly => {
+            // No fstab entry needed - ZRAM is configured via service
+            content.push_str("# Swap: ZRAM only (configured via service)\n\n");
+        }
     }
 
     // Add BOOT partition

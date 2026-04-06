@@ -219,7 +219,13 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 
 /// Filename prefixes (with trailing dash) for package archives that
 /// belong to the custom [deploytix] repository.
-const CUSTOM_PKG_PREFIXES: &[&str] = &["deploytix-git-", "deploytix-gui-git-", "tkg-gui-git-", "modular-git-", "unl0kr-"];
+const CUSTOM_PKG_PREFIXES: &[&str] = &[
+    "deploytix-git-",
+    "deploytix-gui-git-",
+    "tkg-gui-git-",
+    "modular-git-",
+    "unl0kr-",
+];
 
 /// Packages from the [deploytix] repo that are in the basestrap list
 /// and must be resolvable.
@@ -253,11 +259,7 @@ const ARCH_MIRRORLIST_PATH: &str = "/etc/pacman.d/mirrorlist-arch";
 /// `[deploytix]` repository section.
 fn pacman_conf_has_deploytix_repo() -> bool {
     std::fs::read_to_string("/etc/pacman.conf")
-        .map(|contents| {
-            contents
-                .lines()
-                .any(|line| line.trim() == "[deploytix]")
-        })
+        .map(|contents| contents.lines().any(|line| line.trim() == "[deploytix]"))
         .unwrap_or(false)
 }
 
@@ -366,7 +368,8 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         if let Some(repo_root) = exe
             .parent() // target/release/
             .and_then(|p| p.parent()) // target/
-            .and_then(|p| p.parent()) // repo root
+            .and_then(|p| p.parent())
+        // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
             // Sibling tkg-gui, Modular-1, and unl0kr repos.
@@ -462,8 +465,7 @@ fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
 /// Write a temporary `pacman.conf` that extends the system config with
 /// a `[deploytix]` repo section.  Returns the path to the temp file.
 fn write_custom_pacman_conf(repo_dir: &str) -> Result<Option<String>> {
-    let system_conf =
-        std::fs::read_to_string("/etc/pacman.conf").map_err(DeploytixError::Io)?;
+    let system_conf = std::fs::read_to_string("/etc/pacman.conf").map_err(DeploytixError::Io)?;
 
     let custom = format!(
         "{}\n\n\
@@ -564,28 +566,20 @@ fn conf_has_arch_extra(conf: &str) -> bool {
 /// in the Artix repositories.  If the effective config already
 /// contains `[extra]` this is a no-op; otherwise a custom pacman.conf
 /// is written (or updated) with the repo appended.
-fn ensure_arch_repos(
-    existing_conf: Option<String>,
-    cmd: &CommandRunner,
-) -> Result<Option<String>> {
+fn ensure_arch_repos(existing_conf: Option<String>, cmd: &CommandRunner) -> Result<Option<String>> {
     if cmd.is_dry_run() {
         return Ok(existing_conf);
     }
 
-    let conf_path = existing_conf
-        .as_deref()
-        .unwrap_or("/etc/pacman.conf");
+    let conf_path = existing_conf.as_deref().unwrap_or("/etc/pacman.conf");
 
-    let conf_content =
-        std::fs::read_to_string(conf_path).map_err(DeploytixError::Io)?;
+    let conf_content = std::fs::read_to_string(conf_path).map_err(DeploytixError::Io)?;
 
     if conf_has_arch_extra(&conf_content) {
         return Ok(existing_conf);
     }
 
-    info!(
-        "Arch [extra] repository not configured; adding it"
-    );
+    info!("Arch [extra] repository not configured; adding it");
 
     let mirror_entry = if Path::new(ARCH_MIRRORLIST_PATH).exists() {
         format!("Include = {}", ARCH_MIRRORLIST_PATH)

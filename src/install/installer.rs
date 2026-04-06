@@ -13,15 +13,15 @@ use crate::disk::formatting::{
     format_efi, format_swap, mount_btrfs_subvolumes,
 };
 use crate::disk::layouts::{
-    compute_layout_from_config, get_luks_partitions, multi_volume_subvolumes,
-    print_layout_summary, ComputedLayout,
+    compute_layout_from_config, get_luks_partitions, multi_volume_subvolumes, print_layout_summary,
+    ComputedLayout,
 };
 use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
 use crate::install::crypttab::generate_crypttab_multi_volume;
 use crate::install::fstab::{
     append_swap_file_entry, generate_fstab_lvm_thin, generate_fstab_multi_volume,
-    LvmThinFstabParams,
+    LvmThinFstabParams, MultiVolumeFstabParams,
 };
 use crate::install::{
     generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_preserve,
@@ -277,7 +277,10 @@ impl Installer {
 
         // Phase 5.4: Btrfs snapshot tools via yay (after yay, requires btrfs)
         if self.config.packages.install_btrfs_tools {
-            self.report_progress(0.88, "Installing btrfs snapshot tools (snapper, btrfs-assistant)...");
+            self.report_progress(
+                0.88,
+                "Installing btrfs snapshot tools (snapper, btrfs-assistant)...",
+            );
             self.install_btrfs_tools()?;
         }
 
@@ -1129,6 +1132,15 @@ impl Installer {
         self.cmd.run("mount", &[&efi_device, &efi_mount])?;
         info!("Mounted {} to {}", efi_device, efi_mount);
 
+        // Enable swap partitions
+        for part in &layout.partitions {
+            if part.is_swap {
+                let swap_device = partition_path(&self.config.disk.device, part.number);
+                info!("Enabling swap on {}", swap_device);
+                self.cmd.run("swapon", &[&swap_device])?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1181,12 +1193,7 @@ impl Installer {
                 temp_mount,
                 preserve,
             )?;
-            mount_btrfs_subvolumes(
-                &self.cmd,
-                &container.mapped_path,
-                &svols,
-                INSTALL_ROOT,
-            )?;
+            mount_btrfs_subvolumes(&self.cmd, &container.mapped_path, &svols, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -1261,15 +1268,16 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        generate_fstab_multi_volume(
-            &self.cmd,
-            &self.luks_containers,
-            &self.config.disk.device,
+        generate_fstab_multi_volume(&MultiVolumeFstabParams {
+            cmd: &self.cmd,
+            containers: &self.luks_containers,
+            device: &self.config.disk.device,
             layout,
-            &self.config.disk.filesystem,
-            &self.config.disk.boot_filesystem,
-            INSTALL_ROOT,
-        )
+            filesystem: &self.config.disk.filesystem,
+            boot_filesystem: &self.config.disk.boot_filesystem,
+            swap_type: &self.config.disk.swap_type,
+            install_root: INSTALL_ROOT,
+        })
     }
 
     /// Generate crypttab for multi-volume encrypted system
@@ -1626,7 +1634,8 @@ impl Installer {
                 "none".to_string()
             };
 
-            let lvm_options = crate::install::crypttab::crypttab_options_pub(self.config.disk.integrity);
+            let lvm_options =
+                crate::install::crypttab::crypttab_options_pub(self.config.disk.integrity);
             let mut content = format!(
                 "# /etc/crypttab: LUKS containers for LVM thin provisioning\n\
                  # <target name>  <source device>  <key file>  <options>\n\
