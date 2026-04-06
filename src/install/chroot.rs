@@ -32,7 +32,14 @@ pub fn mount_partitions_preserve(
     preserve_home: bool,
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
-    mount_partitions_inner(cmd, device, layout, install_root, preserve_home, boot_filesystem)
+    mount_partitions_inner(
+        cmd,
+        device,
+        layout,
+        install_root,
+        preserve_home,
+        boot_filesystem,
+    )
 }
 
 fn mount_partitions_inner(
@@ -372,4 +379,3 @@ pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
 
     Ok(())
 }
-

@@ -155,7 +155,13 @@ fn install_grub_with_layout(
         } else {
             get_luks_uuid(&luks_device)?
         };
-        configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root, swap_uuid.as_deref())?;
+        configure_grub_defaults_lvm_thin(
+            cmd,
+            config,
+            &luks_uuid,
+            install_root,
+            swap_uuid.as_deref(),
+        )?;
     } else if config.disk.use_lvm_thin {
         // LVM thin without encryption: root is on an LVM LV
         let vg_name = &config.disk.lvm_vg_name;
@@ -544,6 +550,7 @@ echo "GRUB reinstallation complete"
 /// Configure GRUB defaults
 /// For encrypted systems, pass luks_uuid and mapper_name
 /// uses_subvolumes indicates if the layout uses btrfs subvolumes (for rootflags)
+#[allow(clippy::too_many_arguments)]
 fn configure_grub_defaults(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
