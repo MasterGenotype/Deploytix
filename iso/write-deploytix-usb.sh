@@ -133,6 +133,17 @@ msg2 "ISO written successfully"
 partprobe "${DEVICE}" 2>/dev/null || true
 udevadm settle --timeout=5 2>/dev/null || sleep 3
 
+# ISO hybrid images set partition 1's type to 0x00 (Empty). The Linux kernel's
+# MBR parser skips type-0 entries on re-read, so /dev/sdX1 disappears after
+# sfdisk --append later triggers a partition table reload. Fix by setting the
+# type to 0x83 (Linux) — this doesn't affect BIOS or UEFI boot.
+if [[ "$(sfdisk --part-type "${DEVICE}" 1 2>/dev/null)" == "0" ]]; then
+    msg2 "Fixing ISO partition type (0x00 -> 0x83) for kernel compatibility"
+    sfdisk --part-type "${DEVICE}" 1 83 >/dev/null 2>&1 || true
+    partprobe "${DEVICE}" 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || sleep 3
+fi
+
 # ── Step 2: Determine partition layout ───────────────────────────────────────
 msg "Inspecting partition layout..."
 
