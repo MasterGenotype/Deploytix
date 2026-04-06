@@ -85,7 +85,10 @@ pub fn install_gpu_drivers(
     info!("Installing GPU driver packages: {}", packages.join(", "));
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would install GPU driver packages: {:?}", packages);
+        println!(
+            "  [dry-run] Would install GPU driver packages: {:?}",
+            packages
+        );
         return Ok(());
     }
 
@@ -127,8 +130,8 @@ fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Resul
 
     // Append [extra] to the chroot's pacman.conf if not already present.
     let chroot_pacman_conf = format!("{}/etc/pacman.conf", install_root);
-    let conf_content =
-        std::fs::read_to_string(&chroot_pacman_conf).map_err(crate::utils::error::DeploytixError::Io)?;
+    let conf_content = std::fs::read_to_string(&chroot_pacman_conf)
+        .map_err(crate::utils::error::DeploytixError::Io)?;
 
     if !conf_content.lines().any(|line| line.trim() == "[extra]") {
         info!("Adding Arch [extra] repository to chroot pacman.conf");
@@ -270,8 +273,14 @@ pub fn install_gaming_packages(
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would enable [lib32] repository");
-        println!("  [dry-run] Would install lib32 Vulkan drivers: {:?}", lib32_vulkan);
-        println!("  [dry-run] Would install gaming packages: {:?}", GAMING_PACKAGES);
+        println!(
+            "  [dry-run] Would install lib32 Vulkan drivers: {:?}",
+            lib32_vulkan
+        );
+        println!(
+            "  [dry-run] Would install gaming packages: {:?}",
+            GAMING_PACKAGES
+        );
         return Ok(());
     }
 
@@ -312,10 +321,16 @@ pub fn install_yay(
     }
 
     let username = &config.user.name;
-    info!("Installing yay AUR helper (building from source as {})", username);
+    info!(
+        "Installing yay AUR helper (building from source as {})",
+        username
+    );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would install go and build yay from source as {}", username);
+        println!(
+            "  [dry-run] Would install go and build yay from source as {}",
+            username
+        );
         return Ok(());
     }
 
@@ -454,8 +469,14 @@ pub fn install_autostart_entries(
     info!("Installing autostart entries for user {}", username);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would install audio-startup to /home/{}/.local/bin/", username);
-        println!("  [dry-run] Would install autostart .desktop entries to /home/{}/.config/autostart/", username);
+        println!(
+            "  [dry-run] Would install audio-startup to /home/{}/.local/bin/",
+            username
+        );
+        println!(
+            "  [dry-run] Would install autostart .desktop entries to /home/{}/.config/autostart/",
+            username
+        );
         return Ok(());
     }
 
@@ -634,11 +655,7 @@ pub fn install_hhd(
 }
 
 /// Write the HHD service file for the configured init system.
-fn write_hhd_service(
-    config: &DeploymentConfig,
-    install_root: &str,
-    username: &str,
-) -> Result<()> {
+fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &str) -> Result<()> {
     use crate::config::InitSystem;
 
     match config.system.init {

@@ -39,34 +39,35 @@ pub fn configure_greetd(
     // Determine session command based on desktop environment
     let session_cmd = get_session_command(&config.desktop.environment);
 
-    let config_content = if config.packages.install_session_switching && config.packages.install_gaming {
-        // Session switching mode: greetd auto-logins the user into
-        // deploytix-session-manager, which handles the gamescope ↔ desktop
-        // loop internally via a sentinel file.
-        format!(
-            r#"[terminal]
+    let config_content =
+        if config.packages.install_session_switching && config.packages.install_gaming {
+            // Session switching mode: greetd auto-logins the user into
+            // deploytix-session-manager, which handles the gamescope ↔ desktop
+            // loop internally via a sentinel file.
+            format!(
+                r#"[terminal]
 vt = 1
 
 [default_session]
 command = "deploytix-session-manager"
 user = "{user}"
 "#,
-            user = username,
-        )
-    } else {
-        // Standard mode: desktop session as default
-        format!(
-            r#"[terminal]
+                user = username,
+            )
+        } else {
+            // Standard mode: desktop session as default
+            format!(
+                r#"[terminal]
 vt = 1
 
 [default_session]
 command = "{session}"
 user = "{user}"
 "#,
-            session = session_cmd,
-            user = username,
-        )
-    };
+                session = session_cmd,
+                user = username,
+            )
+        };
 
     let greetd_dir = format!("{}/etc/greetd", install_root);
     fs::create_dir_all(&greetd_dir)?;

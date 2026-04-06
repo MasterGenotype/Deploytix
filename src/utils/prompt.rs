@@ -84,7 +84,11 @@ pub fn prompt_optional(prompt: &str) -> Result<Option<String>> {
 }
 
 /// Prompt for multiple selections from a list (checkboxes)
-pub fn prompt_multi_select<T: ToString>(prompt: &str, items: &[T], defaults: &[bool]) -> Result<Vec<usize>> {
+pub fn prompt_multi_select<T: ToString>(
+    prompt: &str,
+    items: &[T],
+    defaults: &[bool],
+) -> Result<Vec<usize>> {
     let theme = ColorfulTheme::default();
     MultiSelect::with_theme(&theme)
         .with_prompt(prompt)

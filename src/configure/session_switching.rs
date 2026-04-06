@@ -103,7 +103,10 @@ fn install_gamescope_session(
     info!("Building gamescope-session-git from AUR as {}", username);
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would build gamescope-session-git from AUR as {}", username);
+        println!(
+            "  [dry-run] Would build gamescope-session-git from AUR as {}",
+            username
+        );
         return Ok(());
     }
 

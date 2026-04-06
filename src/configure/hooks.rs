@@ -441,9 +441,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 
     // Remaining encrypted volumes
     for part in &luks_data_parts {
-        if part.mount_point.as_deref() == Some("/")
-            || part.name.eq_ignore_ascii_case("ROOT")
-        {
+        if part.mount_point.as_deref() == Some("/") || part.name.eq_ignore_ascii_case("ROOT") {
             continue; // Already handled above
         }
         let mp = match part.mount_point.as_deref() {
@@ -464,7 +462,11 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
             let svols = multi_volume_subvolumes(&title);
             for sv in &svols {
                 // /usr failure is a hard error; everything else is a warning
-                let severity = if sv.mount_point == "/usr" { "ERROR" } else { "WARNING" };
+                let severity = if sv.mount_point == "/usr" {
+                    "ERROR"
+                } else {
+                    "WARNING"
+                };
                 let fail_action = if sv.mount_point == "/usr" {
                     "        ret=1".to_string()
                 } else {

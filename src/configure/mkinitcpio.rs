@@ -144,7 +144,12 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("filesystems".to_string());
 
         // Separate /usr partition requires the usr hook for early mount
-        if config.disk.partitions.iter().any(|p| p.mount_point == "/usr") {
+        if config
+            .disk
+            .partitions
+            .iter()
+            .any(|p| p.mount_point == "/usr")
+        {
             hooks.push("usr".to_string());
         }
 

@@ -121,7 +121,10 @@ fn configure_bashrc_path(install_root: &str, username: &str) -> Result<()> {
     content.push_str(snippet);
     fs::write(&bashrc_path, content)?;
 
-    info!("Added ~/.local/bin PATH export to /home/{}/.bashrc", username);
+    info!(
+        "Added ~/.local/bin PATH export to /home/{}/.bashrc",
+        username
+    );
     Ok(())
 }
 
