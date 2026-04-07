@@ -2,7 +2,6 @@
 
 use std::io::Cursor;
 
-use rodio::Source;
 use tracing::warn;
 
 /// The theme song WAV data, embedded at compile time.
@@ -14,11 +13,42 @@ pub struct AudioHandle {
     _sink: rodio::Sink,
 }
 
+/// Ensure the audio server is reachable when running as root via sudo/pkexec.
+///
+/// PipeWire and PulseAudio live in the invoking user's XDG_RUNTIME_DIR.
+/// `sudo` strips that variable, so ALSA→PipeWire routing silently fails.
+/// We restore it from SUDO_UID / PKEXEC_UID when running as root.
+fn ensure_audio_env() {
+    use nix::unistd::Uid;
+
+    if !Uid::effective().is_root() {
+        return;
+    }
+
+    if std::env::var_os("XDG_RUNTIME_DIR").is_some() {
+        return;
+    }
+
+    let real_uid = std::env::var("SUDO_UID")
+        .or_else(|_| std::env::var("PKEXEC_UID"))
+        .ok();
+
+    if let Some(uid) = real_uid {
+        let runtime_dir = format!("/run/user/{uid}");
+        if std::path::Path::new(&runtime_dir).is_dir() {
+            std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+            tracing::info!("Set XDG_RUNTIME_DIR={runtime_dir} for audio routing");
+        }
+    }
+}
+
 /// Start looping playback of the embedded theme song.
 ///
 /// Returns a handle that must be kept alive for playback to continue.
 /// Returns `None` if audio initialization fails (e.g., no audio device).
 pub fn play_theme_loop() -> Option<AudioHandle> {
+    ensure_audio_env();
+
     let (stream, stream_handle) = match rodio::OutputStream::try_default() {
         Ok(s) => s,
         Err(e) => {
@@ -36,7 +66,7 @@ pub fn play_theme_loop() -> Option<AudioHandle> {
     };
 
     let cursor = Cursor::new(THEME_WAV);
-    let source = match rodio::Decoder::new(cursor) {
+    let source = match rodio::Decoder::new_looped(cursor) {
         Ok(s) => s,
         Err(e) => {
             warn!("Could not decode theme audio: {e}");
@@ -44,7 +74,7 @@ pub fn play_theme_loop() -> Option<AudioHandle> {
         }
     };
 
-    sink.append(source.repeat_infinite());
+    sink.append(source);
 
     Some(AudioHandle {
         _stream: stream,

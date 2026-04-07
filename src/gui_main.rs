@@ -11,9 +11,6 @@ use std::os::unix::fs::OpenOptionsExt;
 const LOCK_PATH: &str = "/tmp/deploytix-gui.lock";
 
 fn main() -> eframe::Result<()> {
-    // Start looping theme music (runs in background; stops when handle drops)
-    let _audio = deploytix::resources::audio::play_theme_loop();
-
     // Enforce single instance via an exclusive lock file.
     // O_CREAT | O_EXCL fails if the file already exists.
     let lock_result = OpenOptions::new()
@@ -43,11 +40,14 @@ fn main() -> eframe::Result<()> {
     }
     let _guard = LockGuard;
 
-    // Set up logging
+    // Set up logging before audio so warnings are visible
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .with_target(false)
         .init();
+
+    // Start looping theme music (runs in background; stops when handle drops)
+    let _audio = deploytix::resources::audio::play_theme_loop();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
