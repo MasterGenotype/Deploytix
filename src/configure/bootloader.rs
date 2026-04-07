@@ -84,11 +84,15 @@ fn install_grub(
         ));
     }
 
-    // Find root partition from layout instead of hardcoding partition number
+    // Find root partition from layout instead of hardcoding partition number.
+    // When btrfs subvolumes are enabled the root partition's mount_point is
+    // cleared to None (it mounts via subvol=@), so fall back to the
+    // partition name.
     let root_part_def = layout
         .partitions
         .iter()
         .find(|p| p.mount_point.as_deref() == Some("/"))
+        .or_else(|| layout.partitions.iter().find(|p| p.name == "ROOT"))
         .ok_or_else(|| {
             crate::utils::error::DeploytixError::ConfigError(
                 "No root partition found in layout".to_string(),

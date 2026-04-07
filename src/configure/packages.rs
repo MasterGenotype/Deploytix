@@ -24,7 +24,6 @@ const NVIDIA_PACKAGES: &[&str] = &["nvidia", "nvidia-utils", "linux-firmware-nvi
 
 const AMD_PACKAGES: &[&str] = &[
     "linux-firmware-amdgpu",
-    "amdgpu",
     "mesa",
     "vulkan-headers",
     "vulkan-icd-loader",

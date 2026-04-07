@@ -1,7 +1,7 @@
 //! Unified configuration panel
 //!
-//! Consolidates all pre-install options into a single scrollable view
-//! with category-based sections.
+//! Displays all pre-install options in a 3-column grid layout that fits
+//! on screen without scrolling (at 75% zoom).
 
 use crate::gui::{
     state::{DiskState, PackagesState, SystemState, UserState},
@@ -13,21 +13,32 @@ use super::{
     disk_config, disk_selection, handheld_gaming, network_desktop, system_config, user_config,
 };
 
-/// Render a category heading — larger than section titles, with a separator.
-fn category_heading(ui: &mut Ui, title: &str) {
-    ui.add_space(theme::SPACING_MD);
+/// Column heading rendered at the top of each grid column.
+fn column_heading(ui: &mut Ui, title: &str) {
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .size(16.0)
+            .color(theme::ACCENT),
+    );
     ui.separator();
+    ui.add_space(theme::SPACING_XS);
+}
+
+/// Sub-heading used to separate logical groups within a column.
+fn sub_heading(ui: &mut Ui, title: &str) {
     ui.add_space(theme::SPACING_SM);
     ui.label(
         RichText::new(title)
             .strong()
-            .size(18.0)
+            .size(14.0)
             .color(theme::ACCENT),
     );
-    ui.add_space(theme::SPACING_SM);
+    ui.separator();
+    ui.add_space(theme::SPACING_XS);
 }
 
-/// Render the unified configuration panel.
+/// Render the unified configuration panel as a 3-column grid.
 ///
 /// Returns `true` when all sections pass validation and the user may
 /// proceed to the review step.
@@ -38,48 +49,30 @@ pub fn show(
     user: &mut UserState,
     packages: &mut PackagesState,
 ) -> bool {
-    let output = egui::ScrollArea::vertical().show(ui, |ui| {
-        // ═══════════════════════════════════════════════════════════════
-        //  TARGET DISK
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "Target Disk");
-        let disk_selected = disk_selection::show_sections(ui, disk);
+    let mut disk_selected = false;
+    let mut disk_valid = false;
+    let mut system_valid = false;
+    let mut user_valid = false;
 
-        // ═══════════════════════════════════════════════════════════════
-        //  DISK CONFIGURATION
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "Disk Configuration");
-        let disk_valid = disk_config::show_sections(ui, disk);
+    ui.columns(3, |cols| {
+        // ═══ Column 1: Disk ═══════════════════════════════════════════
+        column_heading(&mut cols[0], "Disk");
+        disk_selected = disk_selection::show_sections(&mut cols[0], disk);
+        cols[0].add_space(theme::SPACING_SM);
+        disk_valid = disk_config::show_sections(&mut cols[0], disk);
 
-        // ═══════════════════════════════════════════════════════════════
-        //  SYSTEM
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "System");
-        let system_valid = system_config::show_sections(ui, system);
+        // ═══ Column 2: System & User ══════════════════════════════════
+        column_heading(&mut cols[1], "System");
+        system_valid = system_config::show_sections(&mut cols[1], system);
+        sub_heading(&mut cols[1], "User Account");
+        user_valid = user_config::show_sections(&mut cols[1], user);
 
-        // ═══════════════════════════════════════════════════════════════
-        //  USER ACCOUNT
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "User Account");
-        let user_valid = user_config::show_sections(ui, user);
-
-        // ═══════════════════════════════════════════════════════════════
-        //  NETWORK & DESKTOP
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "Network & Desktop");
-        network_desktop::show_sections(ui, packages, &disk.filesystem);
-
-        // ═══════════════════════════════════════════════════════════════
-        //  HANDHELD GAMING
-        // ═══════════════════════════════════════════════════════════════
-        category_heading(ui, "Handheld Gaming");
-        handheld_gaming::show_sections(ui, packages);
-
-        // Bottom padding so the last section isn't flush with the edge
-        ui.add_space(theme::SPACING_MD);
-
-        disk_selected && disk_valid && system_valid && user_valid
+        // ═══ Column 3: Packages & Gaming ══════════════════════════════
+        column_heading(&mut cols[2], "Packages");
+        network_desktop::show_sections(&mut cols[2], packages, &disk.filesystem);
+        sub_heading(&mut cols[2], "Gaming");
+        handheld_gaming::show_sections(&mut cols[2], packages);
     });
 
-    output.inner
+    disk_selected && disk_valid && system_valid && user_valid
 }

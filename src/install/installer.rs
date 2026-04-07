@@ -736,6 +736,15 @@ impl Installer {
         // Locale and timezone
         configure::locale::configure_locale(&self.cmd, &self.config, INSTALL_ROOT)?;
 
+        // Dinit needs an explicit keymap-loading service (other inits
+        // handle this through their own boot infrastructure).
+        if self.config.system.init == crate::config::InitSystem::Dinit {
+            configure::locale::create_dinit_keymap_service(
+                INSTALL_ROOT,
+                &self.config.system.keymap,
+            )?;
+        }
+
         // User creation
         configure::users::create_user(&self.cmd, &self.config, INSTALL_ROOT)?;
 

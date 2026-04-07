@@ -5,6 +5,7 @@ use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
 /// Configure locale, timezone, and keymap
@@ -108,6 +109,42 @@ fn set_keymap(cmd: &CommandRunner, keymap: &str, install_root: &str) -> Result<(
     let content = format!("KEYMAP={}\n", keymap);
     fs::write(&vconsole_path, content)?;
 
+    Ok(())
+}
+
+/// Create a dinit service that loads the console keymap from
+/// `/etc/vconsole.conf` at boot.
+///
+/// Unlike runit/openrc/s6, dinit does not ship a built-in service
+/// for keymap loading, so we provide one.
+pub fn create_dinit_keymap_service(install_root: &str, keymap: &str) -> Result<()> {
+    info!("Creating dinit keymap service for '{}'", keymap);
+
+    // Script that loads the keymap
+    let script_dir = format!("{}/usr/local/bin", install_root);
+    fs::create_dir_all(&script_dir)?;
+
+    let script = format!("#!/bin/sh\nloadkeys {}\n", keymap);
+    let script_path = format!("{}/loadkeys-boot", script_dir);
+    fs::write(&script_path, script)?;
+    let mut perms = fs::metadata(&script_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms)?;
+
+    // Dinit service file
+    let dinit_dir = format!("{}/etc/dinit.d", install_root);
+    fs::create_dir_all(&dinit_dir)?;
+
+    let service = "type = scripted\ncommand = /usr/local/bin/loadkeys-boot\n";
+    let service_path = format!("{}/loadkeys", dinit_dir);
+    fs::write(&service_path, service)?;
+
+    // Enable the service
+    let boot_d = format!("{}/etc/dinit.d/boot.d", install_root);
+    fs::create_dir_all(&boot_d)?;
+    std::os::unix::fs::symlink("/etc/dinit.d/loadkeys", format!("{}/loadkeys", boot_d))?;
+
+    info!("Created and enabled dinit loadkeys service");
     Ok(())
 }
 

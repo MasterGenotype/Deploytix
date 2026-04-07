@@ -85,6 +85,9 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.set_visuals(visuals);
 
+    // Scale down so the full configuration grid fits on one screen.
+    ctx.set_zoom_factor(0.75);
+
     // Adjust spacing for a more spacious feel
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);

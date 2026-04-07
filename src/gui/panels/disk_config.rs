@@ -261,53 +261,48 @@ fn partition_section(
     let fixed_total_mib: u64 = partitions.iter().map(|p| p.size_mib).sum();
     let remainder_gib = data_budget_mib.saturating_sub(fixed_total_mib) / 1024;
 
-    egui::ScrollArea::vertical()
-        .max_height(160.0)
-        .id_salt("partitions_scroll")
-        .show(ui, |ui| {
-            let part_count = partitions.len();
-            for i in 0..part_count {
-                let is_remainder = partitions[i].size_mib == 0;
-                let mount = partitions[i].mount_point.clone();
-                let label = partitions[i].effective_label();
+    let part_count = partitions.len();
+    for i in 0..part_count {
+        let is_remainder = partitions[i].size_mib == 0;
+        let mount = partitions[i].mount_point.clone();
+        let label = partitions[i].effective_label();
 
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} ({})", mount, label));
+        ui.horizontal(|ui| {
+            ui.label(format!("{} ({})", mount, label));
 
-                    if is_remainder {
-                        ui.label(
-                            RichText::new(format!("{} GiB (remainder)", remainder_gib))
-                                .color(theme::TEXT_MUTED),
-                        );
-                    } else {
-                        let current_gib = partitions[i].size_mib / 1024;
-                        let other_fixed_mib: u64 = partitions
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, p)| *j != i && p.size_mib > 0)
-                            .map(|(_, p)| p.size_mib)
-                            .sum();
-                        let max_gib = data_budget_mib
-                            .saturating_sub(other_fixed_mib)
-                            .saturating_sub(1024)
-                            / 1024;
-                        let max_gib = max_gib.max(MIN_PART_GIB);
+            if is_remainder {
+                ui.label(
+                    RichText::new(format!("{} GiB (remainder)", remainder_gib))
+                        .color(theme::TEXT_MUTED),
+                );
+            } else {
+                let current_gib = partitions[i].size_mib / 1024;
+                let other_fixed_mib: u64 = partitions
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, p)| *j != i && p.size_mib > 0)
+                    .map(|(_, p)| p.size_mib)
+                    .sum();
+                let max_gib = data_budget_mib
+                    .saturating_sub(other_fixed_mib)
+                    .saturating_sub(1024)
+                    / 1024;
+                let max_gib = max_gib.max(MIN_PART_GIB);
 
-                        let mut gib = current_gib;
-                        ui.add(
-                            egui::Slider::new(&mut gib, MIN_PART_GIB..=max_gib)
-                                .suffix(" GiB")
-                                .clamping(egui::SliderClamping::Always),
-                        );
-                        partitions[i].size_mib = gib * 1024;
-                    }
+                let mut gib = current_gib;
+                ui.add(
+                    egui::Slider::new(&mut gib, MIN_PART_GIB..=max_gib)
+                        .suffix(" GiB")
+                        .clamping(egui::SliderClamping::Always),
+                );
+                partitions[i].size_mib = gib * 1024;
+            }
 
-                    if mount != "/" && ui.small_button("\u{2715}").clicked() {
-                        remove_idx = Some(i);
-                    }
-                });
+            if mount != "/" && ui.small_button("\u{2715}").clicked() {
+                remove_idx = Some(i);
             }
         });
+    }
 
     if let Some(idx) = remove_idx {
         partitions.remove(idx);

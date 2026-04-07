@@ -276,10 +276,11 @@ swapon -p 100 /dev/zram0
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms)?;
 
-    // Create dinit service file
+    // Create dinit service file.
+    // Note: no dependency declared — modprobe and /sys are available
+    // early in the boot sequence and do not require a mount service.
     let service_content = r#"type = scripted
 command = /usr/local/bin/zram-setup
-depends-on = mount.local
 "#;
 
     let service_path = format!("{}/zram", dinit_dir);
