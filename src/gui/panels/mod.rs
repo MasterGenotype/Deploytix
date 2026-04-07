@@ -1,5 +1,6 @@
 //! Panel components for the GUI wizard
 
+pub mod configure;
 pub mod disk_config;
 pub mod disk_selection;
 pub mod handheld_gaming;

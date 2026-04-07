@@ -4,10 +4,8 @@ use crate::config::{InitSystem, SecureBootMethod};
 use crate::gui::{state::SystemState, theme, widgets};
 use egui::{RichText, Ui};
 
-/// Render the system configuration panel. Returns `true` when valid.
-pub fn show(ui: &mut Ui, system: &mut SystemState) -> bool {
-    widgets::page_heading(ui, "System Configuration");
-
+/// Render system configuration sections. Returns `true` when valid.
+pub(crate) fn show_sections(ui: &mut Ui, system: &mut SystemState) -> bool {
     widgets::section(ui, "Init & Bootloader", |ui| {
         ui.horizontal(|ui| {
             ui.label("Init System:");

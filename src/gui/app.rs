@@ -20,17 +20,21 @@ pub struct DeploytixGui {
     user: UserState,
     packages: PackagesState,
     install: InstallState,
+    /// Tracks whether the configure panel passes validation (one-frame lag
+    /// is fine in immediate-mode UI).
+    config_valid: bool,
 }
 
 impl Default for DeploytixGui {
     fn default() -> Self {
         Self {
-            step: WizardStep::DiskSelection,
+            step: WizardStep::Configure,
             disk: DiskState::default(),
             system: SystemState::default(),
             user: UserState::default(),
             packages: PackagesState::default(),
             install: InstallState::default(),
+            config_valid: false,
         }
     }
 }
@@ -304,11 +308,17 @@ impl eframe::App for DeploytixGui {
                     ui.add_space(theme::SPACING_MD);
 
                     match self.step {
-                        WizardStep::Installing => {
-                            if self.install.finished
-                                && widgets::primary_button(ui, "Close").clicked()
+                        WizardStep::Configure => {
+                            if widgets::primary_button_enabled(
+                                ui,
+                                self.config_valid,
+                                "Next \u{2192}",
+                            )
+                            .clicked()
                             {
-                                std::process::exit(0);
+                                if let Some(next) = self.step.next() {
+                                    self.step = next;
+                                }
                             }
                         }
                         WizardStep::Summary => {
@@ -322,7 +332,13 @@ impl eframe::App for DeploytixGui {
                                 }
                             }
                         }
-                        _ => {}
+                        WizardStep::Installing => {
+                            if self.install.finished
+                                && widgets::primary_button(ui, "Close").clicked()
+                            {
+                                std::process::exit(0);
+                            }
+                        }
                     }
                 });
             });
@@ -333,17 +349,18 @@ impl eframe::App for DeploytixGui {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(theme::SPACING_MD);
 
-            let can_proceed = match self.step {
-                WizardStep::DiskSelection => panels::disk_selection::show(ui, &mut self.disk),
-                WizardStep::DiskConfig => panels::disk_config::show(ui, &mut self.disk),
-                WizardStep::SystemConfig => panels::system_config::show(ui, &mut self.system),
-                WizardStep::UserConfig => panels::user_config::show(ui, &mut self.user),
-                WizardStep::NetworkDesktop => {
-                    panels::network_desktop::show(ui, &mut self.packages, &self.disk.filesystem)
+            match self.step {
+                WizardStep::Configure => {
+                    self.config_valid = panels::configure::show(
+                        ui,
+                        &mut self.disk,
+                        &mut self.system,
+                        &mut self.user,
+                        &mut self.packages,
+                    );
                 }
-                WizardStep::HandheldGaming => panels::handheld_gaming::show(ui, &mut self.packages),
                 WizardStep::Summary => {
-                    let result = panels::summary::show(
+                    panels::summary::show(
                         ui,
                         &self.disk,
                         &self.system,
@@ -356,25 +373,10 @@ impl eframe::App for DeploytixGui {
                         self.install.save_requested = false;
                         self.save_config();
                     }
-
-                    result
                 }
                 WizardStep::Installing => {
                     panels::progress::show(ui, &self.install);
-                    false
                 }
-            };
-
-            // Next button for wizard steps (not summary or installing)
-            if !matches!(self.step, WizardStep::Summary | WizardStep::Installing) {
-                ui.add_space(theme::SPACING_MD);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if widgets::primary_button_enabled(ui, can_proceed, "Next \u{2192}").clicked() {
-                        if let Some(next) = self.step.next() {
-                            self.step = next;
-                        }
-                    }
-                });
             }
         });
     }

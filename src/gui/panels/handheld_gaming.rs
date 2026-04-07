@@ -4,10 +4,8 @@ use crate::config::DesktopEnvironment;
 use crate::gui::{state::PackagesState, theme, widgets};
 use egui::Ui;
 
-/// Render the handheld gaming panel. Always returns `true`.
-pub fn show(ui: &mut Ui, packages: &mut PackagesState) -> bool {
-    widgets::page_heading(ui, "Handheld Gaming Device");
-
+/// Render handheld gaming sections.
+pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
     widgets::validation_warning(
         ui,
         "This section is for handheld gaming devices (e.g. Steam Deck, GPD, AYANEO). \
@@ -67,7 +65,7 @@ pub fn show(ui: &mut Ui, packages: &mut PackagesState) -> bool {
             packages.install_hhd = false;
             widgets::info_text(
                 ui,
-                "Requires: yay AUR helper (enable on the Packages page).",
+                "Requires: yay AUR helper (enable in Optional Packages above).",
             );
         } else if packages.install_hhd {
             widgets::info_text(
@@ -91,7 +89,7 @@ pub fn show(ui: &mut Ui, packages: &mut PackagesState) -> bool {
             packages.install_decky_loader = false;
             widgets::info_text(
                 ui,
-                "Requires: Gaming packages (Steam) — enable the checkbox above.",
+                "Requires: Gaming packages (Steam) \u{2014} enable the checkbox above.",
             );
         } else if packages.install_decky_loader {
             widgets::info_text(
@@ -101,6 +99,4 @@ pub fn show(ui: &mut Ui, packages: &mut PackagesState) -> bool {
             );
         }
     });
-
-    true
 }

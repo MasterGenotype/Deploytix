@@ -227,9 +227,14 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
     "unl0kr-",
 ];
 
-/// Packages from the [deploytix] repo that are in the basestrap list
-/// and must be resolvable.
-const REQUIRED_CUSTOM_PACKAGES: &[&str] = &["deploytix-git", "deploytix-gui-git", "tkg-gui-git"];
+/// All custom package names that may live in the [deploytix] repo.
+const CUSTOM_PACKAGE_NAMES: &[&str] = &[
+    "deploytix-git",
+    "deploytix-gui-git",
+    "tkg-gui-git",
+    "modular-git",
+    "unl0kr",
+];
 
 /// Path where the ISO live-overlay embeds the deploytix repo.
 const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
@@ -263,16 +268,31 @@ fn pacman_conf_has_deploytix_repo() -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether all required custom packages are resolvable in the
+/// Determine which custom package names from `CUSTOM_PACKAGE_NAMES`
+/// actually appear in the basestrap package list and must therefore be
+/// resolvable via pacman.
+fn needed_custom_packages(package_list: &[String]) -> Vec<&'static str> {
+    CUSTOM_PACKAGE_NAMES
+        .iter()
+        .copied()
+        .filter(|name| package_list.iter().any(|p| p == name))
+        .collect()
+}
+
+/// Check whether the given custom packages are resolvable in the
 /// currently configured pacman sync databases.
 ///
 /// If the `[deploytix]` repo is configured but the sync DB hasn't been
 /// refreshed yet (common on first boot of the live ISO), this will
 /// refresh the deploytix database before checking.
-fn custom_packages_in_sync_db() -> bool {
+fn custom_packages_in_sync_db(needed: &[&str]) -> bool {
+    if needed.is_empty() {
+        return true;
+    }
+
     // Quick check without refresh.
-    let all_found = || {
-        REQUIRED_CUSTOM_PACKAGES.iter().all(|pkg| {
+    let all_found = |pkgs: &[&str]| {
+        pkgs.iter().all(|pkg| {
             std::process::Command::new("pacman")
                 .args(["-Si", pkg])
                 .stdout(Stdio::null())
@@ -283,7 +303,7 @@ fn custom_packages_in_sync_db() -> bool {
         })
     };
 
-    if all_found() {
+    if all_found(needed) {
         return true;
     }
 
@@ -297,7 +317,7 @@ fn custom_packages_in_sync_db() -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        return all_found();
+        return all_found(needed);
     }
 
     false
@@ -393,6 +413,13 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     // 3. Current working directory (might be repo root).
     search_dirs.push(PathBuf::from("pkg"));
 
+    // 4. System pacman cache — packages previously installed via pacman
+    //    will have their archive here.
+    search_dirs.push(PathBuf::from("/var/cache/pacman/pkg"));
+
+    // 5. Local artools repo that build-deploytix-iso.sh creates.
+    search_dirs.push(PathBuf::from("/var/lib/artools/repos/deploytix"));
+
     let mut found = Vec::new();
     let mut seen_names = HashSet::new();
 
@@ -420,6 +447,217 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     }
 
     found
+}
+
+// === On-demand package building ===
+
+/// Map a custom package name to the repository directory name that
+/// contains its PKGBUILD.
+fn repo_dir_for_package(pkg_name: &str) -> &'static str {
+    match pkg_name {
+        "deploytix-git" | "deploytix-gui-git" => "Deploytix",
+        "tkg-gui-git" => "tkg-gui",
+        "modular-git" => "Modular-1",
+        "unl0kr" => "unl0kr",
+        _ => "",
+    }
+}
+
+/// Search well-known locations for the PKGBUILD directory of a custom
+/// package.  Returns the directory containing the PKGBUILD if found.
+fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
+    let repo_name = repo_dir_for_package(pkg_name);
+    if repo_name.is_empty() {
+        return None;
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Relative to running binary.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(repo_root) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            if repo_name == "Deploytix" {
+                candidates.push(repo_root.join("pkg"));
+            } else if let Some(parent) = repo_root.parent() {
+                candidates.push(parent.join(repo_name).join("pkg"));
+            }
+        }
+    }
+
+    // Invoking user's home.
+    if let Some(home) = resolve_invoking_user_home() {
+        candidates.push(home.join(format!(".gitrepos/{}/pkg", repo_name)));
+        if repo_name == "tkg-gui" {
+            candidates.push(home.join("artools-workspace/tkg-gui-src/pkg"));
+        }
+    }
+
+    // CWD for Deploytix itself.
+    if repo_name == "Deploytix" {
+        candidates.push(PathBuf::from("pkg"));
+    }
+
+    candidates.into_iter().find(|d| d.join("PKGBUILD").exists())
+}
+
+/// Resolve the username of the user who invoked the installer (via
+/// sudo or pkexec).  `makepkg` refuses to run as root, so we need the
+/// original user.
+fn resolve_invoking_username() -> Option<String> {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() && user != "root" {
+            return Some(user);
+        }
+    }
+    if let Ok(uid_str) = std::env::var("PKEXEC_UID") {
+        if let Ok(uid) = uid_str.parse::<u32>() {
+            return username_for_uid(uid);
+        }
+    }
+    None
+}
+
+/// Map a numeric UID to a username by parsing `/etc/passwd`.
+fn username_for_uid(uid: u32) -> Option<String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 {
+            if let Ok(line_uid) = fields[2].parse::<u32>() {
+                if line_uid == uid {
+                    return Some(fields[0].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build a custom package from its PKGBUILD.
+///
+/// Runs `makepkg` as the invoking user in the PKGBUILD directory.
+/// Returns paths to any `.pkg.tar.zst` files produced.
+fn build_package_from_source(pkg_name: &str) -> Vec<PathBuf> {
+    let pkgbuild_dir = match find_pkgbuild_dir(pkg_name) {
+        Some(dir) => dir,
+        None => {
+            warn!("No PKGBUILD found for {}", pkg_name);
+            return Vec::new();
+        }
+    };
+
+    let username = match resolve_invoking_username() {
+        Some(u) => u,
+        None => {
+            warn!("Cannot determine invoking user for makepkg (need SUDO_USER or PKEXEC_UID)");
+            return Vec::new();
+        }
+    };
+
+    info!(
+        "Building {} from {} as user {}",
+        pkg_name,
+        pkgbuild_dir.display(),
+        username
+    );
+
+    let status = std::process::Command::new("sudo")
+        .args([
+            "-u",
+            &username,
+            "makepkg",
+            "-s",
+            "--noconfirm",
+            "--needed",
+            "--clean",
+        ])
+        .current_dir(&pkgbuild_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            info!("Successfully built {}", pkg_name);
+        }
+        Ok(s) => {
+            warn!(
+                "makepkg for {} exited with code {}",
+                pkg_name,
+                s.code().unwrap_or(-1)
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            warn!("Failed to run makepkg for {}: {}", pkg_name, e);
+            return Vec::new();
+        }
+    }
+
+    // Collect built packages.
+    let mut built = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&pkgbuild_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.ends_with(".pkg.tar.zst") {
+                let is_custom = CUSTOM_PKG_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix));
+                if is_custom {
+                    built.push(path);
+                }
+            }
+        }
+    }
+
+    built
+}
+
+/// Identify which of the needed custom packages are not yet covered by
+/// the pre-built package files already located.
+fn find_missing_packages<'a>(needed: &[&'a str], found: &[PathBuf]) -> Vec<&'a str> {
+    needed
+        .iter()
+        .copied()
+        .filter(|name| {
+            let prefix = format!("{}-", name);
+            !found.iter().any(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+        })
+        .collect()
+}
+
+/// Try to build any missing custom packages from source.  Returns
+/// newly built package paths that should be added to the repo.
+fn build_missing_packages(missing: &[&str]) -> Vec<PathBuf> {
+    let mut built = Vec::new();
+
+    // Deduplicate PKGBUILD dirs — deploytix-git and deploytix-gui-git
+    // share a single PKGBUILD.
+    let mut attempted_dirs = HashSet::new();
+
+    for pkg_name in missing {
+        let repo = repo_dir_for_package(pkg_name);
+        if !attempted_dirs.insert(repo) {
+            // Already built from this PKGBUILD directory.
+            continue;
+        }
+        built.extend(build_package_from_source(pkg_name));
+    }
+
+    built
 }
 
 /// Create a temporary local pacman repository from the given package
@@ -489,17 +727,32 @@ fn write_custom_pacman_conf(repo_dir: &str) -> Result<Option<String>> {
 /// Ensure the deploytix custom packages are resolvable by pacman for
 /// the upcoming basestrap invocation.
 ///
+/// `package_list` is the full list of package names that basestrap will
+/// install — only custom packages that actually appear in this list
+/// need to be available.
+///
 /// Returns `Some(path)` to a custom `pacman.conf` if one was created
 /// (use with `basestrap -C`), or `None` if the packages are already in
 /// a configured repository.
-pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
+pub fn prepare_deploytix_repo(
+    cmd: &CommandRunner,
+    package_list: &[String],
+) -> Result<Option<String>> {
     if cmd.is_dry_run() {
         info!("[dry-run] Would ensure deploytix local repo is available");
         return Ok(None);
     }
 
-    // Fast-path: packages already resolvable.
-    if custom_packages_in_sync_db() {
+    let needed = needed_custom_packages(package_list);
+    if needed.is_empty() {
+        info!("No custom packages in package list; skipping repo preparation");
+        return Ok(None);
+    }
+
+    info!("Custom packages needed: {}", needed.to_vec().join(", "));
+
+    // Fast-path: packages already resolvable in configured repos.
+    if custom_packages_in_sync_db(&needed) {
         info!("Deploytix custom packages found in configured repositories");
         return Ok(None);
     }
@@ -507,23 +760,16 @@ pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
     info!("Deploytix custom packages not in repos; preparing local repository");
 
     // 1. ISO-embedded repo already has a database — use it.
-    //    If /etc/pacman.conf already has the [deploytix] section (set up
-    //    by the ISO's live-overlay), we still need a custom config because
-    //    the sync DB check above failed — write one that's based on the
-    //    real system pacman.conf to ensure it's valid.
     let iso_db = Path::new(ISO_REPO_PATH).join("deploytix.db.tar.zst");
     if iso_db.exists() {
         if pacman_conf_has_deploytix_repo() {
-            // Config is already set up and repo exists — the sync refresh
-            // in custom_packages_in_sync_db() should have made this work.
-            // Try once more; if it still fails, write a temp config.
             info!("ISO-embedded repo exists and [deploytix] in pacman.conf; retrying sync");
             let _ = std::process::Command::new("pacman")
                 .args(["-Sy", "--noconfirm"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            if custom_packages_in_sync_db() {
+            if custom_packages_in_sync_db(&needed) {
                 return Ok(None);
             }
         }
@@ -531,17 +777,46 @@ pub fn prepare_deploytix_repo(cmd: &CommandRunner) -> Result<Option<String>> {
         return write_custom_pacman_conf(ISO_REPO_PATH);
     }
 
-    // 2. Search for pre-built package files.
-    let packages = locate_prebuilt_packages();
-    if packages.is_empty() {
-        return Err(DeploytixError::ConfigError(
-            "Cannot find deploytix-git / tkg-gui-git packages.\n\
-             These custom packages are not in any configured pacman repository \
-             and no pre-built .pkg.tar.zst files were found.\n\
-             Please run the installer from the Deploytix live ISO, or build the \
-             packages first with: iso/build-deploytix-iso.sh"
-                .to_string(),
-        ));
+    // 2. Search for pre-built package files (includes pacman cache and
+    //    artools local repo in addition to source tree locations).
+    let mut packages = locate_prebuilt_packages();
+
+    // 3. Identify packages still missing and attempt to build them
+    //    from source if PKGBUILDs are available.
+    let missing = find_missing_packages(&needed, &packages);
+    if !missing.is_empty() {
+        info!(
+            "Missing pre-built packages: {}; attempting to build from source",
+            missing.join(", ")
+        );
+        let newly_built = build_missing_packages(&missing);
+        if !newly_built.is_empty() {
+            info!("Built {} package file(s) from source", newly_built.len());
+            packages.extend(newly_built);
+        }
+    }
+
+    // 4. Final check — are all needed packages now available?
+    let still_missing = find_missing_packages(&needed, &packages);
+    if packages.is_empty() || !still_missing.is_empty() {
+        let missing_str = if still_missing.is_empty() {
+            needed.join(", ")
+        } else {
+            still_missing.join(", ")
+        };
+        return Err(DeploytixError::ConfigError(format!(
+            "Cannot resolve custom packages: {}\n\
+             These packages are not in any configured pacman repository, \
+             not found as pre-built .pkg.tar.zst files, and could not be \
+             built from source.\n\n\
+             To fix, try one of:\n\
+             - Run from the Deploytix live ISO (has all packages embedded)\n\
+             - Build packages first: cd pkg && makepkg -s\n\
+             - Clone sibling repos (tkg-gui, Modular-1, unl0kr) and build \
+               their PKGBUILDs\n\
+             - Run iso/build-deploytix-iso.sh to build everything at once",
+            missing_str
+        )));
     }
 
     info!(
@@ -648,14 +923,16 @@ pub fn run_basestrap_with_retries(
     install_root: &str,
     max_retries: u32,
 ) -> Result<()> {
+    // Build the package list first so we know exactly which custom
+    // packages need to be resolved.
+    let packages = build_package_list(config);
+
     // Ensure the custom [deploytix] packages are available.
-    let custom_conf = prepare_deploytix_repo(cmd)?;
+    let custom_conf = prepare_deploytix_repo(cmd, &packages)?;
 
     // Ensure the Arch [extra] repo is available for packages that
     // are not mirrored in the Artix repositories.
     let custom_conf = ensure_arch_repos(custom_conf, cmd)?;
-
-    let packages = build_package_list(config);
 
     info!(
         "Installing {} packages with basestrap to {}",

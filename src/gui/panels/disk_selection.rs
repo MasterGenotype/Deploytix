@@ -3,10 +3,8 @@
 use crate::gui::{state::DiskState, theme, widgets};
 use egui::{RichText, Ui};
 
-/// Render the disk selection panel. Returns `true` when a disk is selected.
-pub fn show(ui: &mut Ui, disk: &mut DiskState) -> bool {
-    widgets::page_heading(ui, "Select Target Disk");
-
+/// Render disk selection sections. Returns `true` when a disk is selected.
+pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
     ui.label("Choose the disk where Artix Linux will be installed.");
     widgets::validation_warning(ui, "All data on the selected disk will be erased!");
     ui.add_space(theme::SPACING_MD);
@@ -27,6 +25,7 @@ pub fn show(ui: &mut Ui, disk: &mut DiskState) -> bool {
         } else {
             egui::ScrollArea::vertical()
                 .max_height(280.0)
+                .id_salt("disk_list_scroll")
                 .show(ui, |ui| {
                     for (i, dev) in disk.devices.iter().enumerate() {
                         let is_selected = disk.selected_device_index == Some(i);

@@ -53,7 +53,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Deploytix - Artix Linux Installer")
             .with_min_inner_size([640.0, 480.0])
-            .with_maximized(true),
+            .with_fullscreen(true),
         ..Default::default()
     };
 

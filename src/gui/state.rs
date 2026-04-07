@@ -12,36 +12,17 @@ use std::sync::mpsc::Receiver;
 /// Wizard steps in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
-    DiskSelection,
-    DiskConfig,
-    SystemConfig,
-    UserConfig,
-    NetworkDesktop,
-    HandheldGaming,
+    Configure,
     Summary,
     Installing,
 }
 
 impl WizardStep {
-    pub const ALL: [Self; 8] = [
-        Self::DiskSelection,
-        Self::DiskConfig,
-        Self::SystemConfig,
-        Self::UserConfig,
-        Self::NetworkDesktop,
-        Self::HandheldGaming,
-        Self::Summary,
-        Self::Installing,
-    ];
+    pub const ALL: [Self; 3] = [Self::Configure, Self::Summary, Self::Installing];
 
     pub fn next(self) -> Option<Self> {
         match self {
-            Self::DiskSelection => Some(Self::DiskConfig),
-            Self::DiskConfig => Some(Self::SystemConfig),
-            Self::SystemConfig => Some(Self::UserConfig),
-            Self::UserConfig => Some(Self::NetworkDesktop),
-            Self::NetworkDesktop => Some(Self::HandheldGaming),
-            Self::HandheldGaming => Some(Self::Summary),
+            Self::Configure => Some(Self::Summary),
             Self::Summary => Some(Self::Installing),
             Self::Installing => None,
         }
@@ -49,25 +30,15 @@ impl WizardStep {
 
     pub fn prev(self) -> Option<Self> {
         match self {
-            Self::DiskSelection => None,
-            Self::DiskConfig => Some(Self::DiskSelection),
-            Self::SystemConfig => Some(Self::DiskConfig),
-            Self::UserConfig => Some(Self::SystemConfig),
-            Self::NetworkDesktop => Some(Self::UserConfig),
-            Self::HandheldGaming => Some(Self::NetworkDesktop),
-            Self::Summary => Some(Self::HandheldGaming),
+            Self::Configure => None,
+            Self::Summary => Some(Self::Configure),
             Self::Installing => None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::DiskSelection => "Disk",
-            Self::DiskConfig => "Partitions",
-            Self::SystemConfig => "System",
-            Self::UserConfig => "User",
-            Self::NetworkDesktop => "Network",
-            Self::HandheldGaming => "Gaming",
+            Self::Configure => "Configure",
             Self::Summary => "Review",
             Self::Installing => "Install",
         }

@@ -11,96 +11,90 @@ const SWAP_ESTIMATE_MIB: u64 = 8192;
 /// Minimum partition size in GiB shown on sliders.
 const MIN_PART_GIB: u64 = 1;
 
-/// Render the disk configuration panel. Returns `true` when configuration is valid.
-pub fn show(ui: &mut Ui, disk: &mut DiskState) -> bool {
-    widgets::page_heading(ui, "Disk Configuration");
-
+/// Render disk configuration sections. Returns `true` when configuration is valid.
+pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
     let disk_size_mib = disk.selected_disk_size_mib();
 
-    let output = egui::ScrollArea::vertical().show(ui, |ui| {
-        // ── Filesystem & Swap ──────────────────────────────────────
-        widgets::section(ui, "Filesystem & Swap", |ui| {
-            filesystem_section(
-                ui,
-                &mut disk.filesystem,
-                &mut disk.swap_type,
-                &mut disk.zram_percent,
-            );
-        });
-
-        // ── Encryption ─────────────────────────────────────────────
-        widgets::section(ui, "Encryption", |ui| {
-            encryption_section(
-                ui,
-                &mut disk.encryption,
-                &mut disk.encryption_password,
-                &mut disk.boot_encryption,
-                &mut disk.integrity,
-            );
-        });
-
-        // ── LVM Thin Provisioning ──────────────────────────────────
-        widgets::section(ui, "LVM Thin Provisioning", |ui| {
-            lvm_section(
-                ui,
-                &mut disk.use_lvm_thin,
-                &mut disk.lvm_vg_name,
-                &mut disk.lvm_thin_pool_name,
-                &mut disk.lvm_thin_pool_percent,
-            );
-        });
-
-        // Auto-enable subvolumes for btrfs
-        disk.use_subvolumes = disk.filesystem == Filesystem::Btrfs;
-
-        // ── Options ────────────────────────────────────────────────
-        widgets::section(ui, "Options", |ui| {
-            ui.checkbox(
-                &mut disk.preserve_home,
-                "Preserve existing /home (reinstall without overwriting user data)",
-            );
-            if disk.preserve_home {
-                widgets::info_text(
-                    ui,
-                    "System partitions will be erased but /home will be kept intact.",
-                );
-                if disk.filesystem == Filesystem::Zfs {
-                    widgets::validation_warning(ui, "preserve_home is not supported with ZFS");
-                }
-                if disk.use_lvm_thin {
-                    widgets::validation_warning(
-                        ui,
-                        "preserve_home is not supported with LVM thin provisioning",
-                    );
-                }
-                let has_home = disk.partitions.iter().any(|p| p.mount_point == "/home");
-                if !has_home && !disk.use_subvolumes {
-                    widgets::validation_warning(
-                        ui,
-                        "preserve_home requires a /home partition or subvolumes",
-                    );
-                }
-            }
-        });
-
-        // ── Partitions ─────────────────────────────────────────────
-        widgets::section(ui, "Partitions", |ui| {
-            partition_section(
-                ui,
-                disk_size_mib,
-                &disk.swap_type,
-                &mut disk.partitions,
-                &mut disk.new_partition_mount,
-                &mut disk.new_partition_size,
-                &mut disk.new_partition_label,
-            );
-        });
-
-        // ── Validation ─────────────────────────────────────────────
-        validate(ui, disk)
+    // ── Filesystem & Swap ──────────────────────────────────────
+    widgets::section(ui, "Filesystem & Swap", |ui| {
+        filesystem_section(
+            ui,
+            &mut disk.filesystem,
+            &mut disk.swap_type,
+            &mut disk.zram_percent,
+        );
     });
 
-    output.inner
+    // ── Encryption ─────────────────────────────────────────────
+    widgets::section(ui, "Encryption", |ui| {
+        encryption_section(
+            ui,
+            &mut disk.encryption,
+            &mut disk.encryption_password,
+            &mut disk.boot_encryption,
+            &mut disk.integrity,
+        );
+    });
+
+    // ── LVM Thin Provisioning ──────────────────────────────────
+    widgets::section(ui, "LVM Thin Provisioning", |ui| {
+        lvm_section(
+            ui,
+            &mut disk.use_lvm_thin,
+            &mut disk.lvm_vg_name,
+            &mut disk.lvm_thin_pool_name,
+            &mut disk.lvm_thin_pool_percent,
+        );
+    });
+
+    // Auto-enable subvolumes for btrfs
+    disk.use_subvolumes = disk.filesystem == Filesystem::Btrfs;
+
+    // ── Options ────────────────────────────────────────────────
+    widgets::section(ui, "Options", |ui| {
+        ui.checkbox(
+            &mut disk.preserve_home,
+            "Preserve existing /home (reinstall without overwriting user data)",
+        );
+        if disk.preserve_home {
+            widgets::info_text(
+                ui,
+                "System partitions will be erased but /home will be kept intact.",
+            );
+            if disk.filesystem == Filesystem::Zfs {
+                widgets::validation_warning(ui, "preserve_home is not supported with ZFS");
+            }
+            if disk.use_lvm_thin {
+                widgets::validation_warning(
+                    ui,
+                    "preserve_home is not supported with LVM thin provisioning",
+                );
+            }
+            let has_home = disk.partitions.iter().any(|p| p.mount_point == "/home");
+            if !has_home && !disk.use_subvolumes {
+                widgets::validation_warning(
+                    ui,
+                    "preserve_home requires a /home partition or subvolumes",
+                );
+            }
+        }
+    });
+
+    // ── Partitions ─────────────────────────────────────────────
+    widgets::section(ui, "Partitions", |ui| {
+        partition_section(
+            ui,
+            disk_size_mib,
+            &disk.swap_type,
+            &mut disk.partitions,
+            &mut disk.new_partition_mount,
+            &mut disk.new_partition_size,
+            &mut disk.new_partition_label,
+        );
+    });
+
+    // ── Validation ─────────────────────────────────────────────
+    validate(ui, disk)
 }
 
 fn filesystem_section(

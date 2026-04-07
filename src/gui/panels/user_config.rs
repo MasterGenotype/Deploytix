@@ -3,10 +3,8 @@
 use crate::gui::{state::UserState, theme, widgets};
 use egui::Ui;
 
-/// Render the user configuration panel. Returns `true` when valid.
-pub fn show(ui: &mut Ui, user: &mut UserState) -> bool {
-    widgets::page_heading(ui, "User Configuration");
-
+/// Render user configuration sections. Returns `true` when valid.
+pub(crate) fn show_sections(ui: &mut Ui, user: &mut UserState) -> bool {
     widgets::section(ui, "Account", |ui| {
         ui.horizontal(|ui| {
             ui.label("Username:");
