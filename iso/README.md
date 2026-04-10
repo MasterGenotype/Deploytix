@@ -63,6 +63,7 @@ The ISO is written to `~/artools-workspace/iso/deploytix/`.
 4. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`
 5. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo`; at runtime the Rust installer detects this repo and generates a temporary pacman.conf for basestrap
 6. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
+7. **Overrides the live GRUB templates** — the ISO auto-selects the appropriate default boot entry after a 1 second timeout instead of waiting indefinitely at the GRUB menu
 
 To remove all installed artifacts (profile, repo, pacman.conf override), run `./iso/build-deploytix-iso.sh -r`.
 
@@ -89,4 +90,10 @@ The script starts from the system `iso-x86_64.conf`. If you need custom mirrors 
 ```sh
 # USB stick (replace /dev/sdX)
 sudo dd if=~/artools-workspace/iso/deploytix/artix-deploytix-*.iso of=/dev/sdX bs=4M status=progress oflag=sync
+```
+
+For a persistent USB that also patches older ISOs to auto-boot the default Deploytix entry, use:
+
+```sh
+sudo ./iso/write-deploytix-usb.sh -d /dev/sdX
 ```

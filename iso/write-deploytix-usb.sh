@@ -34,7 +34,7 @@ Write a Deploytix ISO to a USB device with persistent storage.
 The script will:
   1. Write the ISO image to the target device (dd)
   2. Create a persistence partition (ext4, labeled '${COW_LABEL}')
-  3. Patch the GRUB config to enable persistence automatically
+  3. Patch the GRUB config to enable persistence and auto-boot
 
 Options:
   -d <device>   Target block device (e.g. /dev/sdb)          [required]
@@ -202,8 +202,8 @@ msg "Formatting ${PERSIST_PART} as ext4 (label=${COW_LABEL})..."
 mkfs.ext4 -qF -L "${COW_LABEL}" "${PERSIST_PART}"
 msg2 "Formatted successfully"
 
-# ── Step 5: Patch GRUB kernels.cfg for persistence ──────────────────────────
-msg "Patching GRUB kernel command line for persistence..."
+# ── Step 5: Patch GRUB config for persistence and auto-boot ─────────────────
+msg "Patching GRUB config for persistence and auto-boot..."
 
 # The ISO's first partition contains an ISO9660 filesystem with the GRUB config.
 # We patch kernels.cfg in-place on the raw device, adding cow_label to the
@@ -243,9 +243,66 @@ import sys, os
 dev = sys.argv[1]
 cow_label = sys.argv[2]
 
-# Read the ISO partition to find kernels.cfg
-# Search in 2MiB chunks for the target string
 CHUNK = 2 * 1024 * 1024
+
+def find_all_offsets(path, needle):
+    hits = []
+    overlap = max(len(needle) - 1, 0)
+    prev = b''
+    with open(path, 'rb') as f:
+        offset = 0
+        while True:
+            data = f.read(CHUNK)
+            if not data:
+                break
+            buf = prev + data
+            start = 0
+            while True:
+                idx = buf.find(needle, start)
+                if idx < 0:
+                    break
+                hits.append(offset - len(prev) + idx)
+                start = idx + 1
+                if len(hits) > 8:
+                    return hits
+            prev = buf[-overlap:] if overlap else b''
+            offset += len(data)
+    return hits
+
+def patch_bytes(path, offset, payload):
+    fd = os.open(path, os.O_WRONLY | os.O_SYNC)
+    try:
+        os.lseek(fd, offset, os.SEEK_SET)
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+
+def replace_in_unique_context(path, context, needle, replacement, description):
+    if len(needle) != len(replacement):
+        print(f'ERROR: Replacement length mismatch for {description}', file=sys.stderr)
+        sys.exit(1)
+
+    hits = find_all_offsets(path, context)
+    if len(hits) == 0:
+        patched_context = context.replace(needle, replacement, 1)
+        if find_all_offsets(path, patched_context):
+            print(f'  -> Already patched: {description}')
+            return
+        print(f'ERROR: Could not find {description}', file=sys.stderr)
+        sys.exit(1)
+    if len(hits) > 1:
+        print(f'ERROR: Found multiple matches while patching {description}', file=sys.stderr)
+        sys.exit(1)
+
+    rel = context.find(needle)
+    if rel < 0:
+        print(f'ERROR: Internal patch setup failed for {description}', file=sys.stderr)
+        sys.exit(1)
+
+    patch_bytes(path, hits[0] + rel, replacement)
+    print(f'  -> Patched: {description}')
+
+# Read the ISO partition to find kernels.cfg.
 target = b'overlay=livefs; do'
 new_params_insert = f' cow_label={cow_label}'.encode()
 
@@ -325,13 +382,28 @@ if len(patched) != len(block_data):
     else:
         patched = patched[:len(block_data)]
 
-# Write back
-fd = os.open(dev, os.O_WRONLY | os.O_SYNC)
-os.lseek(fd, block_start, os.SEEK_SET)
-os.write(fd, patched)
-os.close(fd)
+# Write back.
+patch_bytes(dev, block_start, patched)
 
 print(f'  -> Patched: added cow_label={cow_label} to kernel command line')
+
+# Force USB boots to use the stick/HDD entry and continue automatically after
+# a short timeout. These replacements are fixed-width, so the ISO9660 metadata
+# remains valid.
+replace_in_unique_context(
+    dev,
+    b'show_keymaps\n    show_languages\n    default=2\n}\n\nfunction boot_defaults {',
+    b'default=2',
+    b'default=5',
+    'set the default boot entry to "From Stick/HDD"',
+)
+replace_in_unique_context(
+    dev,
+    b'export menu_color_highlight\nexport pager\n\nfunction menu_help {',
+    b'export pager',
+    b'timeout=1   ',
+    'enable a 1-second GRUB autoboot timeout',
+)
 PYEOF
 
 sync
@@ -343,5 +415,6 @@ printf "  Device:      %s\n" "${DEVICE}"
 printf "  ISO:         %s\n" "${ISO_NAME}"
 printf "  Persistence: %s (label=%s)\n" "${PERSIST_PART}" "${COW_LABEL}"
 echo ""
-msg2 "Boot from this USB and changes will persist across reboots."
+msg2 "Boot from this USB and it will auto-boot the default Deploytix entry."
+msg2 "Changes will persist across reboots."
 msg2 "To reset persistence, format ${PERSIST_PART}: mkfs.ext4 -L ${COW_LABEL} ${PERSIST_PART}"
