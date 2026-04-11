@@ -208,7 +208,68 @@ pub fn install_wine_packages(
 
 // ======================== Gaming Packages ========================
 
-const GAMING_PACKAGES: &[&str] = &["steam", "gamescope"];
+/// Packages installed via pacman for the gaming path.
+///
+/// Note: `gamescope` is intentionally absent — the Artix/Arch repo build has
+/// long-standing issues on handheld hardware.  We build gamescope from the
+/// Bazzite-maintained fork (`github.com/bazzite-org/gamescope`) in
+/// [`build_bazzite_gamescope`] and install it into `/usr/bin/gamescope`,
+/// replacing the distro copy.
+const GAMING_PACKAGES: &[&str] = &["steam"];
+
+/// Runtime libraries gamescope links against at runtime. These are the
+/// dependencies listed by the Artix `gamescope` package; we install them
+/// directly since we are not pulling in the packaged gamescope itself.
+const GAMESCOPE_RUNTIME_DEPS: &[&str] = &[
+    "lcms2",
+    "libavif",
+    "libcap",
+    "libdecor",
+    "libdrm",
+    "libei",
+    "libinput",
+    "libpipewire",
+    "libx11",
+    "libxcb",
+    "libxcomposite",
+    "libxcursor",
+    "libxdamage",
+    "libxext",
+    "libxfixes",
+    "libxi",
+    "libxkbcommon",
+    "libxmu",
+    "libxrender",
+    "libxres",
+    "libxtst",
+    "libxxf86vm",
+    "luajit",
+    "pixman",
+    "sdl2",
+    "seatd",
+    "vulkan-icd-loader",
+    "wayland",
+    "xcb-util-errors",
+    "xcb-util-wm",
+    "xorg-server-xwayland",
+];
+
+/// Build-time tools and headers required to compile the Bazzite gamescope
+/// fork from source inside the chroot.
+const GAMESCOPE_BUILD_DEPS: &[&str] = &[
+    "git",
+    "meson",
+    "ninja",
+    "cmake",
+    "glslang",
+    "pkgconf",
+    "wayland-protocols",
+    "vulkan-headers",
+    "xorgproto",
+    "hwdata",
+    "stb",
+    "benchmark",
+];
 
 /// Enable the [lib32] repository in the chroot's pacman.conf.
 ///
@@ -252,11 +313,15 @@ fn lib32_vulkan_packages(config: &DeploymentConfig) -> Vec<&'static str> {
     pkgs
 }
 
-/// Install gaming packages via pacman in chroot.
+/// Install gaming packages via pacman in chroot, then build the Bazzite
+/// gamescope fork from source into `/usr/bin/gamescope`.
 ///
 /// 1. Enables the `[lib32]` repository (required for Steam's 32-bit deps).
 /// 2. Installs the appropriate `lib32-*` Vulkan driver for every selected GPU.
-/// 3. Installs Steam and gamescope.
+/// 3. Installs Steam + gamescope's runtime library dependencies.
+/// 4. Builds gamescope from `github.com/bazzite-org/gamescope` and installs
+///    it with `meson install --prefix=/usr`, replacing any pre-existing
+///    `/usr/bin/gamescope`.
 pub fn install_gaming_packages(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -280,6 +345,18 @@ pub fn install_gaming_packages(
             "  [dry-run] Would install gaming packages: {:?}",
             GAMING_PACKAGES
         );
+        println!(
+            "  [dry-run] Would install gamescope runtime deps: {:?}",
+            GAMESCOPE_RUNTIME_DEPS
+        );
+        println!(
+            "  [dry-run] Would install gamescope build deps: {:?}",
+            GAMESCOPE_BUILD_DEPS
+        );
+        println!(
+            "  [dry-run] Would clone and build github.com/bazzite-org/gamescope as {}",
+            config.user.name
+        );
         return Ok(());
     }
 
@@ -294,12 +371,80 @@ pub fn install_gaming_packages(
         cmd.run_in_chroot(install_root, &vulkan_cmd)?;
     }
 
-    // Step 3: Install Steam and gamescope
-    let pkg_list = GAMING_PACKAGES.join(" ");
+    // Step 3: Install Steam + gamescope runtime dependencies (we do not
+    // install the packaged gamescope — we build the Bazzite fork in step 4).
+    let mut packages: Vec<&str> = Vec::new();
+    packages.extend(GAMING_PACKAGES);
+    packages.extend(GAMESCOPE_RUNTIME_DEPS);
+    let pkg_list = packages.join(" ");
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     cmd.run_in_chroot(install_root, &install_cmd)?;
 
+    // Step 4: Build gamescope from the Bazzite-maintained source
+    build_bazzite_gamescope(cmd, config, install_root)?;
+
     info!("Gaming package installation complete");
+    Ok(())
+}
+
+/// Clone and build gamescope from the Bazzite-maintained fork, then install
+/// it with `meson install --prefix=/usr`, overwriting any stock
+/// `/usr/bin/gamescope`.
+///
+/// The clone, submodule init, and meson build run as the target user (via
+/// `sudo -u`) so that the source checkout is owned by the user, not root.
+/// `meson install` is invoked as root since writing under `/usr` requires
+/// elevated privileges.
+fn build_bazzite_gamescope(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let username = &config.user.name;
+
+    info!(
+        "Building gamescope from bazzite-org/gamescope fork as {}",
+        username
+    );
+
+    // Ensure build tool chain is present inside the chroot.
+    let build_deps = GAMESCOPE_BUILD_DEPS.join(" ");
+    cmd.run_in_chroot(
+        install_root,
+        &format!("pacman -S --noconfirm --needed base-devel {build_deps}"),
+    )?;
+
+    // Clone, update submodules, configure, build, and install. The whole
+    // thing runs inside a single chroot invocation so /tmp state persists
+    // across commands (artix-chroot mounts a fresh tmpfs on each call).
+    //
+    // `meson install --skip-subprojects` is the upstream-recommended install
+    // incantation — bundled libs live under subprojects/ and don't belong in
+    // /usr/{bin,lib}.  We still need root for the install step.
+    let build_script = format!(
+        "set -e; \
+         rm -rf /tmp/gamescope-build; \
+         mkdir -p /tmp/gamescope-build; \
+         chown {user}:{user} /tmp/gamescope-build; \
+         sudo -u {user} bash -c '\
+           set -e; \
+           cd /tmp/gamescope-build && \
+           git clone --depth=1 https://github.com/bazzite-org/gamescope gamescope && \
+           cd gamescope && \
+           git submodule update --init --recursive --depth=1 && \
+           meson setup build \
+             --prefix=/usr \
+             --buildtype=release \
+             -Dpipewire=enabled && \
+           ninja -C build'; \
+         meson install -C /tmp/gamescope-build/gamescope/build --skip-subprojects; \
+         rm -rf /tmp/gamescope-build",
+        user = username
+    );
+
+    cmd.run_in_chroot(install_root, &build_script)?;
+
+    info!("Bazzite gamescope installed to /usr/bin/gamescope");
     Ok(())
 }
 
@@ -591,10 +736,20 @@ pub fn install_sysctl_gaming(
 
 // ======================== Handheld Daemon (HHD) ========================
 
+/// AUR packages installed for HHD.
+///
+/// We use `hhd-git` (a split PKGBUILD that depends on `hhd-license-git`)
+/// instead of the tagged `hhd` release or `adjustor` — `adjustor` is now
+/// bundled into `hhd` itself (`replaces=(adjustor)` in the upstream
+/// PKGBUILD).  `hhd-systemd-git` is intentionally excluded (we generate
+/// init-specific service files instead), and `hhd-ui` is excluded because
+/// it spawns a browser overlay that races with the gamescope/Steam session
+/// launch and causes a black screen on the reference handheld device.
+const HHD_AUR_PACKAGES: &[&str] = &["hhd-git"];
+
 /// Install Handheld Daemon (HHD) via yay and write an init-specific service
 /// file so that HHD starts automatically on boot.
 ///
-/// HHD is available on the AUR as `hhd`, `adjustor`, and `hhd-ui`.
 /// Upstream only ships a systemd service; we generate the appropriate file
 /// for whichever init system the user has chosen.
 ///
@@ -614,8 +769,9 @@ pub fn install_hhd(
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would install AUR packages via yay as {}: hhd adjustor hhd-ui",
-            username
+            "  [dry-run] Would install AUR packages via yay as {}: {}",
+            username,
+            HHD_AUR_PACKAGES.join(" ")
         );
         println!("  [dry-run] Would write /etc/modules-load.d/hhd.conf (uhid)");
         println!(
@@ -627,8 +783,9 @@ pub fn install_hhd(
 
     // Step 1: Install AUR packages via yay
     let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed hhd adjustor hhd-ui",
-        username
+        "sudo -u {} yay -S --noconfirm --needed {}",
+        username,
+        HHD_AUR_PACKAGES.join(" ")
     );
     cmd.run_in_chroot(install_root, &install_cmd)?;
     info!("  HHD AUR packages installed");
@@ -654,6 +811,12 @@ pub fn install_hhd(
 }
 
 /// Write the HHD service file for the configured init system.
+///
+/// HHD needs to run **as root** — it writes to sysfs, /dev/uinput, ACPI
+/// interfaces, and fan/TDP controls.  The `--user <name>` flag tells HHD
+/// whose config directory to read; it does not drop privileges.  This
+/// matches the upstream `hhd@.service` systemd unit, which has no `User=`
+/// directive.
 fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &str) -> Result<()> {
     use crate::config::InitSystem;
 
@@ -665,17 +828,19 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
             let run_script = format!(
                 "#!/bin/sh\n\
                  exec 2>&1\n\
-                 exec chpst -u {user} /usr/bin/hhd --user {user}\n",
+                 exec /usr/bin/hhd --user {user}\n",
                 user = username
             );
             let run_path = format!("{}/run", sv_dir);
             fs::write(&run_path, &run_script)?;
             fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
 
-            // log/run — pipe to logger
+            // log/run — pipe to svlogd
             let log_dir = format!("{}/log", sv_dir);
             fs::create_dir_all(&log_dir)?;
-            let log_run = "#!/bin/sh\nexec svlogd -tt /var/log/hhd\n";
+            let log_run = "#!/bin/sh\n\
+                           [ -d /var/log/hhd ] || install -dm 755 /var/log/hhd\n\
+                           exec svlogd -tt /var/log/hhd\n";
             let log_run_path = format!("{}/run", log_dir);
             fs::write(&log_run_path, log_run)?;
             fs::set_permissions(&log_run_path, fs::Permissions::from_mode(0o755))?;
@@ -687,12 +852,12 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
             let init_d = format!("{}/etc/init.d", install_root);
             fs::create_dir_all(&init_d)?;
 
+            // Note: no `command_user` — HHD must run as root.
             let script = format!(
                 "#!/sbin/openrc-run\n\
                  description=\"Handheld Daemon Service\"\n\
                  command=\"/usr/bin/hhd\"\n\
                  command_args=\"--user {user}\"\n\
-                 command_user=\"{user}\"\n\
                  command_background=true\n\
                  pidfile=\"/var/run/hhd.pid\"\n\
                  \n\
@@ -716,9 +881,10 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
             // type file declares this a long-running service
             fs::write(format!("{}/type", sv_dir), "longrun\n")?;
 
+            // Run as root (no s6-setuidgid wrapping).
             let run_script = format!(
                 "#!/bin/sh\n\
-                 exec s6-setuidgid {user} /usr/bin/hhd --user {user} 2>&1\n",
+                 exec /usr/bin/hhd --user {user} 2>&1\n",
                 user = username
             );
             let run_path = format!("{}/run", sv_dir);
@@ -732,10 +898,10 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
             let dinit_d = format!("{}/etc/dinit.d", install_root);
             fs::create_dir_all(&dinit_d)?;
 
+            // No `run-as` — HHD must run as root.
             let service = format!(
                 "type = process\n\
                  command = /usr/bin/hhd --user {user}\n\
-                 run-as = {user}\n\
                  restart = true\n",
                 user = username
             );
@@ -752,21 +918,33 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 
 // ======================== Decky Loader ========================
 
-/// Install Decky Loader — the Steam plugin framework — by downloading the
-/// latest `PluginLoader` binary from the GitHub releases API and writing an
-/// init-specific service file.
+/// Install Decky Loader — the Steam plugin framework — from the
+/// `decky-loader-bin` AUR package, then bootstrap the user's data
+/// directory with `decky-loader-helper` and write an init-specific
+/// service file.
 ///
-/// Layout created on the target system:
+/// Layout created on the target system (mirrors the upstream systemd
+/// unit shipped by `decky-loader-bin`):
 /// ```
-/// /home/{user}/homebrew/
+/// /usr/lib/decky-loader/PluginLoader               (AUR package file)
+/// /usr/bin/decky-loader-helper                     (AUR package file)
+/// /home/{user}/.local/var/opt/decky-loader/
 ///   services/
-///     PluginLoader          (executable binary, downloaded at install time)
-///     .loader.version       (tag of the installed release)
-///   plugins/                (empty; populated at runtime by Steam/Decky)
-/// ~/.steam/steam/.cef-enable-remote-debugging   (flag file for Steam's CEF)
+///     PluginLoader          (copy installed by decky-loader-helper)
+///     .loader.version       (version tag written by the helper)
+///   plugins/
+/// ~/.steam/steam/.cef-enable-remote-debugging
 /// ```
 ///
-/// Requires `install_gaming = true` (Steam must be present).
+/// The init service runs `PluginLoader` **as the greetd session user**
+/// (not root) per the reference handheld configuration — this means Decky
+/// can read the user's Steam data but is sandboxed out of privileged
+/// system operations.  Plugins that need root use `decky-loader` helper
+/// binaries separately.
+///
+/// Requires `install_gaming = true` (Steam must be present) and
+/// `install_yay = true` (we install via yay).  The caller
+/// (`installer.rs`) checks both.
 pub fn install_decky_loader(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -777,17 +955,19 @@ pub fn install_decky_loader(
     }
 
     let username = &config.user.name;
-    let homebrew = format!("/home/{}/homebrew", username);
-    let homebrew_host = format!("{}{}", install_root, homebrew);
+    let decky_data = format!("/home/{}/.local/var/opt/decky-loader", username);
 
     info!("Installing Decky Loader for user {}", username);
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create {}/services/ and {}/plugins/",
-            homebrew, homebrew
+            "  [dry-run] Would install decky-loader-bin via yay as {}",
+            username
         );
-        println!("  [dry-run] Would download PluginLoader from GitHub releases");
+        println!(
+            "  [dry-run] Would bootstrap {} via /usr/bin/decky-loader-helper",
+            decky_data
+        );
         println!(
             "  [dry-run] Would write Decky Loader service file for init: {}",
             config.system.init
@@ -795,17 +975,23 @@ pub fn install_decky_loader(
         return Ok(());
     }
 
-    // Step 1: Create directory structure
-    fs::create_dir_all(format!("{}/services", homebrew_host))?;
-    fs::create_dir_all(format!("{}/plugins", homebrew_host))?;
-    info!("  Created homebrew directory structure");
+    // Step 1: Install decky-loader-bin via yay.  This drops the binary at
+    // /usr/lib/decky-loader/PluginLoader and the helper at
+    // /usr/bin/decky-loader-helper.
+    let install_cmd = format!(
+        "sudo -u {} yay -S --noconfirm --needed decky-loader-bin",
+        username
+    );
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+    info!("  decky-loader-bin installed");
 
-    // Step 2: Enable Steam CEF remote debugging (required by Decky's frontend)
+    // Step 2: Enable Steam CEF remote debugging (required by Decky's frontend).
+    // The helper below also does this, but Flatpak Steam installs need it
+    // at a separate path that the helper doesn't know about.
     let steam_dir = format!("{}/home/{}/.steam/steam", install_root, username);
     fs::create_dir_all(&steam_dir)?;
     fs::write(format!("{steam_dir}/.cef-enable-remote-debugging"), "")?;
 
-    // Also handle Flatpak Steam if present (no-op when the dir doesn't exist)
     let flatpak_steam = format!(
         "{}/home/{}/.var/app/com.valvesoftware.Steam/data/Steam",
         install_root, username
@@ -815,35 +1001,27 @@ pub fn install_decky_loader(
     }
     info!("  Enabled Steam CEF remote debugging");
 
-    // Step 3: Download PluginLoader binary via the GitHub releases API.
-    // We fetch the releases list with curl, parse it with jq to find the
-    // latest non-prerelease asset URL, then pipe that into a second curl.
-    let download_cmd = format!(
-        r#"curl -sL "https://api.github.com/repos/SteamDeckHomebrew/decky-loader/releases" \
-  | jq -r 'first(.[] | select(.prerelease == false)) | .assets[] | .browser_download_url | select(endswith("PluginLoader"))' \
-  | xargs -I{{}} curl -Lo {homebrew}/services/PluginLoader {{}} \
-  && chmod +x {homebrew}/services/PluginLoader"#,
-        homebrew = homebrew
+    // Step 3: Bootstrap the user's Decky data directory with the helper
+    // shipped by decky-loader-bin.  The helper reads the installed version
+    // from pacman, creates {services,plugins}/ owned by the user, copies
+    // /usr/lib/decky-loader/PluginLoader into services/, and records the
+    // version tag in .loader.version.
+    let helper_cmd = format!(
+        "DECKY_VER=$(pacman -Q decky-loader-bin | awk '{{print $2}}' | sed 's/-[0-9]*$//'); \
+         /usr/bin/decky-loader-helper \"v${{DECKY_VER}}\" {user}",
+        user = username
     );
-    cmd.run_in_chroot(install_root, &download_cmd)?;
-    info!("  Downloaded PluginLoader binary");
+    cmd.run_in_chroot(install_root, &helper_cmd)?;
+    info!("  Bootstrapped Decky data directory at {}", decky_data);
 
-    // Step 4: Record the installed version tag
-    let version_cmd = format!(
-        r#"curl -sL "https://api.github.com/repos/SteamDeckHomebrew/decky-loader/releases" \
-  | jq -r 'first(.[] | select(.prerelease == false)) | .tag_name' \
-  > {homebrew}/services/.loader.version"#,
-        homebrew = homebrew
-    );
-    cmd.run_in_chroot(install_root, &version_cmd)?;
-    info!("  Recorded loader version");
+    // Step 4: Write init-specific service file
+    write_decky_service(config, install_root, username, &decky_data)?;
 
-    // Step 5: Write init-specific service file
-    write_decky_service(config, install_root, username, &homebrew)?;
-
-    // Step 6: Fix ownership of everything under ~/homebrew
+    // Step 5: Ensure ownership under the user's home stays correct
+    // (helper already sets ownership on the decky data dir, but .steam
+    // was created by us as root above).
     let chown_cmd = format!(
-        "chown -R {user}:{user} /home/{user}/homebrew /home/{user}/.steam",
+        "chown -R {user}:{user} /home/{user}/.local /home/{user}/.steam",
         user = username
     );
     cmd.run_in_chroot(install_root, &chown_cmd)?;
@@ -852,31 +1030,45 @@ pub fn install_decky_loader(
     Ok(())
 }
 
-/// Write the plugin_loader service file for the configured init system.
+/// Write the `plugin_loader` service file for the configured init system.
+///
+/// Decky runs as the greetd session user with HOMEBREW_FOLDER pointing at
+/// `~/.local/var/opt/decky-loader`.  UNPRIVILEGED_PATH / PRIVILEGED_PATH
+/// are historical aliases consumed by older PluginLoader builds; we set
+/// them to the same path for compatibility.
 fn write_decky_service(
     config: &DeploymentConfig,
     install_root: &str,
-    _username: &str,
-    homebrew: &str,
+    username: &str,
+    decky_data: &str,
 ) -> Result<()> {
     use crate::config::InitSystem;
 
-    // Decky Loader must run as root so it can inject into Steam's process.
-    // The UNPRIVILEGED_PATH/PRIVILEGED_PATH env vars tell it where the
-    // homebrew directory lives.
+    let plugin_loader = format!("{}/services/PluginLoader", decky_data);
+    let working_dir = format!("{}/services", decky_data);
 
     match config.system.init {
         InitSystem::Runit => {
             let sv_dir = format!("{}/etc/runit/sv/plugin_loader", install_root);
             fs::create_dir_all(&sv_dir)?;
 
+            // chpst -u user:user drops to the session user and its primary
+            // group before exec'ing PluginLoader.  Environment is exported
+            // inline so it survives the chpst exec chain.
             let run_script = format!(
                 "#!/bin/sh\n\
-                 export UNPRIVILEGED_PATH={hb}\n\
-                 export PRIVILEGED_PATH={hb}\n\
+                 exec 2>&1\n\
+                 export HOMEBREW_FOLDER={data}\n\
+                 export UNPRIVILEGED_PATH={data}\n\
+                 export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
-                 exec {hb}/services/PluginLoader 2>&1\n",
-                hb = homebrew
+                 export HOME=/home/{user}\n\
+                 cd {wd}\n\
+                 exec chpst -u {user}:{user} {pl}\n",
+                data = decky_data,
+                user = username,
+                wd = working_dir,
+                pl = plugin_loader
             );
             let run_path = format!("{}/run", sv_dir);
             fs::write(&run_path, &run_script)?;
@@ -884,7 +1076,9 @@ fn write_decky_service(
 
             let log_dir = format!("{}/log", sv_dir);
             fs::create_dir_all(&log_dir)?;
-            let log_run = "#!/bin/sh\nexec svlogd -tt /var/log/plugin_loader\n";
+            let log_run = "#!/bin/sh\n\
+                           [ -d /var/log/plugin_loader ] || install -dm 755 /var/log/plugin_loader\n\
+                           exec svlogd -tt /var/log/plugin_loader\n";
             let log_run_path = format!("{}/run", log_dir);
             fs::write(&log_run_path, log_run)?;
             fs::set_permissions(&log_run_path, fs::Permissions::from_mode(0o755))?;
@@ -896,21 +1090,30 @@ fn write_decky_service(
             let init_d = format!("{}/etc/init.d", install_root);
             fs::create_dir_all(&init_d)?;
 
+            // start_pre bootstraps env + working directory; command_user
+            // drops privileges to the session user.
             let script = format!(
                 "#!/sbin/openrc-run\n\
                  description=\"SteamDeck Plugin Loader\"\n\
-                 command=\"{hb}/services/PluginLoader\"\n\
+                 command=\"{pl}\"\n\
+                 command_user=\"{user}:{user}\"\n\
                  command_background=true\n\
-                 pidfile=\"/var/run/plugin_loader.pid\"\n\
+                 directory=\"{wd}\"\n\
+                 pidfile=\"/run/plugin_loader.pid\"\n\
                  \n\
-                 export UNPRIVILEGED_PATH={hb}\n\
-                 export PRIVILEGED_PATH={hb}\n\
+                 export HOMEBREW_FOLDER={data}\n\
+                 export UNPRIVILEGED_PATH={data}\n\
+                 export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
+                 export HOME=/home/{user}\n\
                  \n\
                  depend() {{\n\
                  \tneed net\n\
                  }}\n",
-                hb = homebrew
+                pl = plugin_loader,
+                wd = working_dir,
+                user = username,
+                data = decky_data,
             );
             let script_path = format!("{}/plugin_loader", init_d);
             fs::write(&script_path, &script)?;
@@ -925,13 +1128,20 @@ fn write_decky_service(
 
             fs::write(format!("{}/type", sv_dir), "longrun\n")?;
 
+            // s6-setuidgid drops to the session user.
             let run_script = format!(
                 "#!/bin/sh\n\
-                 export UNPRIVILEGED_PATH={hb}\n\
-                 export PRIVILEGED_PATH={hb}\n\
+                 export HOMEBREW_FOLDER={data}\n\
+                 export UNPRIVILEGED_PATH={data}\n\
+                 export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
-                 exec {hb}/services/PluginLoader 2>&1\n",
-                hb = homebrew
+                 export HOME=/home/{user}\n\
+                 cd {wd}\n\
+                 exec s6-setuidgid {user} {pl} 2>&1\n",
+                data = decky_data,
+                user = username,
+                wd = working_dir,
+                pl = plugin_loader
             );
             let run_path = format!("{}/run", sv_dir);
             fs::write(&run_path, &run_script)?;
@@ -944,10 +1154,14 @@ fn write_decky_service(
             let dinit_d = format!("{}/etc/dinit.d", install_root);
             fs::create_dir_all(&dinit_d)?;
 
-            // Write env file referenced by the service descriptor
             let env_content = format!(
-                "UNPRIVILEGED_PATH={hb}\nPRIVILEGED_PATH={hb}\nLOG_LEVEL=INFO\n",
-                hb = homebrew
+                "HOMEBREW_FOLDER={data}\n\
+                 UNPRIVILEGED_PATH={data}\n\
+                 PRIVILEGED_PATH={data}\n\
+                 LOG_LEVEL=INFO\n\
+                 HOME=/home/{user}\n",
+                data = decky_data,
+                user = username
             );
             let env_path = format!("{}/plugin_loader.env", dinit_d);
             fs::write(&env_path, &env_content)?;
@@ -955,11 +1169,14 @@ fn write_decky_service(
 
             let service = format!(
                 "type = process\n\
-                 command = {hb}/services/PluginLoader\n\
-                 working-dir = {hb}/services\n\
+                 command = {pl}\n\
+                 working-dir = {wd}\n\
+                 run-as = {user}\n\
                  env-file = /etc/dinit.d/plugin_loader.env\n\
                  restart = true\n",
-                hb = homebrew
+                pl = plugin_loader,
+                wd = working_dir,
+                user = username,
             );
             let service_path = format!("{}/plugin_loader", dinit_d);
             fs::write(&service_path, &service)?;

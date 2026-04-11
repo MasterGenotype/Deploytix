@@ -70,15 +70,15 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
         } else if packages.install_hhd {
             widgets::info_text(
                 ui,
-                "Installs hhd, adjustor, hhd-ui from the AUR. \
-                 Writes an init-specific service file (runit/s6/dinit/openrc).",
+                "Installs hhd-git from the AUR (no hhd-ui \u{2014} it races with the \
+                 gamescope session). Writes an init-specific service file.",
             );
         }
 
         ui.add_space(theme::SPACING_XS);
 
-        // ── Decky Loader (requires gaming packages / Steam) ───────────────
-        let decky_available = packages.install_gaming;
+        // ── Decky Loader (requires gaming packages / Steam + yay / AUR) ──
+        let decky_available = packages.install_gaming && packages.install_yay;
         ui.add_enabled_ui(decky_available, |ui| {
             ui.checkbox(
                 &mut packages.install_decky_loader,
@@ -89,13 +89,14 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
             packages.install_decky_loader = false;
             widgets::info_text(
                 ui,
-                "Requires: Gaming packages (Steam) \u{2014} enable the checkbox above.",
+                "Requires: Gaming packages (Steam) AND yay AUR helper \
+                 \u{2014} enable both above.",
             );
         } else if packages.install_decky_loader {
             widgets::info_text(
                 ui,
-                "Downloads the PluginLoader binary from GitHub at install time. \
-                 Requires internet access. Writes an init-specific service file.",
+                "Installs decky-loader-bin via AUR and bootstraps \
+                 ~/.local/var/opt/decky-loader. Runs as the greetd session user.",
             );
         }
     });

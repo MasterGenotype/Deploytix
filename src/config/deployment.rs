@@ -245,12 +245,13 @@ pub struct PackagesConfig {
     #[serde(default)]
     pub sysctl_gaming_tweaks: bool,
     /// Install Handheld Daemon (HHD) — gamepad remapping, TDP control, per-game profiles.
-    /// Requires: install_yay = true (AUR packages: hhd, adjustor, hhd-ui).
+    /// Requires: install_yay = true (AUR package: hhd-git).
     /// Writes an init-specific service file for runit/s6/dinit/openrc.
     #[serde(default)]
     pub install_hhd: bool,
     /// Install Decky Loader (Steam plugin framework).
-    /// Requires: install_gaming = true. Downloads the PluginLoader binary at install time.
+    /// Requires: install_gaming = true AND install_yay = true
+    /// (installed from the decky-loader-bin AUR package).
     /// Writes an init-specific service file for runit/s6/dinit/openrc.
     #[serde(default)]
     pub install_decky_loader: bool,
@@ -878,10 +879,10 @@ impl DeploymentConfig {
             false
         };
 
-        // Decky Loader — requires gaming packages (Steam must be present)
-        let install_decky_loader = if install_gaming {
+        // Decky Loader — requires gaming packages (Steam) and yay (AUR)
+        let install_decky_loader = if install_gaming && install_yay {
             prompt_confirm(
-                "Install Decky Loader? (Steam plugin framework — downloads binary at install time)",
+                "Install Decky Loader? (Steam plugin framework — decky-loader-bin via AUR)",
                 false,
             )?
         } else {
@@ -1228,6 +1229,27 @@ impl DeploymentConfig {
             if self.desktop.environment == DesktopEnvironment::None {
                 return Err(DeploytixError::ValidationError(
                     "Session switching requires a desktop environment".to_string(),
+                ));
+            }
+        }
+
+        // HHD requires yay (AUR)
+        if self.packages.install_hhd && !self.packages.install_yay {
+            return Err(DeploytixError::ValidationError(
+                "Handheld Daemon (HHD) requires install_yay = true".to_string(),
+            ));
+        }
+
+        // Decky Loader requires gaming (Steam) + yay (decky-loader-bin is AUR)
+        if self.packages.install_decky_loader {
+            if !self.packages.install_gaming {
+                return Err(DeploytixError::ValidationError(
+                    "Decky Loader requires install_gaming = true".to_string(),
+                ));
+            }
+            if !self.packages.install_yay {
+                return Err(DeploytixError::ValidationError(
+                    "Decky Loader requires install_yay = true (installed from decky-loader-bin AUR package)".to_string(),
                 ));
             }
         }

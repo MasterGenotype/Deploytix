@@ -185,12 +185,9 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("modular-git".to_string());
     }
 
-    // Decky Loader download dependency — jq is needed to parse the GitHub
-    // releases API response and extract the PluginLoader download URL.
-    // (curl is already in the essential tools block above.)
-    if config.packages.install_decky_loader {
-        packages.push("jq".to_string());
-    }
+    // Decky Loader is installed from the `decky-loader-bin` AUR package in
+    // a later phase (yay handles the download); no extra basestrap packages
+    // are needed for it.
 
     // SecureBoot tools (if enabled)
     if config.system.secureboot {
