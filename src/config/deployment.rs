@@ -244,6 +244,12 @@ pub struct PackagesConfig {
     /// Writes /etc/sysctl.d/99-gaming.conf with vm.max_map_count, swappiness, etc.
     #[serde(default)]
     pub sysctl_gaming_tweaks: bool,
+    /// Apply network performance sysctl tweaks.
+    /// Writes /etc/sysctl.d/99-network-performance.conf with BBR + fq, larger
+    /// socket buffers, MTU probing, ECN, and hygiene defaults. Complements
+    /// (does not conflict with) the gaming sysctl config.
+    #[serde(default)]
+    pub sysctl_network_performance: bool,
     /// Install Handheld Daemon (HHD) — gamepad remapping, TDP control, per-game profiles.
     /// Requires: install_yay = true (AUR package: hhd-git).
     /// Writes an init-specific service file for runit/s6/dinit/openrc.
@@ -869,6 +875,12 @@ impl DeploymentConfig {
             false,
         )?;
 
+        // sysctl network performance tweaks (standalone — no prerequisites)
+        let sysctl_network_performance = prompt_confirm(
+            "Apply network performance sysctl tweaks? (BBR + fq, larger socket buffers, ECN, etc.)",
+            false,
+        )?;
+
         // HHD — requires yay (AUR)
         let install_hhd = if install_yay {
             prompt_confirm(
@@ -945,6 +957,7 @@ impl DeploymentConfig {
                 install_btrfs_tools,
                 install_modular,
                 sysctl_gaming_tweaks,
+                sysctl_network_performance,
                 install_hhd,
                 install_decky_loader,
                 gpu_drivers,

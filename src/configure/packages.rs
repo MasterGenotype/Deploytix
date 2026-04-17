@@ -8,6 +8,7 @@
 //! - Btrfs snapshot tools (snapper, btrfs-assistant) via yay
 //! - User autostart entries (audio-startup, nm-applet)
 //! - Gaming sysctl performance tweaks (/etc/sysctl.d/99-gaming.conf)
+//! - Network performance sysctl tweaks (/etc/sysctl.d/99-network-performance.conf)
 //! - Handheld Daemon (HHD) via AUR + init-specific service file
 //! - Decky Loader (Steam plugin framework) + init-specific service file
 
@@ -731,6 +732,124 @@ pub fn install_sysctl_gaming(
     fs::set_permissions(&conf_path, fs::Permissions::from_mode(0o644))?;
 
     info!("  Written /etc/sysctl.d/99-gaming.conf");
+    Ok(())
+}
+
+// ======================== Network Performance sysctl Tweaks ========================
+
+/// Sysctl configuration content for network performance.
+///
+/// Tuned for modern consumer hardware (Wi-Fi 6/6E or 1 GbE+ ethernet) on a
+/// desktop/gaming workload.  Values intentionally do **not** overlap with
+/// `GAMING_SYSCTL_CONF` so the two files coexist in `/etc/sysctl.d/`
+/// without clobbering each other.  Ordering is determined by alphabetical
+/// filename, so `99-network-performance.conf` loads after
+/// `99-gaming.conf`.
+const NETWORK_PERFORMANCE_SYSCTL_CONF: &str = "\
+# Network performance tweaks \u{2014} written by Deploytix
+# Complements /etc/sysctl.d/99-gaming.conf (no key overlap).
+
+# --- Congestion control & queueing ---------------------------------------
+# BBR + fq: pacing-aware qdisc recommended for BBR.  Improves throughput
+# and latency under bufferbloat (typical of consumer Wi-Fi / ISPs).
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- Socket buffer ceilings ---------------------------------------------
+# 16 MiB ceiling covers ~1.5 Gbps * 80 ms BDP, enough for Wi-Fi 6 +
+# transcontinental links.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.optmem_max = 65536
+
+# TCP autotuning ranges: min / default / max bytes.
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+
+# UDP memory pressure thresholds (bytes per socket).
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+# --- Backlogs / queues ---------------------------------------------------
+net.core.netdev_max_backlog = 5000
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
+
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+
+# --- TCP behaviour -------------------------------------------------------
+# Helps on links with broken PMTUD (Wi-Fi / VPN).
+net.ipv4.tcp_mtu_probing = 1
+
+# Cap unsent bytes in the socket buffer so BBR can pace tightly.
+net.ipv4.tcp_notsent_lowat = 131072
+
+# Recycle TIME_WAIT faster (safe on clients; fine on single-NAT hosts).
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+
+# Keepalive tuned for long-lived sessions on flaky Wi-Fi.
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+
+# ECN (negotiated, not forced).
+net.ipv4.tcp_ecn = 1
+
+# Don't restart congestion window after idle periods.
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# SACK + F-RTO are on by default; pinned for clarity.
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_frto = 2
+
+# --- Security / hygiene --------------------------------------------------
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+";
+
+/// Write `/etc/sysctl.d/99-network-performance.conf` to the target system
+/// with network performance tuning parameters.
+///
+/// Safe to enable alongside `install_sysctl_gaming`; the two files do not
+/// share any keys.  The kernel must have `tcp_bbr` available (built-in on
+/// modern stock Artix kernels).
+pub fn install_sysctl_network_performance(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.sysctl_network_performance {
+        return Ok(());
+    }
+
+    info!("Writing network performance sysctl configuration");
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would write /etc/sysctl.d/99-network-performance.conf");
+        println!("    net.ipv4.tcp_congestion_control = bbr");
+        println!("    net.core.default_qdisc          = fq");
+        println!("    net.core.rmem_max               = 16777216");
+        return Ok(());
+    }
+
+    let sysctl_dir = format!("{}/etc/sysctl.d", install_root);
+    fs::create_dir_all(&sysctl_dir)?;
+
+    let conf_path = format!("{}/99-network-performance.conf", sysctl_dir);
+    fs::write(&conf_path, NETWORK_PERFORMANCE_SYSCTL_CONF)?;
+    fs::set_permissions(&conf_path, fs::Permissions::from_mode(0o644))?;
+
+    info!("  Written /etc/sysctl.d/99-network-performance.conf");
     Ok(())
 }
 

@@ -294,6 +294,12 @@ impl Installer {
             self.install_sysctl_gaming()?;
         }
 
+        // Phase 5.65: Network performance sysctl tweaks
+        if self.config.packages.sysctl_network_performance {
+            self.report_progress(0.898, "Applying network performance sysctl settings...");
+            self.install_sysctl_network_performance()?;
+        }
+
         // Phase 5.7: Handheld Daemon (HHD)
         if self.config.packages.install_hhd {
             self.report_progress(0.910, "Installing Handheld Daemon (HHD)...");
@@ -874,6 +880,16 @@ impl Installer {
     fn install_sysctl_gaming(&self) -> Result<()> {
         info!("Installing gaming sysctl tweaks");
         configure::packages::install_sysctl_gaming(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Write /etc/sysctl.d/99-network-performance.conf with network tuning
+    fn install_sysctl_network_performance(&self) -> Result<()> {
+        info!("Installing network performance sysctl tweaks");
+        configure::packages::install_sysctl_network_performance(
+            &self.cmd,
+            &self.config,
+            INSTALL_ROOT,
+        )
     }
 
     /// Install Handheld Daemon (HHD) via yay + init-specific service file

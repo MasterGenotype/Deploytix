@@ -24,6 +24,21 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
                     );
                 });
         });
+
+        ui.add_space(theme::SPACING_XS);
+
+        ui.checkbox(
+            &mut packages.sysctl_network_performance,
+            "Network performance sysctl tweaks (BBR + fq, larger buffers, ECN\u{2026})",
+        );
+        if packages.sysctl_network_performance {
+            widgets::info_text(
+                ui,
+                "Writes /etc/sysctl.d/99-network-performance.conf. Switches TCP \
+                 congestion control to BBR and raises socket buffer ceilings for \
+                 Wi-Fi 6 / 1\u{00a0}GbE+ links.",
+            );
+        }
     });
 
     widgets::section(ui, "Desktop Environment", |ui| {
