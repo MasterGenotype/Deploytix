@@ -137,11 +137,16 @@ udevadm settle --timeout=5 2>/dev/null || sleep 3
 # MBR parser skips type-0 entries on re-read, so /dev/sdX1 disappears after
 # sfdisk --append later triggers a partition table reload. Fix by setting the
 # type to 0x83 (Linux) — this doesn't affect BIOS or UEFI boot.
+#
+# We must ensure the partition table is fully re-read before proceeding.
+partprobe "${DEVICE}" 2>/dev/null || true
+udevadm settle --timeout=10 2>/dev/null || sleep 5
+
 if [[ "$(sfdisk --part-type "${DEVICE}" 1 2>/dev/null)" == "0" ]]; then
     msg2 "Fixing ISO partition type (0x00 -> 0x83) for kernel compatibility"
     sfdisk --part-type "${DEVICE}" 1 83 >/dev/null 2>&1 || true
     partprobe "${DEVICE}" 2>/dev/null || true
-    udevadm settle --timeout=5 2>/dev/null || sleep 3
+    udevadm settle --timeout=10 2>/dev/null || sleep 5
 fi
 
 # ── Step 2: Determine partition layout ───────────────────────────────────────
