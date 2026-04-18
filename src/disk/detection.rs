@@ -242,13 +242,24 @@ pub fn get_device_info(device_path: &str) -> Result<BlockDevice> {
     })
 }
 
-/// Get the partition naming prefix for a device
-/// e.g., /dev/sda -> /dev/sda, /dev/nvme0n1 -> /dev/nvme0n1p
+/// Get the partition naming prefix for a device.
+///
+/// Mirrors the kernel's partition-naming rule (see `disk_name()` in
+/// `block/genhd.c`): if the disk name ends in a digit, append a `p`
+/// separator so the partition number can't be concatenated ambiguously.
+///
+/// Examples:
+///   /dev/sda      -> /dev/sda        (sda1, sda2, ...)
+///   /dev/vda      -> /dev/vda        (vda1, vda2, ...)
+///   /dev/nvme0n1  -> /dev/nvme0n1p   (nvme0n1p1, ...)
+///   /dev/mmcblk0  -> /dev/mmcblk0p   (mmcblk0p1, ...)
+///   /dev/loop0    -> /dev/loop0p     (loop0p1, ...)
+///   /dev/nbd0     -> /dev/nbd0p      (nbd0p1, ...)
+///   /dev/md0      -> /dev/md0p       (md0p1, ...)
 pub fn partition_prefix(device: &str) -> String {
-    if device.contains("nvme") || device.contains("mmcblk") || device.contains("loop") {
-        format!("{}p", device)
-    } else {
-        device.to_string()
+    match device.chars().last() {
+        Some(c) if c.is_ascii_digit() => format!("{}p", device),
+        _ => device.to_string(),
     }
 }
 
@@ -324,6 +335,36 @@ mod tests {
     #[test]
     fn partition_path_mmcblk_uses_p_separator() {
         assert_eq!(partition_path("/dev/mmcblk0", 1), "/dev/mmcblk0p1");
+    }
+
+    #[test]
+    fn partition_prefix_appends_p_for_nbd_device() {
+        // Regression: NBD devices end in a digit, so they require the `p`
+        // separator just like nvme/mmcblk/loop.  Previously the installer
+        // built `/dev/nbd03` for partition 3 on /dev/nbd0 and crashed with
+        // `Device /dev/nbd03 does not exist or access denied.`
+        assert_eq!(partition_prefix("/dev/nbd0"), "/dev/nbd0p");
+        assert_eq!(partition_prefix("/dev/nbd15"), "/dev/nbd15p");
+    }
+
+    #[test]
+    fn partition_path_nbd_uses_p_separator() {
+        assert_eq!(partition_path("/dev/nbd0", 1), "/dev/nbd0p1");
+        assert_eq!(partition_path("/dev/nbd0", 3), "/dev/nbd0p3");
+        assert_eq!(partition_path("/dev/nbd15", 2), "/dev/nbd15p2");
+    }
+
+    #[test]
+    fn partition_prefix_appends_p_for_md_device() {
+        assert_eq!(partition_prefix("/dev/md0"), "/dev/md0p");
+        assert_eq!(partition_prefix("/dev/md127"), "/dev/md127p");
+    }
+
+    #[test]
+    fn partition_path_multi_digit_partition_number_on_nbd() {
+        // Make sure the `p` separator keeps partition numbers unambiguous
+        // even with two-digit partition numbers.
+        assert_eq!(partition_path("/dev/nbd1", 10), "/dev/nbd1p10");
     }
 
     // ── is_physical_disk ──────────────────────────────────────────────────────
