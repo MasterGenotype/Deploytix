@@ -1,0 +1,43 @@
+pkgbase = deploytix-git
+	pkgdesc = Automated Artix Linux deployment installer for removable media and disks
+	pkgver = 1.2.6.r9.ge34a93c
+	pkgrel = 1
+	url = https://github.com/MasterGenotype/Deploytix
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	makedepends = git
+	makedepends = alsa-lib
+	makedepends = libxkbcommon
+	makedepends = libxcb
+	makedepends = wayland
+	makedepends = mesa
+	source = deploytix::git+https://github.com/MasterGenotype/Deploytix.git#branch=main
+	sha256sums = SKIP
+
+pkgname = deploytix-git
+	pkgdesc = Automated Artix Linux deployment installer (CLI)
+	depends = gcc-libs
+	depends = alsa-lib
+	optdepends = dosfstools: EFI partition formatting (mkfs.vfat)
+	optdepends = e2fsprogs: ext4 filesystem support
+	optdepends = btrfs-progs: btrfs filesystem support
+	optdepends = xfsprogs: xfs filesystem support
+	optdepends = f2fs-tools: f2fs filesystem support
+	optdepends = cryptsetup: LUKS encryption support
+	optdepends = lvm2: LVM thin provisioning layout
+	optdepends = grub: GRUB bootloader
+	optdepends = artools: basestrap for Artix installation
+	provides = deploytix
+	conflicts = deploytix
+
+pkgname = deploytix-gui-git
+	pkgdesc = Automated Artix Linux deployment installer (GUI)
+	depends = deploytix-git
+	depends = alsa-lib
+	depends = libxkbcommon
+	depends = libxcb
+	depends = wayland
+	depends = mesa
+	provides = deploytix-gui
+	conflicts = deploytix-gui

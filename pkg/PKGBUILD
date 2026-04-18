@@ -7,8 +7,9 @@ pkgdesc="Automated Artix Linux deployment installer for removable media and disk
 arch=('x86_64')
 url="https://github.com/MasterGenotype/Deploytix"
 license=('GPL-3.0-or-later')
-makedepends=('cargo' 'git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
-source=("deploytix::git+https://github.com/MasterGenotype/Deploytix.git")
+makedepends=('cargo' 'git' 'alsa-lib' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+# Always builds from the tip of the main branch.
+source=("deploytix::git+https://github.com/MasterGenotype/Deploytix.git#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -33,7 +34,7 @@ build() {
 
 package_deploytix-git() {
     pkgdesc="Automated Artix Linux deployment installer (CLI)"
-    depends=('gcc-libs')
+    depends=('gcc-libs' 'alsa-lib')
     optdepends=(
         'dosfstools: EFI partition formatting (mkfs.vfat)'
         'e2fsprogs: ext4 filesystem support'
@@ -56,7 +57,7 @@ package_deploytix-git() {
 
 package_deploytix-gui-git() {
     pkgdesc="Automated Artix Linux deployment installer (GUI)"
-    depends=('deploytix-git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+    depends=('deploytix-git' 'alsa-lib' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
     provides=('deploytix-gui')
     conflicts=('deploytix-gui')
 
