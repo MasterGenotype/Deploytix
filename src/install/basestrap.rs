@@ -162,7 +162,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // Encryption tools (if enabled)
     if config.disk.encryption {
         packages.push("cryptsetup".to_string());
-        packages.push("unl0kr".to_string());
     }
 
     // lvm2 provides device-mapper, required by mkinitcpio encrypt/lvm2 hooks
@@ -221,7 +220,6 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
     "deploytix-gui-git-",
     "tkg-gui-git-",
     "modular-git-",
-    "unl0kr-",
 ];
 
 /// All custom package names that may live in the [deploytix] repo.
@@ -230,7 +228,6 @@ const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "deploytix-gui-git",
     "tkg-gui-git",
     "modular-git",
-    "unl0kr",
 ];
 
 /// Path where the ISO live-overlay embeds the deploytix repo.
@@ -389,11 +386,10 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
-            // Sibling tkg-gui, Modular-1, and unl0kr repos.
+            // Sibling tkg-gui and Modular-1 repos.
             if let Some(parent) = repo_root.parent() {
                 search_dirs.push(parent.join("tkg-gui/pkg"));
                 search_dirs.push(parent.join("Modular-1/pkg"));
-                search_dirs.push(parent.join("unl0kr/pkg"));
             }
         }
     }
@@ -403,7 +399,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         search_dirs.push(home.join(".gitrepos/Deploytix/pkg"));
         search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
         search_dirs.push(home.join(".gitrepos/Modular-1/pkg"));
-        search_dirs.push(home.join(".gitrepos/unl0kr/pkg"));
         search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
     }
 
@@ -455,7 +450,6 @@ fn repo_dir_for_package(pkg_name: &str) -> &'static str {
         "deploytix-git" | "deploytix-gui-git" => "Deploytix",
         "tkg-gui-git" => "tkg-gui",
         "modular-git" => "Modular-1",
-        "unl0kr" => "unl0kr",
         _ => "",
     }
 }
@@ -809,7 +803,7 @@ pub fn prepare_deploytix_repo(
              To fix, try one of:\n\
              - Run from the Deploytix live ISO (has all packages embedded)\n\
              - Build packages first: cd pkg && makepkg -s\n\
-             - Clone sibling repos (tkg-gui, Modular-1, unl0kr) and build \
+             - Clone sibling repos (tkg-gui, Modular-1) and build \
                their PKGBUILDs\n\
              - Run iso/build-deploytix-iso.sh to build everything at once",
             missing_str

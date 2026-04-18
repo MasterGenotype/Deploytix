@@ -49,8 +49,6 @@ MODULAR_REPO_URL="https://github.com/MasterGenotype/Modular-1.git"
 MODULAR_LOCAL_DIR=""   # Resolved to sibling repo if present
 MODULAR_CLONE_DIR=""
 MODULAR_PKG_DIR=""
-UNL0KR_LOCAL_DIR=""    # Resolved to sibling unl0kr repo if present
-UNL0KR_PKG_DIR=""
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -132,12 +130,6 @@ resolve_paths() {
         MODULAR_PKG_DIR="${MODULAR_LOCAL_DIR}/pkg"
     else
         MODULAR_PKG_DIR="${MODULAR_CLONE_DIR}/pkg"
-    fi
-    UNL0KR_LOCAL_DIR="$(dirname "${REPO_ROOT}")/unl0kr"
-    if [[ -d "${UNL0KR_LOCAL_DIR}/pkg" && -f "${UNL0KR_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
-        UNL0KR_PKG_DIR="${UNL0KR_LOCAL_DIR}/pkg"
-    else
-        UNL0KR_PKG_DIR=""
     fi
 }
 
@@ -288,12 +280,9 @@ build_packages() {
         if [[ -n "${MODULAR_PKG_DIR}" && -d "${MODULAR_PKG_DIR}" ]]; then
             count=$(( count + $(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
         fi
-        if [[ -n "${UNL0KR_PKG_DIR}" && -d "${UNL0KR_PKG_DIR}" ]]; then
-            count=$(( count + $(find "${UNL0KR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
-        fi
 
         if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, ${MODULAR_PKG_DIR}/, or ${UNL0KR_PKG_DIR}/ and -s (skip rebuild) was set"
+            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, or ${MODULAR_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
 
         msg "Skipping package build (-s); reusing existing packages"
@@ -404,7 +393,7 @@ create_local_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${UNL0KR_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
@@ -581,7 +570,7 @@ generate_gui_profile() {
 
     cp "$de_profile" "$dest/profile.yaml"
 
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "unl0kr"]' "$dest/profile.yaml"
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
@@ -605,7 +594,7 @@ embed_live_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${UNL0KR_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
