@@ -1,108 +1,150 @@
 #!/bin/sh
 # ==================================================
 # Steam + Gamescope System Session
-#
-# Auto-detects output resolution from DRM and applies the gamescope
-# launch profile used by the Deploytix reference handheld configuration.
-#
-# Override any auto-detected value with environment variables:
-#   WIDTH=2560 HEIGHT=1440 REFRESH=165 PROFILE=quality steam-gamescope-session
+# Uses ready-fd socket approach (per gamescope-session-plus)
+# to properly coordinate gamescope and Steam startup.
 # ==================================================
 
-PROFILE=${PROFILE:-balanced}   # latency, quality, balanced
-DEBUG=${DEBUG:-0}
+set -e
 
-# --------- 1. GPU Detection ---------
-GPU=$(lspci | grep -i 'vga' | tr '[:upper:]' '[:lower:]')
-if echo "$GPU" | grep -q 'intel'; then
-    export MESA_LOADER_DRIVER_OVERRIDE=iris
-elif echo "$GPU" | grep -q 'amd'; then
-    export RADV_PERFTEST=aco
-elif echo "$GPU" | grep -q 'nvidia'; then
-    export __GL_SYNC_TO_VBLANK=0
-fi
+# --------- 0. Logging ---------
+# When launched by greetd IPC (the normal path), this process has fresh stdio
+# that is NOT inherited from deploytix-session-manager, so nothing we echo
+# here ends up in deploytix-session.log. Redirect our own output so early
+# failures (dbus-launch, mktemp, gamescope startup, audio-startup, etc.) are
+# visible for diagnosis.
+_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}"
+mkdir -p "$_LOG_DIR" 2>/dev/null || true
+exec >>"$_LOG_DIR/steam-gamescope-session.log" 2>&1
+echo "[steam-session] ==== starting at $(date -Is) pid=$$ uid=$(id -u) ===="
+echo "[steam-session] env: USER=${USER:-?} HOME=${HOME:-?} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-?} XDG_SEAT=${XDG_SEAT:-?} XDG_SESSION_ID=${XDG_SESSION_ID:-?} XDG_VTNR=${XDG_VTNR:-?}"
 
-# --------- 2. Vulkan Layer Configuration ---------
-# vkBasalt opts in only when the user has a config file.
-VKCONF="$HOME/.config/vkBasalt/vkBasalt.conf"
-if [ -f "$VKCONF" ]; then
-    export ENABLE_VKBASALT=1
-else
-    export ENABLE_VKBASALT=0
-fi
+# --------- 1. Seat & Session Environment ---------
+# Use logind backend to avoid seatd/elogind dual-seat conflict
+export LIBSEAT_BACKEND=logind
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=gamescope
+export XDG_SESSION_DESKTOP=gamescope
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+
+# --------- 2. GPU / Vulkan ---------
 export ENABLE_GAMESCOPE_WSI=1
-export MANGOHUD=${MANGOHUD:-0}
+export ENABLE_VKBASALT=0
+export MANGOHUD=0
+export mesa_glthread=true
 
-# --------- 3. Detect Output Resolution ---------
-# Read the preferred (first-listed) mode from the first connected DRM
-# connector.  Falls back to 1920x1080 when detection fails.  Any of
-# WIDTH / HEIGHT / REFRESH can be pre-set in the environment to skip
-# auto-detection for that value.
-if [ -z "${WIDTH:-}" ] || [ -z "${HEIGHT:-}" ]; then
-    for connector in /sys/class/drm/card[0-9]*-*/; do
-        [ -f "$connector/status" ] || continue
-        [ "$(cat "$connector/status")" = "connected" ] || continue
-        mode=$(head -1 "$connector/modes" 2>/dev/null)
-        if [ -n "$mode" ]; then
-            WIDTH="${mode%%x*}"
-            HEIGHT="${mode##*x}"
-            break
-        fi
-    done
-fi
+# --------- 3. Misc Steam / Game Env ---------
+export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0
+export vk_xwayland_wait_ready=false
+export GAMESCOPE_NV12_COLORSPACE=k_EStreamColorspace_BT601
+export VKD3D_SWAPCHAIN_LATENCY_FRAMES=3
 
-WIDTH=${WIDTH:-1920}
-HEIGHT=${HEIGHT:-1080}
-REFRESH=${REFRESH:-0}   # 0 = let gamescope auto-detect
+# Legion Go S refresh rates
+export STEAM_DISPLAY_REFRESH_LIMITS=60,144
 
 # --------- 4. Library Detection ---------
 [ -f /usr/lib/libgamemodeauto.so.0 ] && \
     LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/lib/libgamemodeauto.so.0"
-
 [ -f /usr/lib/liblatencyflex.so ] && \
     LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/lib/liblatencyflex.so"
-
 export LD_PRELOAD
 
-# --------- 5. Environment ---------
-export XDG_CURRENT_DESKTOP=gamescope
+# --------- 5. D-Bus Session Bus ---------
+# Start D-Bus independently so it persists even if gamescope restarts.
+eval "$(dbus-launch --sh-syntax)"
+export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 
-# --------- 6. Gamescope Args ---------
-# Mirrors the handheld reference configuration:
-#   -e                      — enable Steam integration
-#   --adaptive-sync         — VRR when the panel supports it
-#   --force-grab-cursor     — keep cursor inside the session
-#   --force-windows-fullscreen — fullscreen all top-level windows
-#   --sdr-gamut-wideness    — widen SDR gamut on modern panels
-#   --rt                    — use SCHED_RR for the compositor thread
-REFRESH_ARG=""
-[ "$REFRESH" -gt 0 ] 2>/dev/null && REFRESH_ARG="-r $REFRESH"
+# --------- 6. Output Resolution ---------
+WIDTH=1920
+HEIGHT=1200
 
-GAMESCOPE_ARGS="\
+# --------- 7. Create Sockets ---------
+# Ready-fd socket: gamescope writes DISPLAY and WAYLAND_DISPLAY here when ready.
+# Stats pipe: used by mangoapp and Steam for perf data.
+tmpdir=$(mktemp -p "$XDG_RUNTIME_DIR" -d -t gamescope.XXXXXXX)
+socket="$tmpdir/startup.socket"
+stats="$tmpdir/stats.pipe"
+mkfifo -- "$socket"
+mkfifo -- "$stats"
+export GAMESCOPE_STATS="$stats"
+
+# Claim global session stats link
+sessionlink="$XDG_RUNTIME_DIR/gamescope-stats"
+lockfile="$sessionlink.lck"
+exec 9>"$lockfile"
+if flock -n 9 && rm -f "$sessionlink" && ln -sf "$tmpdir" "$sessionlink"; then
+    echo "[steam-session] Claimed global stats session at '$sessionlink'"
+fi
+
+# --------- 8. Gamescope Command ---------
+GAMESCOPE_CMD="/usr/local/bin/gamescope \
     -w $WIDTH -h $HEIGHT \
-    $REFRESH_ARG \
     -f \
-    -e \
-    --adaptive-sync \
-    --force-grab-cursor \
+    --steam \
+    --xwayland-count 2 \
     --force-windows-fullscreen \
+    --force-grab-cursor \
     --sdr-gamut-wideness 0.77 \
-    --rt"
+    --adaptive-sync \
+    --custom-refresh-rates 60,144 \
+    --rt \
+    -R $socket \
+    -T $stats"
 
-# --------- 7. Debug Logging ---------
-[ "$DEBUG" = "1" ] && {
-    echo "=== Steam Gamescope Session ==="
-    echo "PROFILE: $PROFILE"
-    echo "GPU: $GPU"
-    echo "Output: ${WIDTH}x${HEIGHT} (refresh: ${REFRESH:-auto})"
-    echo "LD_PRELOAD: $LD_PRELOAD"
-    echo "ENABLE_VKBASALT: $ENABLE_VKBASALT"
-    echo "ENABLE_GAMESCOPE_WSI: $ENABLE_GAMESCOPE_WSI"
-    echo "MANGOHUD: $MANGOHUD"
-    echo "Gamescope Args: $GAMESCOPE_ARGS"
-    echo "Launching Steam..."
-}
+# --------- 9. Audio ---------
+# Never let a flaky audio-startup tear down the whole session. audio-startup
+# may legitimately return non-zero on a fresh boot (e.g. its own `set -e`
+# tripping on a `pkill` that matched no stale daemon), and with `set -e`
+# above, the final command after the final `&&` in a list is NOT protected
+# from exiting the shell. Use an explicit `if`+`|| true` to isolate it.
+if [ -x "$HOME/.local/bin/audio-startup" ]; then
+    echo "[steam-session] Running audio-startup"
+    "$HOME/.local/bin/audio-startup" || \
+        echo "[steam-session] audio-startup returned non-zero; continuing"
+fi
 
-# --------- 8. Launch Audio + Steam ---------
-[ -x "$HOME/.local/bin/audio-startup" ] && "$HOME/.local/bin/audio-startup"
-exec /usr/bin/gamescope $GAMESCOPE_ARGS -- steam -steamos3
+# --------- 10. Launch Gamescope (background) ---------
+echo "[steam-session] Starting gamescope..."
+$GAMESCOPE_CMD &
+gamescope_pid=$!
+
+# --------- 11. Wait for Ready ---------
+if read -r response_x_display response_wl_display <>"$socket"; then
+    export DISPLAY="$response_x_display"
+    export GAMESCOPE_WAYLAND_DISPLAY="$response_wl_display"
+    echo "[steam-session] Gamescope ready: DISPLAY=$DISPLAY GAMESCOPE_WAYLAND_DISPLAY=$GAMESCOPE_WAYLAND_DISPLAY"
+else
+    echo >&2 "[steam-session] Gamescope failed to start"
+    kill -9 "$gamescope_pid" 2>/dev/null
+    wait "$gamescope_pid" 2>/dev/null
+    rm -rf "$tmpdir"
+    exit 1
+fi
+
+# Propagate display variables to D-Bus activation environment
+dbus-update-activation-environment DISPLAY GAMESCOPE_WAYLAND_DISPLAY \
+    XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP 2>/dev/null || true
+
+# Tell gamescope to focus Steam (app ID 769) as the base layer
+xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c \
+    -set GAMESCOPECTRL_BASELAYER_APPID 769
+
+# --------- 12. Launch Steam ---------
+echo "[steam-session] Starting Steam (-steamos3 -gamepadui)..."
+steam -steamos3 -gamepadui
+steam_ret=$?
+echo "[steam-session] Steam exited ($steam_ret)"
+
+# --------- 13. Cleanup ---------
+kill "$gamescope_pid" 2>/dev/null
+sleep 2 &
+sleep_pid=$!
+wait -n "$gamescope_pid" "$sleep_pid" 2>/dev/null || true
+for job in $(jobs -p); do
+    kill -9 "$job" 2>/dev/null
+done
+kill "$DBUS_SESSION_BUS_PID" 2>/dev/null
+rm -rf "$tmpdir"
+exit "$steam_ret"

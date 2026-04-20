@@ -5,6 +5,7 @@ use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use tracing::info;
 
 // Embedded script resources (compiled into the binary)
@@ -17,6 +18,12 @@ const STEAM_GAMESCOPE_SESSION: &str =
     include_str!("../resources/session_switching/steam-gamescope-session.sh");
 const GAMESCOPE_SESSION_DESKTOP: &str =
     include_str!("../resources/session_switching/gamescope-session.desktop");
+const STEAMOS_SELECT_BRANCH: &str =
+    include_str!("../resources/session_switching/steamos-select-branch.sh");
+const GREETD_IPC: &str = include_str!("../resources/session_switching/greetd-ipc.py");
+const GREETD_PAM: &str = include_str!("../resources/session_switching/greetd.pam");
+const GREETD_GREETER_PAM: &str =
+    include_str!("../resources/session_switching/greetd-greeter.pam");
 
 /// File to deploy with its destination path (relative to install root) and permissions
 struct DeployFile {
@@ -51,17 +58,47 @@ const DEPLOY_FILES: &[DeployFile] = &[
         content: GAMESCOPE_SESSION_DESKTOP,
         mode: 0o644,
     },
+    DeployFile {
+        dest: "usr/bin/steamos-select-branch",
+        content: STEAMOS_SELECT_BRANCH,
+        mode: 0o755,
+    },
+    DeployFile {
+        dest: "usr/bin/greetd-ipc",
+        content: GREETD_IPC,
+        mode: 0o755,
+    },
+    // PAM service files.
+    //
+    // `greetd` is used for Class=user sessions created via greetd IPC
+    // (the path deploytix-session-manager takes after picking a session).
+    //
+    // `greetd-greeter` is used for greetd's own default_session (the
+    // greeter itself). Without this file, greetd's pam_start("greetd-greeter")
+    // falls through to /etc/pam.d/other (deny-all on Arch/Artix), which
+    // contributed to the "greeter exited without creating a session"
+    // respawn loop fixed alongside the removal of `steam -shutdown`
+    // from cleanup_stale_sessions.
+    DeployFile {
+        dest: "etc/pam.d/greetd",
+        content: GREETD_PAM,
+        mode: 0o644,
+    },
+    DeployFile {
+        dest: "etc/pam.d/greetd-greeter",
+        content: GREETD_GREETER_PAM,
+        mode: 0o644,
+    },
 ];
 
 /// Deploy session switching scripts and configuration to the target system.
 ///
-/// Writes `deploytix-session-manager`, `session-select`,
-/// `return-to-gamemode`, `steam-gamescope-session`, and the
-/// `gamescope-session.desktop` file into `install_root`.
+/// Architecture: greetd runs `deploytix-session-manager` as its greeter.
+/// The session manager uses `greetd-ipc` (Python) to create a proper
+/// `Class=user` session via greetd's IPC protocol, then greetd starts
+/// `steam-gamescope-session` (or a desktop session) in that user session.
+/// This avoids the elogind seat-revocation issue with `Class=greeter`.
 ///
-/// Note: the legacy `gamescope-session-git` AUR build has been removed.
-/// `deploytix-session-manager` launches `steam-gamescope-session` directly,
-/// so the `gamescope-session-plus` binary from that AUR package is unused.
 /// The gamescope compositor itself is built from the Bazzite-maintained
 /// source in `configure::packages::install_gaming_packages`.
 pub fn setup_session_switching(
@@ -84,6 +121,16 @@ pub fn setup_session_switching(
 
         info!("  Installed {} (mode {:o})", file.dest, file.mode);
     }
+
+    // Create steamos-session-select symlink so Steam's "Switch to Desktop" works.
+    // Steam calls `steamos-session-select <session>` internally.
+    let symlink_path = format!("{}/usr/bin/steamos-session-select", install_root);
+    let symlink = Path::new(&symlink_path);
+    if symlink.exists() || symlink.read_link().is_ok() {
+        fs::remove_file(symlink)?;
+    }
+    std::os::unix::fs::symlink("session-select", symlink)?;
+    info!("  Symlinked steamos-session-select -> session-select");
 
     info!("Session switching scripts deployed successfully");
     Ok(())

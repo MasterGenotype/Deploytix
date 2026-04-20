@@ -1,0 +1,16 @@
+#%PAM-1.0
+# PAM service: greetd
+# Used for user sessions created via greetd IPC (auto-login path from
+# deploytix-session-manager -> greetd-ipc -> start_session).
+#
+# Passwordless auth is safe here because the greetd IPC socket
+# (GREETD_SOCK) is only accessible to the greeter process, which is
+# itself started by greetd under a trusted default_session config.
+#
+# Account/session go through system-local-login so we still get the
+# full chain (pam_nologin, pam_access, pam_elogind, pam_env, etc.),
+# which is what grants the resulting Class=user session proper seat
+# access for gamescope DRM/input.
+auth       sufficient   pam_permit.so
+account    include      system-local-login
+session    include      system-local-login

@@ -1,3 +1,4 @@
 /target
 pkg/
+!pkg/PKGBUILD
 iso/repo/*.pkg.tar*

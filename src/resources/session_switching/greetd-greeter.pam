@@ -1,0 +1,21 @@
+#%PAM-1.0
+# PAM service: greetd-greeter
+# Used when greetd launches its default_session (the greeter). In the
+# Deploytix setup that is `deploytix-session-manager`, running as the
+# normal login user with Class=greeter.
+#
+# Without this file, greetd's pam_start("greetd-greeter", ...) falls
+# through to /etc/pam.d/other, which is typically deny-all and can
+# cause the greeter to fail to start cleanly or to be torn down mid-
+# cleanup, producing greetd's
+#     error: check_children: greeter exited without creating a session
+# respawn loop.
+#
+# Passwordless auth is appropriate here because the greeter is started
+# by greetd itself (PID 1-supervised) with a fixed command/user baked
+# into /etc/greetd/config.toml. Account/session still run the normal
+# chain so elogind/environment/etc. are set up correctly for the
+# greeter process.
+auth       sufficient   pam_permit.so
+account    include      system-local-login
+session    include      system-local-login
