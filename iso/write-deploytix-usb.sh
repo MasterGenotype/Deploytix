@@ -55,7 +55,7 @@ EOF
 # ── Argument parsing ─────────────────────────────────────────────────────────
 while getopts ":d:i:l:yh" opt; do
     case "$opt" in
-        d) DEVICE="$OPTARG" ;;
+        d) DEVICE="${OPTARG}" ;;
         i) ISO_PATH="$OPTARG" ;;
         l) COW_LABEL="$OPTARG" ;;
         y) SKIP_CONFIRM=true ;;
