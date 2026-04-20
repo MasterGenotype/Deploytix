@@ -85,36 +85,44 @@ if [[ -f "$SENTINEL" ]]; then
 fi
 echo "[session-manager] Selected session: $session"
 
+# Use an array so multi-word commands (e.g. dbus-run-session startplasma-wayland)
+# are passed as separate arguments to greetd-ipc and exec.
 case "$session" in
     gamescope)
-        cmd="/usr/local/bin/steam-gamescope-session"
+        cmd=("/usr/local/bin/steam-gamescope-session")
         ;;
     desktop)
-        cmd="$(detect_desktop_command)"
-        if [[ -z "$cmd" ]]; then
+        desktop_cmd="$(detect_desktop_command)"
+        if [[ -z "$desktop_cmd" ]]; then
             echo >&2 "[session-manager] No desktop environment found, falling back to gamescope"
-            cmd="/usr/local/bin/steam-gamescope-session"
+            cmd=("/usr/local/bin/steam-gamescope-session")
+        else
+            # Desktop environments need a D-Bus session bus. steam-gamescope-session
+            # starts its own (dbus-launch), but bare desktop commands like
+            # startplasma-wayland do not — without one, kwin_wayland and other
+            # components fail immediately.
+            cmd=("dbus-run-session" "$desktop_cmd")
         fi
         ;;
     *)
         echo >&2 "[session-manager] Unknown session '$session', falling back to gamescope"
-        cmd="/usr/local/bin/steam-gamescope-session"
+        cmd=("/usr/local/bin/steam-gamescope-session")
         ;;
 esac
 
 # ---------- Start session via greetd IPC ----------
 if [[ -n "${GREETD_SOCK:-}" ]]; then
-    echo "[session-manager] Starting via greetd IPC: $cmd"
-    /usr/bin/greetd-ipc "$(whoami)" "$cmd"
+    echo "[session-manager] Starting via greetd IPC: ${cmd[*]}"
+    /usr/bin/greetd-ipc "$(whoami)" "${cmd[@]}"
     ipc_ret=$?
     if (( ipc_ret != 0 )); then
         echo >&2 "[session-manager] greetd IPC failed ($ipc_ret), falling back to direct launch"
-        exec "$cmd"
+        exec "${cmd[@]}"
     fi
     # greetd will terminate us after this; exit cleanly
     echo "[session-manager] IPC succeeded, waiting for greetd to start user session"
     exit 0
 else
     echo >&2 "[session-manager] GREETD_SOCK not set, launching directly"
-    exec "$cmd"
+    exec "${cmd[@]}"
 fi
