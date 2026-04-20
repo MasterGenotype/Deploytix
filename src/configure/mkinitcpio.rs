@@ -143,13 +143,16 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
 
         hooks.push("filesystems".to_string());
 
-        // Separate /usr partition requires the usr hook for early mount
-        if config
+        // Separate /usr mount (partition or btrfs subvolume) requires the
+        // usr hook so initramfs mounts /usr before attempting to exec /sbin/init.
+        let has_usr_partition = config
             .disk
             .partitions
             .iter()
-            .any(|p| p.mount_point == "/usr")
-        {
+            .any(|p| p.mount_point == "/usr");
+        let has_usr_subvolume = config.disk.use_subvolumes
+            && config.disk.filesystem == Filesystem::Btrfs;
+        if has_usr_partition || has_usr_subvolume {
             hooks.push("usr".to_string());
         }
 
@@ -485,6 +488,26 @@ mod tests {
         assert!(
             !files.contains(&"/etc/cryptsetup-keys.d/cryptboot.key".to_string()),
             "LVM thin without boot encryption should not include boot keyfile"
+        );
+    }
+
+    #[test]
+    fn btrfs_subvolumes_include_usr_hook() {
+        let mut cfg = config_encrypted(false);
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.use_subvolumes = true;
+        // No explicit /usr partition — /usr comes from the @usr subvolume
+        cfg.disk.partitions.retain(|p| p.mount_point != "/usr");
+        let hooks = construct_hooks(&cfg);
+        assert!(
+            hooks.contains(&"usr".to_string()),
+            "Btrfs with subvolumes must include usr hook for @usr subvolume"
+        );
+        let filesystems_pos = hooks.iter().position(|h| h == "filesystems").unwrap();
+        let usr_pos = hooks.iter().position(|h| h == "usr").unwrap();
+        assert!(
+            filesystems_pos < usr_pos,
+            "usr hook must come after filesystems hook"
         );
     }
 
