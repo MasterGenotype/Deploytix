@@ -129,6 +129,7 @@ impl DeploytixGui {
                 sysctl_network_performance: self.packages.sysctl_network_performance,
                 install_hhd: self.packages.install_hhd,
                 install_decky_loader: self.packages.install_decky_loader,
+                install_evdevhook2: self.packages.install_evdevhook2,
                 gpu_drivers: {
                     let mut drivers = Vec::new();
                     if self.packages.gpu_nvidia {

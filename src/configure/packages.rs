@@ -11,6 +11,7 @@
 //! - Network performance sysctl tweaks (/etc/sysctl.d/99-network-performance.conf)
 //! - Handheld Daemon (HHD) via AUR + init-specific service file
 //! - Decky Loader (Steam plugin framework) + init-specific service file
+//! - evdevhook2 (Cemuhook UDP motion server) via AUR + udev rule + service file
 
 use crate::config::{DeploymentConfig, GpuDriverVendor};
 use crate::utils::command::CommandRunner;
@@ -1302,6 +1303,242 @@ fn write_decky_service(
             fs::set_permissions(&service_path, fs::Permissions::from_mode(0o644))?;
 
             info!("  Written dinit service: /etc/dinit.d/plugin_loader");
+        }
+    }
+
+    Ok(())
+}
+
+// ======================== evdevhook2 ========================
+
+/// AUR package installed for evdevhook2.  Built by upstream author (v1993)
+/// from <https://github.com/v1993/evdevhook2> — a Cemuhook UDP motion server
+/// supporting modern Linux drivers (`hid-playstation`, `hid-nintendo`,
+/// `hid-sony`).
+const EVDEVHOOK2_AUR_PACKAGES: &[&str] = &["evdevhook2-git"];
+
+/// udev rule shipped with evdevhook2 — grants the `input` group read/write
+/// access (MODE=0660) on motion sensor evdev nodes exposed by Sony
+/// controllers, *and* tags them with `uaccess` so the active local-session
+/// user also gets ACL access.
+///
+/// Covers VID 054c (Sony Interactive Entertainment):
+///   - DualShock 3       (0x0268, no gyro)
+///   - DualShock 4       (0x05c4)
+///   - DualShock 4 v2    (0x09cc)
+///   - DualSense         (0x0ce6)
+///   - DualSense Edge    (0x0df2)
+const EVDEVHOOK2_UDEV_RULES: &str = "\
+# udev rules for evdevhook2 (installed by Deploytix)\n\
+#\n\
+# Grants the locally logged-in user (via uaccess/ACL) and members of the\n\
+# 'input' group read-write access to motion sensor evdev nodes exposed by\n\
+# Sony controllers so that evdevhook2 does not need to run as root.\n\
+\n\
+ACTION!=\"add|change\", GOTO=\"evdevhook2_end\"\n\
+SUBSYSTEM!=\"input\", GOTO=\"evdevhook2_end\"\n\
+\n\
+# Sony Interactive Entertainment (VID 054c)\n\
+# DualShock 3\n\
+KERNEL==\"event*\", ATTRS{id/vendor}==\"054c\", ATTRS{id/product}==\"0268\", TAG+=\"uaccess\", MODE=\"0660\", GROUP=\"input\"\n\
+# DualShock 4\n\
+KERNEL==\"event*\", ATTRS{id/vendor}==\"054c\", ATTRS{id/product}==\"05c4\", TAG+=\"uaccess\", MODE=\"0660\", GROUP=\"input\"\n\
+# DualShock 4 (2nd gen)\n\
+KERNEL==\"event*\", ATTRS{id/vendor}==\"054c\", ATTRS{id/product}==\"09cc\", TAG+=\"uaccess\", MODE=\"0660\", GROUP=\"input\"\n\
+# DualSense\n\
+KERNEL==\"event*\", ATTRS{id/vendor}==\"054c\", ATTRS{id/product}==\"0ce6\", TAG+=\"uaccess\", MODE=\"0660\", GROUP=\"input\"\n\
+# DualSense Edge\n\
+KERNEL==\"event*\", ATTRS{id/vendor}==\"054c\", ATTRS{id/product}==\"0df2\", TAG+=\"uaccess\", MODE=\"0660\", GROUP=\"input\"\n\
+\n\
+LABEL=\"evdevhook2_end\"\n\
+";
+
+/// Install evdevhook2 via yay, add the user to the `input` group, write a
+/// udev rule that grants that group access to motion sensor evdev nodes,
+/// and write an init-specific service file so the Cemuhook UDP server
+/// starts automatically on boot as the configured user.
+///
+/// Upstream only ships an AppImage; we generate the appropriate service
+/// file for whichever init system the user has chosen and run the daemon
+/// as the login user (not root) so it matches the `input`-group + uaccess
+/// permission model.
+///
+/// Requires `install_yay = true` — the caller (`installer.rs`) checks this.
+pub fn install_evdevhook2(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_evdevhook2 {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+
+    info!("Installing evdevhook2 for user {}", username);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install AUR packages via yay as {}: {}",
+            username,
+            EVDEVHOOK2_AUR_PACKAGES.join(" ")
+        );
+        println!("  [dry-run] Would write /etc/udev/rules.d/60-evdevhook2.rules");
+        println!(
+            "  [dry-run] Would add user '{}' to the 'input' group",
+            username
+        );
+        println!(
+            "  [dry-run] Would write evdevhook2 service file for init: {}",
+            config.system.init
+        );
+        return Ok(());
+    }
+
+    // Step 1: Install AUR package via yay
+    let install_cmd = format!(
+        "sudo -u {} yay -S --noconfirm --needed {}",
+        username,
+        EVDEVHOOK2_AUR_PACKAGES.join(" ")
+    );
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+    info!("  evdevhook2 AUR package installed");
+
+    // Step 2: Write the udev rule (GROUP=input, uaccess tag) that grants
+    // the user access to /dev/input/event* motion sensor nodes without
+    // being root.
+    let rules_dir = format!("{}/etc/udev/rules.d", install_root);
+    fs::create_dir_all(&rules_dir)?;
+    let rules_path = format!("{}/60-evdevhook2.rules", rules_dir);
+    fs::write(&rules_path, EVDEVHOOK2_UDEV_RULES)?;
+    fs::set_permissions(&rules_path, fs::Permissions::from_mode(0o644))?;
+    info!("  Written udev rule: /etc/udev/rules.d/60-evdevhook2.rules");
+
+    // Step 3: Add the user to the `input` group so the service (running as
+    // that user) can read the motion sensor evdev nodes before any local
+    // login session has been established (i.e. at boot, before uaccess
+    // ACLs are applied).  `gpasswd -a` is idempotent.
+    cmd.run_in_chroot(install_root, &format!("gpasswd -a {} input", username))?;
+    info!("  Added user '{}' to the 'input' group", username);
+
+    // Step 4: Write init-specific service file
+    write_evdevhook2_service(config, install_root, username)?;
+
+    info!("evdevhook2 installation complete");
+    Ok(())
+}
+
+/// Write the evdevhook2 service file for the configured init system.
+///
+/// evdevhook2 is run as the configured user (a member of the `input`
+/// group, see `install_evdevhook2()`).  With the udev rule shipped above,
+/// the user has read-write access to the motion sensor evdev nodes, so
+/// the daemon does not require root privileges.
+///
+/// No command-line arguments are required: without a config file
+/// evdevhook2 binds the default UDP port (26760) and exposes every
+/// supported motion-capable controller automatically.
+fn write_evdevhook2_service(
+    config: &DeploymentConfig,
+    install_root: &str,
+    username: &str,
+) -> Result<()> {
+    use crate::config::InitSystem;
+
+    match config.system.init {
+        InitSystem::Runit => {
+            let sv_dir = format!("{}/etc/runit/sv/evdevhook2", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            // chpst -u <user> drops uid/gid (and supplementary groups,
+            // including 'input') before exec'ing evdevhook2.  dbus is a
+            // soft dependency for UPower battery reporting.
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 # evdevhook2 runit service - Cemuhook UDP motion server\n\
+                 sv check dbus >/dev/null || exit 1\n\
+                 exec 2>&1\n\
+                 exec chpst -u {user} /usr/bin/evdevhook2\n",
+                user = username
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            // log/run — pipe to svlogd
+            let log_dir = format!("{}/log", sv_dir);
+            fs::create_dir_all(&log_dir)?;
+            let log_run = "#!/bin/sh\n\
+                           [ -d /var/log/evdevhook2 ] || install -dm 755 /var/log/evdevhook2\n\
+                           exec svlogd -tt /var/log/evdevhook2\n";
+            let log_run_path = format!("{}/run", log_dir);
+            fs::write(&log_run_path, log_run)?;
+            fs::set_permissions(&log_run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written runit service: /etc/runit/sv/evdevhook2/");
+        }
+
+        InitSystem::OpenRC => {
+            let init_d = format!("{}/etc/init.d", install_root);
+            fs::create_dir_all(&init_d)?;
+
+            // command_user drops privileges to the configured user.
+            let script = format!(
+                "#!/sbin/openrc-run\n\
+                 description=\"evdevhook2 Cemuhook UDP motion server\"\n\
+                 command=\"/usr/bin/evdevhook2\"\n\
+                 command_user=\"{user}:{user}\"\n\
+                 command_background=true\n\
+                 pidfile=\"/run/evdevhook2.pid\"\n\
+                 \n\
+                 depend() {{\n\
+                 \tneed udev dbus\n\
+                 }}\n",
+                user = username
+            );
+            let script_path = format!("{}/evdevhook2", init_d);
+            fs::write(&script_path, &script)?;
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written OpenRC service: /etc/init.d/evdevhook2");
+        }
+
+        InitSystem::S6 => {
+            let sv_dir = format!("{}/etc/s6/sv/evdevhook2", install_root);
+            fs::create_dir_all(&sv_dir)?;
+
+            // type file declares this a long-running service
+            fs::write(format!("{}/type", sv_dir), "longrun\n")?;
+
+            // s6-setuidgid drops to the configured user.
+            let run_script = format!(
+                "#!/bin/sh\n\
+                 exec s6-setuidgid {user} /usr/bin/evdevhook2 2>&1\n",
+                user = username
+            );
+            let run_path = format!("{}/run", sv_dir);
+            fs::write(&run_path, &run_script)?;
+            fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
+
+            info!("  Written s6 service: /etc/s6/sv/evdevhook2/");
+        }
+
+        InitSystem::Dinit => {
+            let dinit_d = format!("{}/etc/dinit.d", install_root);
+            fs::create_dir_all(&dinit_d)?;
+
+            let service = format!(
+                "type = process\n\
+                 command = /usr/bin/evdevhook2\n\
+                 run-as = {user}\n\
+                 restart = true\n",
+                user = username
+            );
+            let service_path = format!("{}/evdevhook2", dinit_d);
+            fs::write(&service_path, &service)?;
+            fs::set_permissions(&service_path, fs::Permissions::from_mode(0o644))?;
+
+            info!("  Written dinit service: /etc/dinit.d/evdevhook2");
         }
     }
 

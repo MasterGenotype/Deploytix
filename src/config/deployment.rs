@@ -261,6 +261,14 @@ pub struct PackagesConfig {
     /// Writes an init-specific service file for runit/s6/dinit/openrc.
     #[serde(default)]
     pub install_decky_loader: bool,
+    /// Install evdevhook2 — Cemuhook UDP motion server for modern Linux drivers
+    /// (DualShock 3/4, DualSense, DualSense Edge, Nintendo Joy-Cons / Pro
+    /// Controller).  Requires: install_yay = true (AUR package: evdevhook2-git).
+    /// Ships a udev rule that grants the `input` group access to motion
+    /// sensor evdev nodes, adds the created user to the `input` group, and
+    /// writes an init-specific service file for runit/s6/dinit/openrc.
+    #[serde(default)]
+    pub install_evdevhook2: bool,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -901,6 +909,16 @@ impl DeploymentConfig {
             false
         };
 
+        // evdevhook2 — requires yay (AUR)
+        let install_evdevhook2 = if install_yay {
+            prompt_confirm(
+                "Install evdevhook2? (Cemuhook UDP motion server for DualShock/DualSense/Joy-Cons)",
+                false,
+            )?
+        } else {
+            false
+        };
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -960,6 +978,7 @@ impl DeploymentConfig {
                 sysctl_network_performance,
                 install_hhd,
                 install_decky_loader,
+                install_evdevhook2,
                 gpu_drivers,
             },
         })
@@ -1250,6 +1269,13 @@ impl DeploymentConfig {
         if self.packages.install_hhd && !self.packages.install_yay {
             return Err(DeploytixError::ValidationError(
                 "Handheld Daemon (HHD) requires install_yay = true".to_string(),
+            ));
+        }
+
+        // evdevhook2 requires yay (AUR)
+        if self.packages.install_evdevhook2 && !self.packages.install_yay {
+            return Err(DeploytixError::ValidationError(
+                "evdevhook2 requires install_yay = true (AUR package: evdevhook2-git)".to_string(),
             ));
         }
 

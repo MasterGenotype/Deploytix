@@ -9,8 +9,8 @@ use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
 use crate::disk::formatting::{
-    create_btrfs_filesystem, create_btrfs_subvolumes, format_all_partitions, format_boot_partition,
-    format_efi, format_swap, mount_btrfs_subvolumes,
+    create_btrfs_subvolumes, format_all_partitions, format_boot_partition, format_efi,
+    format_partition, format_swap, mount_btrfs_subvolumes,
 };
 use crate::disk::layouts::{
     compute_layout_from_config, get_luks_partitions, multi_volume_subvolumes, print_layout_summary,
@@ -320,6 +320,18 @@ impl Installer {
                 &self.cmd,
                 &self.config.system.init,
                 "plugin_loader",
+                INSTALL_ROOT,
+            )?;
+        }
+
+        // Phase 5.85: evdevhook2 (Cemuhook UDP motion server)
+        if self.config.packages.install_evdevhook2 {
+            self.report_progress(0.935, "Installing evdevhook2...");
+            self.install_evdevhook2()?;
+            configure::services::enable_service(
+                &self.cmd,
+                &self.config.system.init,
+                "evdevhook2",
                 INSTALL_ROOT,
             )?;
         }
@@ -904,6 +916,13 @@ impl Installer {
         configure::packages::install_decky_loader(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
+    /// Install evdevhook2 (Cemuhook UDP motion server) via yay + udev rule
+    /// + init-specific service file
+    fn install_evdevhook2(&self) -> Result<()> {
+        info!("Installing evdevhook2 (Cemuhook UDP motion server)");
+        configure::packages::install_evdevhook2(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
     /// Finalize installation
     fn finalize(&self) -> Result<()> {
         info!("[Phase 6/6] Finalizing installation (regenerating initramfs, unmounting)");
@@ -1053,7 +1072,7 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        // Format each LUKS-mapped device as BTRFS
+        // Format each LUKS-mapped device with the configured filesystem
         for container in &self.luks_containers {
             // Skip formatting the Home container when preserve_home is enabled
             if self.config.disk.preserve_home && container.volume_name.eq_ignore_ascii_case("home")
@@ -1064,7 +1083,12 @@ impl Installer {
                 );
                 continue;
             }
-            create_btrfs_filesystem(&self.cmd, &container.mapped_path, &container.volume_name)?;
+            format_partition(
+                &self.cmd,
+                &container.mapped_path,
+                &self.config.disk.filesystem,
+                Some(&container.volume_name),
+            )?;
         }
 
         // Format SWAP partition
@@ -1468,7 +1492,7 @@ impl Installer {
         let layout = self.layout.as_ref().unwrap();
         let vg_name = &self.config.disk.lvm_vg_name;
 
-        // Format each thin volume as btrfs
+        // Format each thin volume with the configured filesystem
         for vol in &self.lvm_thin_volumes {
             // Skip formatting the home volume when preserve_home is enabled
             if self.config.disk.preserve_home && vol.mount_point == "/home" {
@@ -1479,7 +1503,12 @@ impl Installer {
                 continue;
             }
             let lv_device = lv_path(vg_name, &vol.name);
-            create_btrfs_filesystem(&self.cmd, &lv_device, &vol.name)?;
+            format_partition(
+                &self.cmd,
+                &lv_device,
+                &self.config.disk.filesystem,
+                Some(&vol.name),
+            )?;
         }
 
         // Format SWAP partition if present and using partition swap

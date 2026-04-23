@@ -99,5 +99,30 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
                  ~/.local/var/opt/decky-loader. Runs as the greetd session user.",
             );
         }
+
+        ui.add_space(theme::SPACING_XS);
+
+        // ── evdevhook2 (requires yay / AUR) ───────────────────────────────
+        let evdevhook2_available = packages.install_yay;
+        ui.add_enabled_ui(evdevhook2_available, |ui| {
+            ui.checkbox(
+                &mut packages.install_evdevhook2,
+                "evdevhook2 \u{2014} Cemuhook UDP motion server (DualShock/DualSense/Joy-Cons)",
+            );
+        });
+        if !evdevhook2_available {
+            packages.install_evdevhook2 = false;
+            widgets::info_text(
+                ui,
+                "Requires: yay AUR helper (enable in Optional Packages above).",
+            );
+        } else if packages.install_evdevhook2 {
+            widgets::info_text(
+                ui,
+                "Installs evdevhook2-git from the AUR, ships a udev rule for the \
+                 `input` group, adds the user to the `input` group, and writes an \
+                 init-specific service that runs as that user on UDP port 26760.",
+            );
+        }
     });
 }

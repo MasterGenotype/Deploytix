@@ -483,25 +483,6 @@ pub fn export_zfs_pools(cmd: &CommandRunner) -> Result<()> {
     Ok(())
 }
 
-/// Create btrfs filesystem on a device (typically a LUKS-mapped device)
-pub fn create_btrfs_filesystem(cmd: &CommandRunner, device: &str, label: &str) -> Result<()> {
-    info!(
-        "Creating btrfs filesystem on {} with label {}",
-        device, label
-    );
-
-    if cmd.is_dry_run() {
-        println!("  [dry-run] mkfs.btrfs -f -L {} {}", label, device);
-        return Ok(());
-    }
-
-    cmd.run("mkfs.btrfs", &["-f", "-L", label, device])
-        .map(|_| ())
-        .map_err(|e| {
-            DeploytixError::FilesystemError(format!("Failed to create btrfs filesystem: {}", e))
-        })
-}
-
 /// Recursively delete all nested btrfs subvolumes under `path`.
 ///
 /// `btrfs subvolume delete` refuses to remove a subvolume that still contains

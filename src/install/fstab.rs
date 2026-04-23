@@ -38,8 +38,12 @@ fn boot_fs_fstab_entry(boot_filesystem: &Filesystem) -> (&'static str, &'static 
 /// (pass 0).  btrfs uses its own internal integrity mechanisms; xfs and
 /// f2fs fsck tools are not safe to run automatically; zfs handles its
 /// own scrubbing.
-fn fsck_pass(_filesystem: &Filesystem, _mount_point: &str) -> u8 {
-    0
+fn fsck_pass(filesystem: &Filesystem, mount_point: &str) -> u8 {
+    match filesystem {
+        Filesystem::Ext4 if mount_point == "/" => 1,
+        Filesystem::Ext4 => 2,
+        _ => 0,
+    }
 }
 
 /// Return the fstab filesystem type string and default mount options for a
@@ -358,19 +362,19 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
     );
 
     if cmd.is_dry_run() {
+        let (fstype, fsopts) = fs_fstab_entry(filesystem);
         println!("  [dry-run] Would generate fstab with encrypted volumes:");
         for container in containers {
             let mp = container.volume_name.to_lowercase();
             let mount_point = if mp == "root" {
-                "/"
+                "/".to_string()
             } else {
-                &format!("/{}", mp)
+                format!("/{}", mp)
             };
+            let pass = fsck_pass(filesystem, &mount_point);
             println!(
-                "    {} {} btrfs defaults,noatime,compress=zstd 0 {}",
-                container.mapped_path,
-                mount_point,
-                0 // btrfs: no boot-time fsck
+                "    {} {} {} {} 0 {}",
+                container.mapped_path, mount_point, fstype, fsopts, pass
             );
         }
         return Ok(());
@@ -515,14 +519,14 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
     info!("Generating /etc/fstab for LVM thin volumes");
 
     if cmd.is_dry_run() {
+        let filesystem = params.filesystem;
+        let (fstype, fsopts) = fs_fstab_entry(filesystem);
         println!("  [dry-run] Would generate fstab with LVM thin volumes:");
         for vol in thin_volumes {
+            let pass = fsck_pass(filesystem, &vol.mount_point);
             println!(
-                "    /dev/{}/{} {} btrfs defaults,noatime,compress=zstd 0 {}",
-                vg_name,
-                vol.name,
-                vol.mount_point,
-                0 // btrfs: no boot-time fsck
+                "    /dev/{}/{} {} {} {} 0 {}",
+                vg_name, vol.name, vol.mount_point, fstype, fsopts, pass
             );
         }
         return Ok(());
@@ -642,4 +646,49 @@ pub fn append_swap_file_entry(install_root: &str) -> Result<()> {
     fs::write(&fstab_path, content)?;
     info!("Added swap file entry to fstab");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── fsck_pass ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fsck_pass_ext4_root_returns_1() {
+        assert_eq!(fsck_pass(&Filesystem::Ext4, "/"), 1);
+    }
+
+    #[test]
+    fn fsck_pass_ext4_non_root_returns_2() {
+        for mp in ["/usr", "/var", "/home", "/data"] {
+            assert_eq!(
+                fsck_pass(&Filesystem::Ext4, mp),
+                2,
+                "expected pass 2 for ext4 at mount point '{}'",
+                mp
+            );
+        }
+    }
+
+    #[test]
+    fn fsck_pass_non_ext4_always_returns_0() {
+        let filesystems = [
+            Filesystem::Btrfs,
+            Filesystem::Xfs,
+            Filesystem::F2fs,
+            Filesystem::Zfs,
+        ];
+        for fs in &filesystems {
+            for mp in ["/", "/usr", "/home"] {
+                assert_eq!(
+                    fsck_pass(fs, mp),
+                    0,
+                    "expected pass 0 for {:?} at '{}'",
+                    fs,
+                    mp
+                );
+            }
+        }
+    }
 }

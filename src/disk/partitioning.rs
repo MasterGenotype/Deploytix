@@ -9,12 +9,39 @@ use std::io::Write;
 use tracing::info;
 use uuid::Uuid;
 
+/// Read the logical block size of a device from sysfs.
+///
+/// Returns the value from `/sys/block/<name>/queue/logical_block_size`,
+/// which sfdisk uses to interpret the sector counts in a partition script.
+/// Falls back to 512 when the attribute is unavailable (virtual devices,
+/// older kernels).
+///
+/// Note: `/sys/block/<dev>/size` always reports capacity in 512-byte units
+/// regardless of the logical block size, so `size_bytes = size_sectors * 512`
+/// remains correct. Only the sector counts and alignment in the sfdisk
+/// script need to use the actual logical block size.
+fn logical_sector_size(device: &str) -> u64 {
+    let name = std::path::Path::new(device)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let path = format!("/sys/block/{}/queue/logical_block_size", name);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(512)
+}
+
 /// Generate sfdisk script for a partition layout
 pub fn generate_sfdisk_script(device: &str, layout: &ComputedLayout) -> Result<String> {
     let device_info = get_device_info(device).map_err(|e| {
         DeploytixError::PartitionError(format!("Cannot read device info for {}: {}", device, e))
     })?;
-    let sector_size = 512u64; // Default, could be read from sysfs
+    // Read the actual logical sector size from sysfs so that 4096-byte-sector
+    // NVMe drives get correct sector counts and alignment in the script.
+    // /sys/block/<dev>/size always reports capacity in 512-byte units, so
+    // size_bytes is still computed as size_sectors * 512.
+    let sector_size = logical_sector_size(device);
     let total_sectors = device_info.size_bytes / sector_size;
 
     let first_lba = 2048u64;
