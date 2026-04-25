@@ -90,7 +90,7 @@ pub fn resolve_closure<S: MetadataSource + ?Sized>(
                     constraint: d.constraint.clone(),
                 });
                 if !visited.contains_key(&d.name) {
-                    queue.push_back((d.name.clone(), Vec::new()));
+                    queue.push_back(d.name.clone());
                 }
             }
         }
@@ -103,7 +103,7 @@ pub fn resolve_closure<S: MetadataSource + ?Sized>(
                     constraint: d.constraint.clone(),
                 });
                 if !visited.contains_key(&d.name) {
-                    queue.push_back((d.name.clone(), Vec::new()));
+                    queue.push_back(d.name.clone());
                 }
             }
         }
@@ -116,7 +116,7 @@ pub fn resolve_closure<S: MetadataSource + ?Sized>(
                     constraint: d.constraint.clone(),
                 });
                 if !visited.contains_key(&d.name) {
-                    queue.push_back((d.name.clone(), Vec::new()));
+                    queue.push_back(d.name.clone());
                 }
             }
         }

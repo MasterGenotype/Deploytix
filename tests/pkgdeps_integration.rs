@@ -243,6 +243,44 @@ fn different_configs_produce_different_results() {
     assert_ne!(foo_a.repo, foo_b.repo);
 }
 
+/// Regression test for the bug where a virtual dep (e.g. `sh`) would
+/// be marked unresolved when the underlying source could not match it
+/// by name/description. The MockSource models a Provides-aware lookup;
+/// the real `PacmanSource` was changed to consult sync DB Provides
+/// metadata via expac rather than `pacman -Ss`. In both cases, the
+/// closure must include the real provider node and an entry in
+/// `providers`, with no `unresolved` for the virtual name.
+#[test]
+fn virtual_dep_resolves_to_provider_node_not_unresolved() {
+    let src = artix_universe();
+    let closure = resolve_closure(&src, &["user-pkg"], ResolveOpts::default()).unwrap();
+    // `sh` is a virtual provided by bash; it must NOT appear as
+    // unresolved.
+    assert!(
+        !closure.unresolved.iter().any(|u| u == "sh"),
+        "virtual dep `sh` was recorded as unresolved; closure: {:?}",
+        closure
+    );
+    // The real provider (bash) must be present as a node.
+    assert!(closure.nodes.iter().any(|p| p.name == "bash"));
+    // Provider mapping must record the choice.
+    assert!(closure
+        .providers
+        .iter()
+        .any(|p| p.virtual_name == "sh" && p.chosen == "bash"));
+    // Edges originally pointing at `sh` must have been rewritten to
+    // point at the real provider, so graph output references real
+    // packages.
+    assert!(closure
+        .edges
+        .iter()
+        .any(|e| e.from == "user-pkg" && e.to == "bash"));
+    assert!(!closure
+        .edges
+        .iter()
+        .any(|e| e.from == "user-pkg" && e.to == "sh"));
+}
+
 #[test]
 fn offline_fixture_round_trip() {
     let dir = std::env::temp_dir().join(format!(

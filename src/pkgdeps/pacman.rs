@@ -17,7 +17,7 @@
 use super::model::{Dep, InstallPlan, Package, PlannedPackage};
 use super::source::MetadataSource;
 use crate::utils::error::{DeploytixError, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use tracing::debug;
 
@@ -90,6 +90,11 @@ pub struct PacmanSource<E: CmdExec> {
     cfg: PacmanConfig,
     /// Cached repository list discovered on first call.
     databases: std::sync::OnceLock<Vec<String>>,
+    /// Cached map of `virtual name → list of providing package names`,
+    /// built once from sync DB metadata. `None` means we tried to build
+    /// the index but the underlying tool wasn't available, so callers
+    /// must fall back; an empty map means it was built and is empty.
+    provides_index: std::sync::OnceLock<Option<BTreeMap<String, Vec<String>>>>,
 }
 
 impl<E: CmdExec> PacmanSource<E> {
@@ -98,6 +103,7 @@ impl<E: CmdExec> PacmanSource<E> {
             exec,
             cfg,
             databases: std::sync::OnceLock::new(),
+            provides_index: std::sync::OnceLock::new(),
         }
     }
 
@@ -119,10 +125,85 @@ impl<E: CmdExec> PacmanSource<E> {
             all.push("--dbpath".into());
             all.push(d.clone());
         }
+        if let Some(r) = &self.cfg.root {
+            all.push("--root".into());
+            all.push(r.clone());
+        }
         for a in args {
             all.push((*a).to_string());
         }
         self.exec.run("pactree", &all)
+    }
+
+    /// Build (or return cached) `virtual_name → [providing pkg]` map by
+    /// reading sync DB Provides fields.
+    ///
+    /// Strategy:
+    /// 1. Try `expac -S '%n\t%S'` — emits one line per sync package
+    ///    with name and tab-separated provides field. This is the
+    ///    canonical alpm-backed enumeration.
+    /// 2. If expac is unavailable, try parsing the output of
+    ///    `pacman -Sl` + `pacman -Si` per repo. We avoid that fallback
+    ///    here for cost reasons; callers handle a `None` index by
+    ///    treating the lookup as inconclusive.
+    fn build_provides_index(&self) -> Option<BTreeMap<String, Vec<String>>> {
+        let mut expac_args: Vec<String> = Vec::new();
+        if let Some(c) = &self.cfg.config {
+            expac_args.push("--config".into());
+            expac_args.push(c.clone());
+        }
+        // -S queries sync DBs; %n = name, %S = provides (space-separated).
+        expac_args.push("-S".into());
+        expac_args.push("%n\t%S".into());
+        let out = match self.exec.run("expac", &expac_args) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for line in out.lines() {
+            let mut parts = line.splitn(2, '\t');
+            let name = match parts.next() {
+                Some(n) if !n.is_empty() => n,
+                _ => continue,
+            };
+            let provides_field = parts.next().unwrap_or("");
+            for tok in provides_field.split_whitespace() {
+                let dep = Dep::parse(tok);
+                if dep.name.is_empty() {
+                    continue;
+                }
+                map.entry(dep.name).or_default().push(name.to_string());
+            }
+        }
+        // Stable order, dedup.
+        for v in map.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        Some(map)
+    }
+
+    fn provides_index(&self) -> Option<&BTreeMap<String, Vec<String>>> {
+        self.provides_index
+            .get_or_init(|| self.build_provides_index())
+            .as_ref()
+    }
+
+    /// Pick the deterministic winner among multiple providers: prefer an
+    /// installed provider, then fall back to alphabetical order.
+    fn choose_provider(&self, candidates: &[String]) -> Option<String> {
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut sorted = candidates.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        for c in &sorted {
+            if self.is_installed(c).unwrap_or(false) {
+                return Some(c.clone());
+            }
+        }
+        sorted.into_iter().next()
     }
 }
 
@@ -148,26 +229,50 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
     }
 
     fn provider_of(&self, virtual_name: &str) -> Result<Option<String>> {
-        // `pacman -Ssq <name>` returns names of packages whose name OR
-        // provides matches; refine with -Si on each candidate. As a
-        // simpler approach we use `pactree --provides` style: ask pacman
-        // -Si <virtual>; if it succeeds the provider is whatever pacman
-        // itself resolves.
+        // 1. Direct sync-DB hit: a real package whose name matches wins.
+        //    `pacman -Si` consults sync DB Name fields.
         if let Some(p) = self.package(virtual_name)? {
             return Ok(Some(p.name));
         }
-        // Fall back: scan sync repos with `pacman -Ss '^<name>$'`.
-        match self.pacman(&["-Ss", &format!("^{}$", virtual_name)]) {
-            Ok(out) => Ok(parse_pacman_ss_first(&out)),
+
+        // 2. Consult actual Provides metadata via the cached index built
+        //    from `expac -S '%n\t%S'`. This is the libalpm-backed path —
+        //    `pacman -Ss` would only match name/description and miss
+        //    soname-style virtual deps such as `sh` or `libfoo.so=1-64`.
+        if let Some(index) = self.provides_index() {
+            if let Some(candidates) = index.get(virtual_name) {
+                if let Some(chosen) = self.choose_provider(candidates) {
+                    return Ok(Some(chosen));
+                }
+            }
+            // Index built and the virtual name is genuinely unknown.
+            return Ok(None);
+        }
+
+        // 3. expac wasn't available — fall back to `pacman -Sii` parsing.
+        //    `-Sii` prints each sync package's full record including the
+        //    Provides field; we scan it for the virtual name. This is
+        //    slower than the index but avoids the original `pacman -Ss`
+        //    bug where matches came from package descriptions, not
+        //    provides.
+        match self.pacman(&["-Sii"]) {
+            Ok(out) => Ok(scan_si_for_provider(
+                &out,
+                virtual_name,
+                |pkg| self.is_installed(pkg).unwrap_or(false),
+            )),
             Err(DeploytixError::CommandFailed { .. }) => Ok(None),
-            Err(e) => Err(e),
+            Err(_) => Ok(None),
         }
     }
 
     fn required_by(&self, name: &str) -> Result<Vec<String>> {
-        // `pactree -r <name>` lists reverse runtime deps. The first line
-        // is the target itself; skip duplicates.
-        let out = match self.pactree(&["-r", "-u", name]) {
+        // `pactree -s -r -u <name>`: -s consults the sync DB (so we
+        // catch reverse deps for packages not installed locally), -r
+        // walks reverse, -u dedupes. Without `-s`, pactree(8) reads
+        // only the local package DB and silently misses repository
+        // reverse deps for not-yet-installed packages.
+        let out = match self.pactree(&["-s", "-r", "-u", name]) {
             Ok(s) => s,
             Err(_) => return Ok(Vec::new()),
         };
@@ -386,20 +491,73 @@ pub fn parse_pacman_si(text: &str) -> Result<Package> {
     })
 }
 
-fn parse_pacman_ss_first(text: &str) -> Option<String> {
-    for line in text.lines() {
-        // Format: `repo/name version ...`; subsequent description lines
-        // start with whitespace.
-        if line.starts_with(' ') || line.starts_with('\t') {
+/// Scan `pacman -Sii` output for any package whose `Provides` field
+/// lists `virtual_name`. Returns the deterministically-chosen winner
+/// (installed package preferred, then alphabetical).
+fn scan_si_for_provider<F>(text: &str, virtual_name: &str, is_installed: F) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut current_name: Option<String> = None;
+    let mut current_provides: String = String::new();
+    let mut hits: BTreeSet<String> = BTreeSet::new();
+
+    let flush = |name: &Option<String>, provides: &str, hits: &mut BTreeSet<String>| {
+        if let Some(n) = name {
+            for tok in provides.split_whitespace() {
+                if tok.is_empty() {
+                    continue;
+                }
+                let dep = Dep::parse(tok);
+                if dep.name == virtual_name {
+                    hits.insert(n.clone());
+                    break;
+                }
+            }
+        }
+    };
+
+    let mut current_key: Option<String> = None;
+    for raw in text.lines() {
+        if raw.is_empty() {
+            // Record boundary.
+            flush(&current_name, &current_provides, &mut hits);
+            current_name = None;
+            current_provides.clear();
+            current_key = None;
             continue;
         }
-        if let Some((repo_name, _)) = line.split_once(' ') {
-            if let Some((_, name)) = repo_name.split_once('/') {
-                return Some(name.to_string());
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            if current_key.as_deref() == Some("Provides") {
+                current_provides.push(' ');
+                current_provides.push_str(raw.trim());
+            }
+            continue;
+        }
+        if let Some((key, value)) = raw.split_once(':') {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            current_key = Some(key.clone());
+            match key.as_str() {
+                "Name" => current_name = Some(value),
+                "Provides" => current_provides = value,
+                _ => {}
             }
         }
     }
-    None
+    flush(&current_name, &current_provides, &mut hits);
+
+    if hits.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<String> = hits.into_iter().collect();
+    sorted.sort();
+    for c in &sorted {
+        if is_installed(c) {
+            return Some(c.clone());
+        }
+    }
+    sorted.into_iter().next()
 }
 
 fn parse_pactree_unique(text: &str, target: &str) -> Vec<String> {
@@ -549,5 +707,265 @@ Optional For    : gamma
         assert!(names.contains(&"dep2".to_string()));
         assert!(names.contains(&"dep3".to_string()));
         assert!(!names.contains(&"target".to_string()));
+    }
+
+    /// A `CmdExec` that records every call and can answer multiple
+    /// queries from a fixed table without consuming entries — required
+    /// when a single provider lookup makes several pacman/expac calls.
+    struct RecordingExec {
+        responses: Vec<(String, std::result::Result<String, DeploytixError>)>,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl RecordingExec {
+        fn new(pairs: Vec<(&str, std::result::Result<&str, DeploytixError>)>) -> Self {
+            let responses = pairs
+                .into_iter()
+                .map(|(k, v)| {
+                    let val: std::result::Result<String, DeploytixError> = match v {
+                        Ok(s) => Ok(s.to_string()),
+                        Err(_) => Err(DeploytixError::CommandFailed {
+                            command: k.to_string(),
+                            stderr: "error: target not found".into(),
+                        }),
+                    };
+                    (k.to_string(), val)
+                })
+                .collect();
+            Self {
+                responses,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CmdExec for RecordingExec {
+        fn run(&self, program: &str, args: &[String]) -> Result<String> {
+            let key = format!("{} {}", program, args.join(" "));
+            self.calls.borrow_mut().push(key.clone());
+            // Prefer exact match, then longest prefix match — keeps
+            // disambiguation deterministic when one stored key is a
+            // prefix of another (e.g. "pacman -Si" vs "pacman -Si sh").
+            let mut best: Option<&(String, std::result::Result<String, DeploytixError>)> = None;
+            for entry in &self.responses {
+                if entry.0 == key {
+                    best = Some(entry);
+                    break;
+                }
+                if key.starts_with(entry.0.as_str())
+                    && best
+                        .as_ref()
+                        .map(|b| entry.0.len() > b.0.len())
+                        .unwrap_or(true)
+                {
+                    best = Some(entry);
+                }
+            }
+            if let Some((_, val)) = best {
+                return match val {
+                    Ok(s) => Ok(s.clone()),
+                    Err(DeploytixError::CommandFailed { command, stderr }) => {
+                        Err(DeploytixError::CommandFailed {
+                            command: command.clone(),
+                            stderr: stderr.clone(),
+                        })
+                    }
+                    Err(_) => Err(DeploytixError::CommandNotFound(program.into())),
+                };
+            }
+            Err(DeploytixError::CommandNotFound(program.into()))
+        }
+    }
+
+    /// Bug fix #1 (provider_of): virtual deps such as `sh` must resolve
+    /// to packages whose `Provides` field lists the virtual name, not
+    /// to packages whose name or description happens to match a regex.
+    #[test]
+    fn provider_of_resolves_via_expac_provides_index() {
+        // `pacman -Si sh` fails (sh isn't a real package). expac then
+        // reports that bash provides sh. The lookup MUST succeed
+        // without falling back to the pacman -Ss name/description
+        // search.
+        let exec = RecordingExec::new(vec![
+            (
+                "pacman -Si sh",
+                Err(DeploytixError::CommandFailed {
+                    command: "pacman -Si sh".into(),
+                    stderr: "error: package 'sh' was not found".into(),
+                }),
+            ),
+            (
+                "expac -S %n\t%S",
+                Ok("bash\tsh=5.2 bash=5.2\nzsh\tzsh=5.9\nglibc\t\n"),
+            ),
+            // is_installed checks (called by choose_provider).
+            (
+                "pacman -Qq bash",
+                Err(DeploytixError::CommandFailed {
+                    command: "pacman -Qq bash".into(),
+                    stderr: "error: package 'bash' was not found".into(),
+                }),
+            ),
+        ]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let chosen = src.provider_of("sh").unwrap();
+        assert_eq!(chosen.as_deref(), Some("bash"));
+
+        // Crucially: we must NOT have invoked `pacman -Ss '^sh$'` —
+        // that's the pacman name/description search that misses true
+        // virtual provides.
+        let calls = src.exec.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("-Ss")),
+            "provider_of fell back to pacman -Ss name/description search; calls: {:?}",
+            calls
+        );
+    }
+
+    /// Bug fix #1 (provider_of): when multiple packages provide the
+    /// same virtual name, prefer an installed one so the choice is
+    /// deterministic and matches what pacman itself would do.
+    #[test]
+    fn provider_of_prefers_installed_provider() {
+        let exec = RecordingExec::new(vec![
+            (
+                "pacman -Si sh",
+                Err(DeploytixError::CommandFailed {
+                    command: "pacman -Si sh".into(),
+                    stderr: "error: package 'sh' was not found".into(),
+                }),
+            ),
+            ("expac -S %n\t%S", Ok("bash\tsh\ndash\tsh\n")),
+            // dash is installed; bash is not. choose_provider must
+            // pick dash even though bash sorts first alphabetically.
+            (
+                "pacman -Qq bash",
+                Err(DeploytixError::CommandFailed {
+                    command: "pacman -Qq bash".into(),
+                    stderr: "error: package 'bash' was not found".into(),
+                }),
+            ),
+            ("pacman -Qq dash", Ok("dash\n")),
+        ]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let chosen = src.provider_of("sh").unwrap();
+        assert_eq!(chosen.as_deref(), Some("dash"));
+    }
+
+    /// Bug fix #1 (provider_of): the index built from `expac -S` must
+    /// preserve version constraints in `Provides` entries — the dep
+    /// parser strips the `=1.2` so the bare virtual name is what we
+    /// key on.
+    #[test]
+    fn provider_of_strips_version_constraint_from_provides() {
+        let exec = RecordingExec::new(vec![
+            (
+                "pacman -Si libcrypto.so",
+                Err(DeploytixError::CommandFailed {
+                    command: "pacman -Si libcrypto.so".into(),
+                    stderr: "error: package 'libcrypto.so' was not found".into(),
+                }),
+            ),
+            (
+                "expac -S %n\t%S",
+                Ok("openssl\tlibcrypto.so=3-64 libssl.so=3-64\n"),
+            ),
+            ("pacman -Qq openssl", Ok("openssl\n")),
+        ]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let chosen = src.provider_of("libcrypto.so").unwrap();
+        assert_eq!(chosen.as_deref(), Some("openssl"));
+    }
+
+    /// Bug fix #2 (required_by): pactree must be invoked with `-s`
+    /// (sync DB) so that reverse-deps for repository packages that
+    /// aren't currently installed are returned.
+    #[test]
+    fn required_by_passes_sync_flag_to_pactree() {
+        let exec = RecordingExec::new(vec![(
+            "pactree -s -r -u glibc",
+            Ok("glibc\nbase\nfilesystem\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let parents = src.required_by("glibc").unwrap();
+        assert!(parents.contains(&"base".to_string()));
+        assert!(parents.contains(&"filesystem".to_string()));
+
+        let calls = src.exec.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("pactree ") && c.contains(" -s ")),
+            "required_by must invoke pactree with -s; got calls {:?}",
+            calls
+        );
+        // And it must not use the local-DB form (no -s).
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("pactree -r ") || c.starts_with("pactree -r -u ")),
+            "required_by used local-DB pactree form; calls {:?}",
+            calls
+        );
+    }
+
+    /// Bug fix #2 (required_by): pactree must thread the same
+    /// --config/--dbpath/--root overrides as pacman, ahead of the
+    /// `-s -r -u` flags, so chroot/clean-root targets stay consistent.
+    #[test]
+    fn required_by_threads_config_overrides_to_pactree() {
+        let exec = RecordingExec::new(vec![(
+            "pactree --config /tmp/p.conf --dbpath /mnt/var/lib/pacman --root /mnt -s -r -u glibc",
+            Ok("glibc\nbase\n"),
+        )]);
+        let src = PacmanSource::new(
+            exec,
+            PacmanConfig {
+                config: Some("/tmp/p.conf".into()),
+                dbpath: Some("/mnt/var/lib/pacman".into()),
+                root: Some("/mnt".into()),
+            },
+        );
+        let parents = src.required_by("glibc").unwrap();
+        assert!(parents.contains(&"base".to_string()));
+        let calls = src.exec.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("--config /tmp/p.conf") && c.contains(" -s ")),
+            "config overrides not threaded; calls {:?}",
+            calls
+        );
+    }
+
+    /// scan_si_for_provider: the `-Sii` parser must associate Provides
+    /// fields with the right package, including the multi-line form
+    /// where additional provides appear on indented continuation lines.
+    #[test]
+    fn scan_si_for_provider_handles_multiline_provides() {
+        let blob = "\
+Repository      : core
+Name            : bash
+Version         : 5.2
+Provides        : sh=5.2
+                  bash-rl=5.2
+Depends On      : glibc
+
+Repository      : extra
+Name            : zsh
+Version         : 5.9
+Provides        : None
+Depends On      : glibc
+";
+        let chosen = scan_si_for_provider(blob, "sh", |_| false);
+        assert_eq!(chosen.as_deref(), Some("bash"));
+        let chosen2 = scan_si_for_provider(blob, "bash-rl", |_| false);
+        assert_eq!(chosen2.as_deref(), Some("bash"));
+        // virtual that nobody provides
+        assert!(scan_si_for_provider(blob, "ksh", |_| false).is_none());
     }
 }
