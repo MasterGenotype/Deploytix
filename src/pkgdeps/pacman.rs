@@ -21,6 +21,44 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use tracing::debug;
 
+/// Explicit list delimiter passed to `expac -l`. We pick ASCII unit
+/// separator (`U+001F`) because:
+///   - it is reserved precisely for "subfield separator" in the spec,
+///   - it cannot legally appear in pacman package names, version
+///     constraints, or human-readable optdep descriptions,
+///   - it survives shell argument passing (we go through
+///     `std::process::Command`, not a shell), and
+///   - it is not the documented two-space default for `%O`/`%S`, so
+///     the parser is unambiguous regardless of expac version drift.
+pub(crate) const EXPAC_LIST_DELIM: &str = "\x1f";
+
+/// Split an expac list-field value emitted with `-l <EXPAC_LIST_DELIM>`
+/// into its constituent records. Falls back to the documented default
+/// two-space delimiter for `%O`/`%S` if no unit-separator characters
+/// are present (older expac that ignores `-l`, or a custom build that
+/// emits with the default delimiter regardless). The two-space split
+/// is per `expac(1)` for list fields and is robust to single spaces
+/// inside descriptions like `git: for AUR helpers`.
+pub(crate) fn split_expac_list(field: &str) -> Vec<&str> {
+    let trimmed = field.trim_matches(|c: char| c == '\n' || c == '\r');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.contains(EXPAC_LIST_DELIM) {
+        return trimmed
+            .split(EXPAC_LIST_DELIM)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    // Default expac list delimiter for %O/%S is two spaces.
+    trimmed
+        .split("  ")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Indirection so tests can mock pacman/pactree output without invoking
 /// the real binaries.
 pub trait CmdExec: Send + Sync {
@@ -139,9 +177,13 @@ impl<E: CmdExec> PacmanSource<E> {
     /// reading sync DB Provides fields.
     ///
     /// Strategy:
-    /// 1. Try `expac -S '%n\t%S'` — emits one line per sync package
-    ///    with name and tab-separated provides field. This is the
-    ///    canonical alpm-backed enumeration.
+    /// 1. Try `expac -S -l <LIST_DELIM> '%n\t%S'` — emits one line per
+    ///    sync package with name and a list of provides separated by
+    ///    `LIST_DELIM` (we use ASCII unit separator `\x1f` so names with
+    ///    `=` constraints stay intact). This is the canonical alpm-backed
+    ///    enumeration. Without `-l`, expac would emit `%S` items joined
+    ///    by the default two-space delimiter — fine for `Provides`
+    ///    today but fragile, so we pin the delimiter explicitly.
     /// 2. If expac is unavailable, try parsing the output of
     ///    `pacman -Sl` + `pacman -Si` per repo. We avoid that fallback
     ///    here for cost reasons; callers handle a `None` index by
@@ -152,8 +194,12 @@ impl<E: CmdExec> PacmanSource<E> {
             expac_args.push("--config".into());
             expac_args.push(c.clone());
         }
-        // -S queries sync DBs; %n = name, %S = provides (space-separated).
+        // -S queries sync DBs; -l pins the list delimiter so each %S
+        // entry is recoverable as a single token even if expac's
+        // default ever changes. %n = name, %S = provides list.
         expac_args.push("-S".into());
+        expac_args.push("-l".into());
+        expac_args.push(EXPAC_LIST_DELIM.into());
         expac_args.push("%n\t%S".into());
         let out = match self.exec.run("expac", &expac_args) {
             Ok(s) => s,
@@ -167,7 +213,7 @@ impl<E: CmdExec> PacmanSource<E> {
                 _ => continue,
             };
             let provides_field = parts.next().unwrap_or("");
-            for tok in provides_field.split_whitespace() {
+            for tok in split_expac_list(provides_field) {
                 let dep = Dep::parse(tok);
                 if dep.name.is_empty() {
                     continue;
@@ -281,28 +327,42 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
 
     fn optional_for(&self, name: &str) -> Result<Vec<String>> {
         // pactree has no first-class reverse-optdep mode, but `expac`
-        // does: `expac -Q '%n %O' | grep <name>`. Try it; if expac is
-        // missing, return empty rather than fail.
-        let out = match self.exec.run(
-            "expac",
-            &[
-                "-S".to_string(),
-                "%n %O".to_string(),
-            ],
-        ) {
+        // does. The challenge is that `%O` is a list field whose entries
+        // are `pkgname[: free-form description with spaces]`, joined by
+        // expac's list delimiter (default two spaces). Splitting on
+        // arbitrary whitespace would shred a description like
+        // `git: for AUR helpers` into four fragments, so:
+        //   - we pin the list delimiter to ASCII unit separator (\x1f)
+        //     via `-l`, so each optdepend entry survives as one token;
+        //   - we use a TAB between %n and %O so the package name is
+        //     trivially separable even if the optdep list is empty.
+        // Threads the same --config override pacman uses.
+        let mut expac_args: Vec<String> = Vec::new();
+        if let Some(c) = &self.cfg.config {
+            expac_args.push("--config".into());
+            expac_args.push(c.clone());
+        }
+        expac_args.push("-S".into());
+        expac_args.push("-l".into());
+        expac_args.push(EXPAC_LIST_DELIM.into());
+        expac_args.push("%n\t%O".into());
+        let out = match self.exec.run("expac", &expac_args) {
             Ok(s) => s,
             Err(_) => return Ok(Vec::new()),
         };
         let mut hits = Vec::new();
         for line in out.lines() {
-            let mut parts = line.splitn(2, ' ');
+            let mut parts = line.splitn(2, '\t');
             let pkg = match parts.next() {
-                Some(p) => p,
-                None => continue,
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
             };
             let optdeps_field = parts.next().unwrap_or("");
-            for tok in optdeps_field.split_whitespace() {
+            for tok in split_expac_list(optdeps_field) {
                 let dep = Dep::parse(tok);
+                // Match against the dep name (with any version
+                // constraint stripped by Dep::parse), NOT against
+                // description fragments.
                 if dep.name == name {
                     hits.push(pkg.to_string());
                     break;
@@ -561,9 +621,20 @@ where
 }
 
 fn parse_pactree_unique(text: &str, target: &str) -> Vec<String> {
+    // pactree(8) prefixes children with ASCII tree art (`|-`, `\` -`,
+    // `-`) and, when stdout is a TTY, with the Unicode box-drawing
+    // glyphs `├`, `─`, `│`, `└`. Strip both forms before extracting
+    // the package name on each line.
+    let strip = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ' ' | '\t' | '|' | '`' | '-' | '├' | '─' | '│' | '└' | '┬' | '┐' | '┘'
+            )
+    };
     let mut out: Vec<String> = text
         .lines()
-        .map(|l| l.trim_start_matches([' ', '\t', '|', '`', '-']).trim().to_string())
+        .map(|l| l.trim_start_matches(strip).trim().to_string())
         .filter(|l| !l.is_empty() && l != target)
         .collect();
     out.sort();
@@ -574,37 +645,34 @@ fn parse_pactree_unique(text: &str, target: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     /// Mock executor that returns canned stdout per (program, joined-args).
+    /// Uses `Mutex` rather than `RefCell` because [`CmdExec`] requires
+    /// `Sync` (the production source is shared across threads).
     struct CannedExec {
-        responses: RefCell<HashMap<String, std::result::Result<String, DeploytixError>>>,
+        responses: Mutex<HashMap<String, std::result::Result<String, DeploytixError>>>,
     }
 
     impl CmdExec for CannedExec {
         fn run(&self, program: &str, args: &[String]) -> Result<String> {
             let key = format!("{} {}", program, args.join(" "));
-            let key_prefix_match = self
-                .responses
-                .borrow()
+            let mut map = self.responses.lock().unwrap();
+            let key_prefix_match = map
                 .keys()
                 .find(|k| key.starts_with(k.as_str()))
                 .cloned();
-            let lookup = key_prefix_match
-                .or_else(|| {
-                    if self.responses.borrow().contains_key(&key) {
-                        Some(key.clone())
-                    } else {
-                        None
-                    }
-                });
+            let lookup = key_prefix_match.or_else(|| {
+                if map.contains_key(&key) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            });
             if let Some(k) = lookup {
-                let mut map = self.responses.borrow_mut();
-                let v = map
-                    .remove(&k)
-                    .unwrap_or_else(|| Err(DeploytixError::CommandNotFound(program.into())));
-                v
+                map.remove(&k)
+                    .unwrap_or_else(|| Err(DeploytixError::CommandNotFound(program.into())))
             } else {
                 Err(DeploytixError::CommandNotFound(program.into()))
             }
@@ -624,7 +692,7 @@ mod tests {
             map.insert(k.to_string(), v);
         }
         CannedExec {
-            responses: RefCell::new(map),
+            responses: Mutex::new(map),
         }
     }
 
@@ -712,9 +780,10 @@ Optional For    : gamma
     /// A `CmdExec` that records every call and can answer multiple
     /// queries from a fixed table without consuming entries — required
     /// when a single provider lookup makes several pacman/expac calls.
+    /// `Mutex` (not `RefCell`) because [`CmdExec`] is `Send + Sync`.
     struct RecordingExec {
         responses: Vec<(String, std::result::Result<String, DeploytixError>)>,
-        calls: RefCell<Vec<String>>,
+        calls: Mutex<Vec<String>>,
     }
 
     impl RecordingExec {
@@ -734,19 +803,19 @@ Optional For    : gamma
                 .collect();
             Self {
                 responses,
-                calls: RefCell::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
+            self.calls.lock().unwrap().clone()
         }
     }
 
     impl CmdExec for RecordingExec {
         fn run(&self, program: &str, args: &[String]) -> Result<String> {
             let key = format!("{} {}", program, args.join(" "));
-            self.calls.borrow_mut().push(key.clone());
+            self.calls.lock().unwrap().push(key.clone());
             // Prefer exact match, then longest prefix match — keeps
             // disambiguation deterministic when one stored key is a
             // prefix of another (e.g. "pacman -Si" vs "pacman -Si sh").
@@ -799,8 +868,8 @@ Optional For    : gamma
                 }),
             ),
             (
-                "expac -S %n\t%S",
-                Ok("bash\tsh=5.2 bash=5.2\nzsh\tzsh=5.9\nglibc\t\n"),
+                "expac -S -l \x1f %n\t%S",
+                Ok("bash\tsh=5.2\x1fbash=5.2\nzsh\tzsh=5.9\nglibc\t\n"),
             ),
             // is_installed checks (called by choose_provider).
             (
@@ -839,7 +908,7 @@ Optional For    : gamma
                     stderr: "error: package 'sh' was not found".into(),
                 }),
             ),
-            ("expac -S %n\t%S", Ok("bash\tsh\ndash\tsh\n")),
+            ("expac -S -l \x1f %n\t%S", Ok("bash\tsh\ndash\tsh\n")),
             // dash is installed; bash is not. choose_provider must
             // pick dash even though bash sorts first alphabetically.
             (
@@ -871,8 +940,8 @@ Optional For    : gamma
                 }),
             ),
             (
-                "expac -S %n\t%S",
-                Ok("openssl\tlibcrypto.so=3-64 libssl.so=3-64\n"),
+                "expac -S -l \x1f %n\t%S",
+                Ok("openssl\tlibcrypto.so=3-64\x1flibssl.so=3-64\n"),
             ),
             ("pacman -Qq openssl", Ok("openssl\n")),
         ]);
@@ -967,5 +1036,167 @@ Depends On      : glibc
         assert_eq!(chosen2.as_deref(), Some("bash"));
         // virtual that nobody provides
         assert!(scan_si_for_provider(blob, "ksh", |_| false).is_none());
+    }
+
+    /// Bug fix #3 (optional_for): each entry in `%O` is `name[: free
+    /// description]`. Descriptions routinely contain spaces. Splitting on
+    /// arbitrary whitespace shreds `git: for AUR helpers` into four
+    /// fragments and `Dep::parse("for")` produces a bogus name `for`,
+    /// so the literal description word would falsely match a target
+    /// looking for any of `for`, `AUR`, `helpers`. Ensure we recover
+    /// each optdep as a complete record using the explicit list
+    /// delimiter.
+    #[test]
+    fn optional_for_parses_descriptions_with_spaces() {
+        // Two packages list `aur-helper` as an optional dep with a
+        // description that contains spaces. The expected match must
+        // be against the dep NAME (`aur-helper`), not against
+        // description fragments.
+        let exec = RecordingExec::new(vec![(
+            "expac -S -l \x1f %n\t%O",
+            Ok("git\taur-helper: for AUR helpers\x1fpython: optional scripting\n\
+pacman\taur-helper: for sync db operations\n\
+unrelated\tfoo: bar baz\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let parents = src.optional_for("aur-helper").unwrap();
+        assert_eq!(parents, vec!["git".to_string(), "pacman".to_string()]);
+    }
+
+    /// Bug fix #3 (optional_for): description-only words must not
+    /// produce false positives. Looking for `helpers` or `for` (which
+    /// appear inside the description text) must NOT match.
+    #[test]
+    fn optional_for_does_not_match_description_words() {
+        let exec = RecordingExec::new(vec![(
+            "expac -S -l \x1f %n\t%O",
+            Ok("git\taur-helper: for AUR helpers\x1fpython: optional scripting\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+
+        for word in ["for", "AUR", "helpers", "optional", "scripting"] {
+            let parents = src.optional_for(word).unwrap();
+            assert!(
+                parents.is_empty(),
+                "description word `{}` falsely matched: {:?}",
+                word,
+                parents
+            );
+        }
+    }
+
+    /// Bug fix #3 (optional_for): if expac is an older version that
+    /// ignores `-l` and emits `%O` with the documented default two-space
+    /// list delimiter, we must still parse the records correctly. We
+    /// detect the absence of unit-separator characters and fall back
+    /// to splitting on `"  "`.
+    #[test]
+    fn optional_for_falls_back_to_two_space_delim_when_unit_sep_absent() {
+        let exec = RecordingExec::new(vec![(
+            "expac -S -l \x1f %n\t%O",
+            // Two-space-separated entries — the historical expac
+            // default for `%O`. Each entry has a description with
+            // single spaces inside, which two-space splitting handles
+            // but whitespace splitting would not.
+            Ok("git\taur-helper: for AUR helpers  python: optional scripting\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let parents = src.optional_for("aur-helper").unwrap();
+        assert_eq!(parents, vec!["git".to_string()]);
+        let parents2 = src.optional_for("python").unwrap();
+        assert_eq!(parents2, vec!["git".to_string()]);
+    }
+
+    /// Bug fix #3 (optional_for): the expac invocation must use a
+    /// robust delimiter strategy. Assert the constructed command pins
+    /// the list delimiter via `-l`, ahead of the format string.
+    #[test]
+    fn optional_for_invokes_expac_with_explicit_list_delimiter() {
+        // Even with empty output, we should be able to inspect the
+        // call shape.
+        let exec = RecordingExec::new(vec![("expac -S -l \x1f %n\t%O", Ok(""))]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let parents = src.optional_for("anything").unwrap();
+        assert!(parents.is_empty());
+
+        let calls = src.exec.calls();
+        assert!(
+            calls.iter().any(|c| c.contains(" -l \x1f ") && c.contains("%O")),
+            "optional_for did not pin expac list delimiter; calls: {:?}",
+            calls
+        );
+    }
+
+    /// Bug fix #3 (optional_for): `--config` overrides used by pacman
+    /// must also be threaded into the expac invocation, otherwise a
+    /// chroot-style query reads from the wrong sync DB and silently
+    /// returns wrong results.
+    #[test]
+    fn optional_for_threads_config_override() {
+        let exec = RecordingExec::new(vec![(
+            "expac --config /tmp/p.conf -S -l \x1f %n\t%O",
+            Ok("foo\taur-helper: in chroot\n"),
+        )]);
+        let src = PacmanSource::new(
+            exec,
+            PacmanConfig {
+                config: Some("/tmp/p.conf".into()),
+                ..Default::default()
+            },
+        );
+        let parents = src.optional_for("aur-helper").unwrap();
+        assert_eq!(parents, vec!["foo".to_string()]);
+    }
+
+    /// `split_expac_list` round-trip: when expac emits with the unit
+    /// separator we get clean records; when it falls back to the
+    /// two-space default each record still survives intact even with
+    /// spaces inside its description.
+    #[test]
+    fn split_expac_list_handles_both_delimiters() {
+        // Unit-separator path.
+        let v = split_expac_list("git: for AUR helpers\x1fpython: scripts");
+        assert_eq!(v, vec!["git: for AUR helpers", "python: scripts"]);
+
+        // Two-space fallback path.
+        let v = split_expac_list("git: for AUR helpers  python: optional scripting");
+        assert_eq!(
+            v,
+            vec!["git: for AUR helpers", "python: optional scripting"]
+        );
+
+        // Empty / None.
+        assert!(split_expac_list("").is_empty());
+        assert!(split_expac_list("\n").is_empty());
+
+        // Single entry, no delimiters.
+        let v = split_expac_list("git: for AUR helpers");
+        assert_eq!(v, vec!["git: for AUR helpers"]);
+    }
+
+    /// `parse_pacman_si` already handles single-line `Optional Deps`
+    /// using the documented two-space delimiter — make sure
+    /// descriptions with internal spaces still survive end-to-end and
+    /// the parsed dep has the correct name AND preserved description.
+    #[test]
+    fn pacman_si_optdeps_preserve_description_with_spaces() {
+        let blob = "\
+Repository      : extra
+Name            : foo
+Version         : 1.0-1
+Optional Deps   : git: for AUR helpers  python: optional scripting feature
+";
+        let pkg = parse_pacman_si(blob).unwrap();
+        assert_eq!(pkg.optdepends.len(), 2);
+        assert_eq!(pkg.optdepends[0].name, "git");
+        assert_eq!(
+            pkg.optdepends[0].description.as_deref(),
+            Some("for AUR helpers")
+        );
+        assert_eq!(pkg.optdepends[1].name, "python");
+        assert_eq!(
+            pkg.optdepends[1].description.as_deref(),
+            Some("optional scripting feature")
+        );
     }
 }
