@@ -13,11 +13,113 @@ mod configure;
 mod desktop;
 mod disk;
 mod install;
+mod pkgdeps;
 mod resources;
 mod utils;
 
 use crate::config::DeploymentConfig;
+use crate::pkgdeps::cli as deps_cli;
 use crate::utils::error::DeploytixError;
+
+#[derive(clap::Args, Debug, Clone, Default)]
+struct DepsCommonArgs {
+    /// Path to an alternate pacman.conf
+    #[arg(long)]
+    config: Option<String>,
+    /// Path to an alternate pacman database directory (e.g. /mnt/var/lib/pacman)
+    #[arg(long)]
+    dbpath: Option<String>,
+    /// Path to an alternate root (chroot-style planning)
+    #[arg(long)]
+    root: Option<String>,
+    /// Include optdepends in the closure / output
+    #[arg(long)]
+    include_optional: bool,
+    /// Include makedepends
+    #[arg(long)]
+    include_make: bool,
+    /// Include checkdepends
+    #[arg(long)]
+    include_check: bool,
+    /// Emit JSON output
+    #[arg(long)]
+    json: bool,
+    /// Emit Graphviz DOT output (overridden by --json for json-capable commands)
+    #[arg(long)]
+    dot: bool,
+    /// Use an offline JSON fixture instead of pacman (for CI / sandboxes)
+    #[arg(long)]
+    offline: Option<String>,
+}
+
+impl DepsCommonArgs {
+    fn into_args(self) -> deps_cli::DepsArgs {
+        deps_cli::DepsArgs {
+            config: self.config,
+            dbpath: self.dbpath,
+            root: self.root,
+            include_optional: self.include_optional,
+            include_make: self.include_make,
+            include_check: self.include_check,
+            json: self.json,
+            dot: self.dot,
+            offline: self.offline,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum DepsCommand {
+    /// Resolve the full dependency closure of a package
+    Resolve {
+        package: String,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// Print the dependency tree for a package
+    Tree {
+        package: String,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// List packages that require the target (reverse deps)
+    Reverse {
+        package: String,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// Render the dependency graph as Graphviz DOT
+    Graph {
+        package: String,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// Show what `pacman -S --print` would install for a package
+    PlanInstall {
+        package: String,
+        /// Plan against a clean root (chroot-style; ignores already-installed)
+        #[arg(long)]
+        clean_root: bool,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// Print full normalized metadata for a package
+    Metadata {
+        package: String,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+    /// Diff two packages' metadata
+    Compare {
+        a: String,
+        b: String,
+        #[command(flatten)]
+        common: DepsCommonArgs,
+    },
+}
 
 #[derive(Parser)]
 #[command(name = "deploytix")]
@@ -80,6 +182,12 @@ enum Commands {
         wipe: bool,
     },
 
+    /// Query Artix/Arch package dependency metadata via pacman / libalpm
+    Deps {
+        #[command(subcommand)]
+        action: DepsCommand,
+    },
+
     /// Generate desktop file for the GUI launcher
     GenerateDesktopFile {
         /// Desktop environment (kde, gnome, xfce, none)
@@ -136,6 +244,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Cleanup { device, wipe }) => {
             cmd_cleanup(device, wipe, dry_run)?;
+        }
+        Some(Commands::Deps { action }) => {
+            cmd_deps(action)?;
         }
         Some(Commands::GenerateDesktopFile { de, bindir, output }) => {
             cmd_generate_desktop_file(de, bindir, output)?;
@@ -273,6 +384,55 @@ fn cmd_generate_desktop_file(
     std::fs::write(&output, content)?;
     println!("✓ Desktop file generated for {} at {}", desktop_env, output);
 
+    Ok(())
+}
+
+fn cmd_deps(action: DepsCommand) -> Result<()> {
+    match action {
+        DepsCommand::Resolve { package, common } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_resolve(source.as_ref(), &package, &args)?;
+        }
+        DepsCommand::Tree { package, common } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_tree(source.as_ref(), &package, &args)?;
+        }
+        DepsCommand::Reverse { package, common } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_reverse(source.as_ref(), &package, &args)?;
+        }
+        DepsCommand::Graph {
+            package,
+            output,
+            common,
+        } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_graph(source.as_ref(), &package, output.as_deref(), &args)?;
+        }
+        DepsCommand::PlanInstall {
+            package,
+            clean_root,
+            common,
+        } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_plan_install(source.as_ref(), &package, clean_root, &args)?;
+        }
+        DepsCommand::Metadata { package, common } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_metadata(source.as_ref(), &package, &args)?;
+        }
+        DepsCommand::Compare { a, b, common } => {
+            let args = common.into_args();
+            let source = deps_cli::build_source(&args)?;
+            deps_cli::cmd_compare(source.as_ref(), &a, &b, &args)?;
+        }
+    }
     Ok(())
 }
 
