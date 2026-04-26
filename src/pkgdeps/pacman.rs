@@ -412,13 +412,19 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
         args.push("--print".into());
         args.push("--print-format".into());
         args.push("%r/%n %v".into());
-        if clean_root {
-            // When planning for a chroot/clean root, skip running
-            // hooks and treat the dbpath/root as authoritative — the
-            // caller is expected to have set --root/--dbpath to the
-            // chroot's pacman state.
-            args.push("--noconfirm".into());
-        }
+        // `pacman -S --print` is a planning-only invocation, but pacman
+        // can still prompt for things like package-group selection
+        // (`pacman -S gnome` asks which members of the group to keep)
+        // and for any conflict it wants the user to confirm before
+        // it folds into the plan. Because we run pacman through
+        // `Command::output` with captured stdio, those prompts are
+        // invisible and would block the resolver indefinitely. Always
+        // pass `--noconfirm` (regardless of `clean_root`) so the
+        // preflight is guaranteed non-interactive — pacman picks the
+        // default answer to every prompt. `--noprogressbar` keeps the
+        // captured stdout terse for parsing.
+        args.push("--noconfirm".into());
+        args.push("--noprogressbar".into());
         for t in targets {
             args.push((*t).to_string());
         }
@@ -732,8 +738,10 @@ Optional For    : gamma
 
     #[test]
     fn install_plan_parses_print_format() {
+        // Prefix match — the canned key just needs to be a prefix of
+        // the assembled command line. Targets come last.
         let exec = canned(&[(
-            "pacman -S --print --print-format %r/%n %v foo",
+            "pacman -S --print --print-format %r/%n %v --noconfirm --noprogressbar foo",
             Ok("system/glibc 2.39-1\nworld/foo 1.2.3-4\n"),
         )]);
         let src = PacmanSource::new(exec, PacmanConfig::default());
@@ -765,6 +773,48 @@ Optional For    : gamma
         assert_eq!(plan.to_install.len(), 1);
         assert_eq!(plan.to_install[0].repo, "custom");
         assert!(plan.clean_root);
+    }
+
+    /// Bug fix: `install_plan` is the path the chroot preflight uses
+    /// with `clean_root=false`. Even there, pacman can prompt
+    /// (group-target selection like `pacman -S gnome`, conflict
+    /// confirmations) and our captured-stdio executor would hang on
+    /// the prompt. The argv MUST always carry `--noconfirm` so the
+    /// resolver is non-interactive regardless of `clean_root`.
+    #[test]
+    fn install_plan_always_noninteractive_even_when_clean_root_false() {
+        let exec = RecordingExec::new(vec![(
+            "pacman -S --print",
+            Ok("extra/gnome-shell 46-1\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        // Group target — the kind of input pacman would prompt about.
+        let _plan = src.install_plan(&["gnome"], false).unwrap();
+        let calls = src.exec.calls();
+        let pacman_call = calls
+            .iter()
+            .find(|c| c.starts_with("pacman -S --print"))
+            .expect("pacman -S --print not invoked");
+        assert!(
+            pacman_call.contains("--noconfirm"),
+            "install_plan must always pass --noconfirm to avoid prompts; got: {}",
+            pacman_call
+        );
+    }
+
+    /// Sanity: `--noconfirm` is also present when clean_root=true. The
+    /// previous code path only added it for clean_root; this test
+    /// pins the new contract that it is unconditional.
+    #[test]
+    fn install_plan_passes_noconfirm_when_clean_root_true() {
+        let exec = RecordingExec::new(vec![(
+            "pacman -S --print",
+            Ok("system/glibc 2.39-1\n"),
+        )]);
+        let src = PacmanSource::new(exec, PacmanConfig::default());
+        let _plan = src.install_plan(&["glibc"], true).unwrap();
+        let calls = src.exec.calls();
+        assert!(calls.iter().any(|c| c.contains("--noconfirm")));
     }
 
     #[test]

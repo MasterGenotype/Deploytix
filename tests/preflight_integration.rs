@@ -102,8 +102,9 @@ fn preflight_surfaces_conflict_driven_removals() {
 
 #[test]
 fn dry_run_skips_host_preflight() {
-    // dry_run=true must short-circuit without trying to invoke pacman.
-    let r = preflight_host(None, &["base".to_string()], true).unwrap();
+    // dry_run=true must short-circuit without trying to invoke pacman
+    // OR mutate the scratch dbpath state.
+    let r = preflight_host(None, "/mnt/install-root", &["base".to_string()], true).unwrap();
     assert!(r.skipped);
     assert!(r.warnings.iter().any(|w| w.contains("dry-run")));
 }
@@ -145,4 +146,46 @@ fn empty_target_list_returns_clean_report() {
     assert_eq!(r.planned_install_count, 0);
     assert!(r.unresolved.is_empty());
     assert!(r.to_remove.is_empty());
+}
+
+/// Bug fix #2 (integration): the host-preflight call now requires an
+/// install_root parameter so the resolver can target the fresh
+/// basestrap root instead of the live host. This test exercises the
+/// new signature in dry-run (so we don't depend on a host pacman) and
+/// pins the contract — passing arbitrary install_root must not panic
+/// or fail in dry-run.
+#[test]
+fn host_preflight_accepts_install_root_parameter() {
+    let r = preflight_host(
+        Some("/tmp/deploytix-preflight-pacman.conf"),
+        "/mnt/deploytix-target",
+        &["base".to_string(), "linux-zen".to_string()],
+        true, // dry-run keeps the test hermetic
+    )
+    .unwrap();
+    assert!(r.skipped);
+    assert!(r.warnings.iter().any(|w| w.contains("dry-run")));
+}
+
+/// Bug fix #1 (integration): the resolver path used by chroot preflight
+/// (clean_root=false) must produce a usable plan against the same
+/// MetadataSource API even when the target list contains items that
+/// would, in real pacman, trigger group-selection prompts. With the
+/// Mock source we can't reproduce the prompt directly, but we CAN
+/// verify resolution still succeeds — and the unit tests in
+/// `pkgdeps::pacman` pin the actual `--noconfirm` argv flag.
+#[test]
+fn chroot_preflight_resolver_path_handles_clean_root_false() {
+    let src = basestrap_universe();
+    // clean_root=false simulates the chroot preflight context where
+    // some packages are already installed in the chroot.
+    let report = resolve(
+        &src,
+        &["base".to_string(), "runit".to_string()],
+        false,
+        "chroot pacman",
+    )
+    .unwrap();
+    assert!(!report.skipped);
+    assert!(report.is_resolvable());
 }

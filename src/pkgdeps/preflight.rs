@@ -28,6 +28,7 @@
 use super::pacman::{PacmanConfig, PacmanSource};
 use super::source::MetadataSource;
 use crate::utils::error::Result;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Outcome of a preflight resolution. Fields mirror the parts of
@@ -74,15 +75,134 @@ impl PreflightReport {
     }
 }
 
-/// Build a [`PacmanSource`] for preflight against the host's sync DB,
-/// optionally with a custom pacman.conf (the same `-C <conf>` path that
-/// will be passed to basestrap).
-fn host_source(custom_conf: Option<&str>) -> PacmanSource<super::pacman::SystemExec> {
+/// Default location of the host's pacman sync database. Used as the
+/// source we mirror into the scratch dbpath so the preflight can see
+/// every package basestrap will see.
+const HOST_SYNC_DIR: &str = "/var/lib/pacman/sync";
+
+/// Build a [`PacmanSource`] for the host basestrap preflight.
+///
+/// `custom_conf` is the optional pacman.conf override basestrap will be
+/// invoked with (the temporary one with the [deploytix] / [extra]
+/// repos appended, when applicable).
+///
+/// `install_root` is the target directory basestrap will populate. We
+/// resolve against this empty target rather than the live host so that
+/// packages already installed on the live ISO don't mask dependency
+/// problems that will still fail during basestrap in the fresh root.
+///
+/// `scratch_dbpath` (when `Some`) is a temporary dbpath that contains
+/// the host's sync DBs but an empty `local/` — pointing pacman at it
+/// gives the resolver full repo metadata while pretending nothing is
+/// installed. When `None`, we fall back to leaving `--dbpath` unset
+/// (i.e. legacy behaviour) so the call still produces something rather
+/// than failing outright in environments where the scratch dir could
+/// not be prepared.
+fn host_source(
+    custom_conf: Option<&str>,
+    install_root: Option<&str>,
+    scratch_dbpath: Option<&Path>,
+) -> PacmanSource<super::pacman::SystemExec> {
     PacmanSource::system(PacmanConfig {
         config: custom_conf.map(|s| s.to_string()),
-        dbpath: None,
-        root: None,
+        dbpath: scratch_dbpath.map(|p| p.to_string_lossy().to_string()),
+        root: install_root.map(|s| s.to_string()),
     })
+}
+
+/// Self-cleaning scratch directory. The directory is created in
+/// `std::env::temp_dir()` and is recursively removed when this struct
+/// is dropped. We don't pull in the `tempfile` crate just for this —
+/// the requirements are minimal (one process, one path, no rename
+/// semantics) and rolling it inline keeps the dependency footprint
+/// small.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn new(prefix: &str) -> std::io::Result<Self> {
+        // Combine PID + nanosecond clock for a per-process unique name.
+        // This is good enough for a scratch dir — it does not need to
+        // be cryptographically secure.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let name = format!("{}{}-{}", prefix, pid, nanos);
+        let path = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        // Best-effort cleanup; nothing useful to do if it fails (e.g.
+        // the dir was already removed).
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Build a temporary pacman dbpath that mirrors the host's sync DB
+/// (so packages can be resolved against the same repos basestrap will
+/// use) but has an empty `local/` directory (so already-installed host
+/// packages don't mask missing deps in the fresh basestrap target).
+///
+/// On success returns the scratch directory; the caller holds it for
+/// the lifetime of the resolver call and the directory is cleaned up
+/// when it drops. On failure (no host sync DB, no permission to
+/// symlink, etc.) we return `None` and the caller falls back to a
+/// less-isolated query.
+fn prepare_host_scratch_dbpath() -> Option<ScratchDir> {
+    let host_sync = Path::new(HOST_SYNC_DIR);
+    if !host_sync.is_dir() {
+        debug!(
+            "Preflight: host sync DB not found at {}; cannot prepare scratch dbpath",
+            HOST_SYNC_DIR
+        );
+        return None;
+    }
+
+    let dir = match ScratchDir::new("deploytix-preflight-db-") {
+        Ok(d) => d,
+        Err(e) => {
+            debug!("Preflight: failed to create scratch dbpath: {}", e);
+            return None;
+        }
+    };
+
+    // Empty local/ — this is what makes pacman treat the target as a
+    // fresh root regardless of what the live host has installed.
+    let local_dir: PathBuf = dir.path().join("local");
+    if let Err(e) = std::fs::create_dir_all(&local_dir) {
+        debug!("Preflight: failed to create scratch local/: {}", e);
+        return None;
+    }
+    // libalpm checks for `ALPM_DB_VERSION` when reading the local DB.
+    // Match the format pacman writes: a single number plus newline.
+    if let Err(e) = std::fs::write(local_dir.join("ALPM_DB_VERSION"), "9\n") {
+        debug!("Preflight: failed to write ALPM_DB_VERSION: {}", e);
+        return None;
+    }
+
+    // Re-use the host's sync DBs: symlink rather than copy so we don't
+    // duplicate hundreds of MB. Linux-only (the target platform).
+    let scratch_sync = dir.path().join("sync");
+    if let Err(e) = std::os::unix::fs::symlink(host_sync, &scratch_sync) {
+        debug!(
+            "Preflight: failed to symlink host sync DB into scratch: {}",
+            e
+        );
+        return None;
+    }
+
+    Some(dir)
 }
 
 /// Build a [`PacmanSource`] that resolves against the chroot's pacman
@@ -207,10 +327,20 @@ pub fn resolve(
 /// repo appended). Pass `None` when basestrap will use the system's
 /// `/etc/pacman.conf` directly.
 ///
+/// `install_root` is the directory basestrap is about to populate. We
+/// point pacman's `--root` at this fresh target and `--dbpath` at a
+/// scratch directory that mirrors the host's sync DBs but starts with
+/// an empty `local/`. The result is that the resolver sees the same
+/// repo metadata basestrap will see while pretending the target has
+/// nothing installed yet — so dependency problems that would only
+/// manifest in the empty basestrap root are caught up front instead
+/// of being masked by packages that happen to be on the live ISO host.
+///
 /// In dry-run mode we skip the resolver entirely — basestrap won't run
-/// either, and pacman -Sy on the host would mutate state.
+/// either, and the scratch dir mutation would be wasted.
 pub fn preflight_host(
     custom_conf: Option<&str>,
+    install_root: &str,
     packages: &[String],
     dry_run: bool,
 ) -> Result<PreflightReport> {
@@ -218,11 +348,39 @@ pub fn preflight_host(
         info!("[dry-run] Skipping host basestrap dependency preflight");
         return Ok(PreflightReport::skipped_reason("dry-run"));
     }
-    let source = host_source(custom_conf);
-    // basestrap installs into a fresh root → use clean_root semantics so
-    // the plan reflects everything pacman would download (not just
-    // what's missing on the live ISO host).
-    resolve(&source, packages, true, "host basestrap")
+
+    // Build a scratch dbpath so the resolver sees an empty installed-DB
+    // even though the host live ISO has plenty of packages. If we can't
+    // build one (no /var/lib/pacman/sync, no /tmp write access, etc.),
+    // log and continue with whatever pacman would resolve normally —
+    // basestrap is still the source of truth.
+    let scratch = prepare_host_scratch_dbpath();
+    let scratch_path = scratch.as_ref().map(|s| s.path());
+    if scratch_path.is_none() {
+        warn!(
+            "Preflight (host basestrap): could not prepare an isolated scratch dbpath; \
+             resolution will use the live host's installed-DB and may mask missing deps. \
+             basestrap remains the source of truth."
+        );
+    } else {
+        debug!(
+            "Preflight (host basestrap): isolated scratch dbpath at {}",
+            scratch_path.unwrap().display()
+        );
+    }
+
+    let source = host_source(custom_conf, Some(install_root), scratch_path);
+    // basestrap installs into a fresh root and our scratch dbpath has
+    // an empty local/, so already-installed host packages won't be
+    // skipped. Use clean_root=true so the plan also disregards any
+    // installed-DB residue and reflects everything pacman will
+    // actually need to download into the target.
+    let result = resolve(&source, packages, true, "host basestrap");
+    // Keep `scratch` alive until after `resolve` returns, then drop —
+    // the explicit drop documents the lifetime tie even though it is
+    // implicit otherwise.
+    drop(scratch);
+    result
 }
 
 /// Preflight a `pacman -S <packages>` call that will run inside the
@@ -370,7 +528,7 @@ mod tests {
 
     #[test]
     fn report_skipped_when_dry_run_host() {
-        let r = preflight_host(None, &["base".to_string()], true).unwrap();
+        let r = preflight_host(None, "/mnt", &["base".to_string()], true).unwrap();
         assert!(r.skipped);
         assert_eq!(r.planned_install_count, 0);
     }
@@ -396,5 +554,67 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("pacman.conf not found")));
+    }
+
+    /// Bug fix #2: the host preflight must point pacman at the target
+    /// install root and a scratch dbpath whose `local/` is empty, so
+    /// already-installed host packages don't mask missing deps that
+    /// will still fail in the fresh basestrap target. We exercise the
+    /// scratch-prep helper directly: a successful prep yields an empty
+    /// `local/` (with the libalpm version marker) and a `sync` symlink
+    /// pointing at the host's sync DB.
+    #[test]
+    fn scratch_dbpath_has_empty_local_and_sync_symlink_when_host_sync_exists() {
+        // Skip in environments without /var/lib/pacman/sync (most CI).
+        if !Path::new(HOST_SYNC_DIR).is_dir() {
+            return;
+        }
+        let scratch =
+            prepare_host_scratch_dbpath().expect("scratch dbpath should be prepared");
+        let local = scratch.path().join("local");
+        let sync = scratch.path().join("sync");
+        // Local exists, has only the version marker, no per-package
+        // descriptors → installed-DB is empty from libalpm's POV.
+        assert!(local.is_dir());
+        let entries: Vec<_> = std::fs::read_dir(&local)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec!["ALPM_DB_VERSION".to_string()]);
+        // sync is a symlink to the host's sync DB.
+        let meta = std::fs::symlink_metadata(&sync).unwrap();
+        assert!(meta.file_type().is_symlink());
+        let target = std::fs::read_link(&sync).unwrap();
+        assert_eq!(target, Path::new(HOST_SYNC_DIR));
+    }
+
+    /// Bug fix #2: when we cannot prepare a scratch dbpath (e.g. the
+    /// host has no sync DB at all), `prepare_host_scratch_dbpath`
+    /// returns `None` so the preflight can fall back gracefully. We
+    /// can't easily fake this on a real host, but we CAN at least
+    /// observe that the function returns a valid result without
+    /// panicking and that, when it returns Some, the path is a
+    /// directory.
+    #[test]
+    fn scratch_dbpath_is_dir_when_returned() {
+        if let Some(s) = prepare_host_scratch_dbpath() {
+            assert!(s.path().is_dir());
+        }
+    }
+
+    /// Bug fix #2: ScratchDir cleans up on drop. Sanity-check the
+    /// invariant — important because we rely on this rather than the
+    /// `tempfile` crate.
+    #[test]
+    fn scratch_dir_is_removed_on_drop() {
+        let path: PathBuf;
+        {
+            let s = ScratchDir::new("deploytix-preflight-test-").unwrap();
+            path = s.path().to_path_buf();
+            std::fs::write(path.join("marker"), b"hi").unwrap();
+            assert!(path.is_dir());
+        }
+        assert!(!path.exists(), "scratch dir was not cleaned up: {:?}", path);
     }
 }

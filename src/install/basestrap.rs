@@ -932,8 +932,12 @@ pub fn run_basestrap_with_retries(
     // conflict-driven removals before basestrap starts downloading
     // anything. Best-effort — failures here only log; basestrap itself
     // is the source of truth.
-    let _report =
-        pkg_preflight::preflight_host(custom_conf.as_deref(), &packages, cmd.is_dry_run())?;
+    let _report = pkg_preflight::preflight_host(
+        custom_conf.as_deref(),
+        install_root,
+        &packages,
+        cmd.is_dry_run(),
+    )?;
 
     info!(
         "Installing {} packages with basestrap to {}",
