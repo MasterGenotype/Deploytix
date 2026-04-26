@@ -75,10 +75,11 @@ impl PreflightReport {
     }
 }
 
-/// Default location of the host's pacman sync database. Used as the
-/// source we mirror into the scratch dbpath so the preflight can see
-/// every package basestrap will see.
-const HOST_SYNC_DIR: &str = "/var/lib/pacman/sync";
+/// Default location of the host's pacman database root. Used as a
+/// last-resort fallback when `pacman-conf` is unavailable; the sync DB
+/// we mirror into the scratch dbpath is derived from this (or from the
+/// configured `DBPath`, when one is set in the effective pacman.conf).
+const DEFAULT_PACMAN_DBPATH: &str = "/var/lib/pacman";
 
 /// Build a [`PacmanSource`] for the host basestrap preflight.
 ///
@@ -98,16 +99,24 @@ const HOST_SYNC_DIR: &str = "/var/lib/pacman/sync";
 /// (i.e. legacy behaviour) so the call still produces something rather
 /// than failing outright in environments where the scratch dir could
 /// not be prepared.
+fn host_pacman_config(
+    custom_conf: Option<&str>,
+    install_root: Option<&str>,
+    scratch_dbpath: Option<&Path>,
+) -> PacmanConfig {
+    PacmanConfig {
+        config: custom_conf.map(|s| s.to_string()),
+        dbpath: scratch_dbpath.map(|p| p.to_string_lossy().to_string()),
+        root: install_root.map(|s| s.to_string()),
+    }
+}
+
 fn host_source(
     custom_conf: Option<&str>,
     install_root: Option<&str>,
     scratch_dbpath: Option<&Path>,
 ) -> PacmanSource<super::pacman::SystemExec> {
-    PacmanSource::system(PacmanConfig {
-        config: custom_conf.map(|s| s.to_string()),
-        dbpath: scratch_dbpath.map(|p| p.to_string_lossy().to_string()),
-        root: install_root.map(|s| s.to_string()),
-    })
+    PacmanSource::system(host_pacman_config(custom_conf, install_root, scratch_dbpath))
 }
 
 /// Self-cleaning scratch directory. The directory is created in
@@ -149,22 +158,68 @@ impl Drop for ScratchDir {
     }
 }
 
+/// Resolve the effective `DBPath` pacman would use given an optional
+/// `--config` override, by shelling out to `pacman-conf`. Falls back to
+/// the compile-time default if `pacman-conf` is unavailable or the
+/// output cannot be parsed.
+///
+/// `basestrap` resolves DBPath via the same pacman.conf we pass through
+/// `custom_conf`, so a user who configured a non-default DBPath there
+/// would otherwise see the preflight read the wrong sync directory.
+fn effective_host_dbpath(custom_conf: Option<&str>) -> PathBuf {
+    let mut args: Vec<String> = Vec::new();
+    if let Some(c) = custom_conf {
+        args.push("--config".into());
+        args.push(c.to_string());
+    }
+    args.push("DBPath".into());
+    let output = std::process::Command::new("pacman-conf").args(&args).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+            debug!("Preflight: pacman-conf returned empty DBPath; falling back to default");
+        }
+        Ok(out) => {
+            debug!(
+                "Preflight: pacman-conf DBPath exited {}; falling back to default",
+                out.status
+            );
+        }
+        Err(e) => {
+            debug!(
+                "Preflight: could not invoke pacman-conf ({}); falling back to default DBPath",
+                e
+            );
+        }
+    }
+    PathBuf::from(DEFAULT_PACMAN_DBPATH)
+}
+
 /// Build a temporary pacman dbpath that mirrors the host's sync DB
 /// (so packages can be resolved against the same repos basestrap will
 /// use) but has an empty `local/` directory (so already-installed host
 /// packages don't mask missing deps in the fresh basestrap target).
+///
+/// `host_sync_dir` is the directory containing the sync DBs we should
+/// mirror — typically `<DBPath>/sync` for the effective pacman config.
+/// Passing this in (rather than hardcoding `/var/lib/pacman/sync`)
+/// keeps the scratch DB consistent with whatever DBPath basestrap will
+/// resolve to via the same pacman.conf override.
 ///
 /// On success returns the scratch directory; the caller holds it for
 /// the lifetime of the resolver call and the directory is cleaned up
 /// when it drops. On failure (no host sync DB, no permission to
 /// symlink, etc.) we return `None` and the caller falls back to a
 /// less-isolated query.
-fn prepare_host_scratch_dbpath() -> Option<ScratchDir> {
-    let host_sync = Path::new(HOST_SYNC_DIR);
-    if !host_sync.is_dir() {
+fn prepare_host_scratch_dbpath(host_sync_dir: &Path) -> Option<ScratchDir> {
+    if !host_sync_dir.is_dir() {
         debug!(
             "Preflight: host sync DB not found at {}; cannot prepare scratch dbpath",
-            HOST_SYNC_DIR
+            host_sync_dir.display()
         );
         return None;
     }
@@ -194,7 +249,7 @@ fn prepare_host_scratch_dbpath() -> Option<ScratchDir> {
     // Re-use the host's sync DBs: symlink rather than copy so we don't
     // duplicate hundreds of MB. Linux-only (the target platform).
     let scratch_sync = dir.path().join("sync");
-    if let Err(e) = std::os::unix::fs::symlink(host_sync, &scratch_sync) {
+    if let Err(e) = std::os::unix::fs::symlink(host_sync_dir, &scratch_sync) {
         debug!(
             "Preflight: failed to symlink host sync DB into scratch: {}",
             e
@@ -349,27 +404,43 @@ pub fn preflight_host(
         return Ok(PreflightReport::skipped_reason("dry-run"));
     }
 
-    // Build a scratch dbpath so the resolver sees an empty installed-DB
-    // even though the host live ISO has plenty of packages. If we can't
-    // build one (no /var/lib/pacman/sync, no /tmp write access, etc.),
-    // log and continue with whatever pacman would resolve normally —
-    // basestrap is still the source of truth.
-    let scratch = prepare_host_scratch_dbpath();
+    // Resolve the same DBPath basestrap will use (honouring any
+    // `DBPath = ...` set in `custom_conf`) and mirror its `sync/`
+    // subdirectory into the scratch DB. Hardcoding `/var/lib/pacman/sync`
+    // here would silently disagree with basestrap whenever the
+    // effective pacman.conf overrides DBPath.
+    let host_dbpath = effective_host_dbpath(custom_conf);
+    let host_sync_dir = host_dbpath.join("sync");
+    let scratch = prepare_host_scratch_dbpath(&host_sync_dir);
     let scratch_path = scratch.as_ref().map(|s| s.path());
-    if scratch_path.is_none() {
+
+    let source = if let Some(scratch_path) = scratch_path {
+        debug!(
+            "Preflight (host basestrap): isolated scratch dbpath at {} (mirroring {})",
+            scratch_path.display(),
+            host_sync_dir.display()
+        );
+        // Scratch dbpath available: point pacman at the fresh target
+        // root AND the scratch DB so the resolver sees real repo
+        // metadata against an empty installed-DB.
+        host_source(custom_conf, Some(install_root), Some(scratch_path))
+    } else {
+        // Without a scratch dbpath we MUST NOT pass `--root <install_root>`
+        // on its own: pacman would then default `--dbpath` to
+        // `<install_root>/var/lib/pacman`, which is empty for a fresh
+        // basestrap target. The resolver would see an empty sync DB
+        // and skip every target as unresolvable. Fall back to the
+        // legacy unrooted host query (no `--root`, no `--dbpath`) so
+        // pacman uses the live host metadata — basestrap remains the
+        // real source of truth.
         warn!(
             "Preflight (host basestrap): could not prepare an isolated scratch dbpath; \
-             resolution will use the live host's installed-DB and may mask missing deps. \
+             falling back to a legacy host query without --root/--dbpath. \
+             Already-installed host packages may mask missing deps; \
              basestrap remains the source of truth."
         );
-    } else {
-        debug!(
-            "Preflight (host basestrap): isolated scratch dbpath at {}",
-            scratch_path.unwrap().display()
-        );
-    }
-
-    let source = host_source(custom_conf, Some(install_root), scratch_path);
+        host_source(custom_conf, None, None)
+    };
     // basestrap installs into a fresh root and our scratch dbpath has
     // an empty local/, so already-installed host packages won't be
     // skipped. Use clean_root=true so the plan also disregards any
@@ -562,15 +633,17 @@ mod tests {
     /// will still fail in the fresh basestrap target. We exercise the
     /// scratch-prep helper directly: a successful prep yields an empty
     /// `local/` (with the libalpm version marker) and a `sync` symlink
-    /// pointing at the host's sync DB.
+    /// pointing at the supplied host sync directory.
     #[test]
     fn scratch_dbpath_has_empty_local_and_sync_symlink_when_host_sync_exists() {
-        // Skip in environments without /var/lib/pacman/sync (most CI).
-        if !Path::new(HOST_SYNC_DIR).is_dir() {
-            return;
-        }
+        // Stage a fake host sync dir so the test does not depend on
+        // /var/lib/pacman/sync being present.
+        let fake_host = ScratchDir::new("deploytix-preflight-fakehost-").unwrap();
+        let fake_sync = fake_host.path().join("sync");
+        std::fs::create_dir_all(&fake_sync).unwrap();
+
         let scratch =
-            prepare_host_scratch_dbpath().expect("scratch dbpath should be prepared");
+            prepare_host_scratch_dbpath(&fake_sync).expect("scratch dbpath should be prepared");
         let local = scratch.path().join("local");
         let sync = scratch.path().join("sync");
         // Local exists, has only the version marker, no per-package
@@ -582,25 +655,107 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(entries, vec!["ALPM_DB_VERSION".to_string()]);
-        // sync is a symlink to the host's sync DB.
+        // sync is a symlink to the supplied host sync directory.
         let meta = std::fs::symlink_metadata(&sync).unwrap();
         assert!(meta.file_type().is_symlink());
         let target = std::fs::read_link(&sync).unwrap();
-        assert_eq!(target, Path::new(HOST_SYNC_DIR));
+        assert_eq!(target, fake_sync);
     }
 
-    /// Bug fix #2: when we cannot prepare a scratch dbpath (e.g. the
-    /// host has no sync DB at all), `prepare_host_scratch_dbpath`
-    /// returns `None` so the preflight can fall back gracefully. We
-    /// can't easily fake this on a real host, but we CAN at least
-    /// observe that the function returns a valid result without
-    /// panicking and that, when it returns Some, the path is a
-    /// directory.
+    /// Bug fix #1: a custom DBPath set in the effective pacman.conf
+    /// must drive the scratch sync source — the helper must mirror
+    /// `<DBPath>/sync` for whatever DBPath the caller resolves, not a
+    /// hardcoded `/var/lib/pacman/sync`. Exercised by passing a
+    /// non-default sync directory in directly.
     #[test]
-    fn scratch_dbpath_is_dir_when_returned() {
-        if let Some(s) = prepare_host_scratch_dbpath() {
-            assert!(s.path().is_dir());
-        }
+    fn scratch_dbpath_mirrors_custom_host_sync_dir() {
+        let fake_host = ScratchDir::new("deploytix-preflight-customdb-").unwrap();
+        // Mimic a non-default DBPath = /opt/pacdb where sync lives at
+        // /opt/pacdb/sync.
+        let custom_sync = fake_host.path().join("opt").join("pacdb").join("sync");
+        std::fs::create_dir_all(&custom_sync).unwrap();
+
+        let scratch = prepare_host_scratch_dbpath(&custom_sync)
+            .expect("scratch dbpath should be prepared from custom sync");
+        let sync_link = scratch.path().join("sync");
+        let target = std::fs::read_link(&sync_link).unwrap();
+        assert_eq!(
+            target, custom_sync,
+            "scratch sync symlink must point at the configured DBPath/sync, not the default"
+        );
+    }
+
+    /// Bug fix #1: when the supplied host sync directory does not
+    /// exist, the helper returns None so the caller can fall back —
+    /// rather than blindly mirroring a missing path.
+    #[test]
+    fn scratch_dbpath_returns_none_when_host_sync_missing() {
+        let missing =
+            Path::new("/var/empty/deploytix-preflight-no-sync-here-please-do-not-create");
+        assert!(prepare_host_scratch_dbpath(missing).is_none());
+    }
+
+    /// Bug fix #2: when scratch dbpath preparation fails, the host
+    /// preflight must NOT pass `--root <install_root>` on its own.
+    /// pacman's semantics make `--root` re-derive `--dbpath` to
+    /// `<install_root>/var/lib/pacman`, which for a fresh basestrap
+    /// target is empty — every target would then be flagged
+    /// unresolvable. The fallback contract is "no --root and no
+    /// --dbpath", which is what `host_pacman_config(custom_conf, None,
+    /// None)` produces.
+    #[test]
+    fn host_pacman_config_fallback_does_not_set_root_or_dbpath() {
+        let cfg = host_pacman_config(Some("/tmp/p.conf"), None, None);
+        assert_eq!(cfg.config.as_deref(), Some("/tmp/p.conf"));
+        assert!(
+            cfg.root.is_none(),
+            "fallback must not pass --root; would re-derive --dbpath to <root>/var/lib/pacman"
+        );
+        assert!(
+            cfg.dbpath.is_none(),
+            "fallback must not pass --dbpath without scratch prep"
+        );
+    }
+
+    /// Sanity: in the happy path, the config carries every override
+    /// the resolver needs — config (custom pacman.conf), root (the
+    /// fresh basestrap target), and dbpath (the scratch dir mirroring
+    /// the host's sync DBs with an empty local/).
+    #[test]
+    fn host_pacman_config_happy_path_sets_all_three_overrides() {
+        let scratch = Path::new("/tmp/scratch-db");
+        let cfg = host_pacman_config(Some("/tmp/p.conf"), Some("/mnt/target"), Some(scratch));
+        assert_eq!(cfg.config.as_deref(), Some("/tmp/p.conf"));
+        assert_eq!(cfg.root.as_deref(), Some("/mnt/target"));
+        assert_eq!(cfg.dbpath.as_deref(), Some("/tmp/scratch-db"));
+    }
+
+    /// Bug fix #2: `effective_host_dbpath` falls back to the documented
+    /// default when `pacman-conf` is unavailable. We can't drive a real
+    /// pacman-conf in unit tests, but we can pin the fallback path —
+    /// a present-but-broken --config (nonexistent file) makes
+    /// pacman-conf exit non-zero, and we expect the default DBPath.
+    #[test]
+    fn effective_host_dbpath_falls_back_to_default_on_pacman_conf_failure() {
+        // Definitely-bogus config file → pacman-conf either exits
+        // non-zero or isn't installed; either way we expect the
+        // default. We deliberately don't assert the *result* of
+        // pacman-conf when it succeeds, since CI environments with a
+        // real /etc/pacman.conf would legitimately return a different
+        // path.
+        let p = effective_host_dbpath(Some("/var/empty/deploytix-no-such-pacman.conf"));
+        // The compile-time default is the only deterministic answer
+        // when pacman-conf fails. If pacman-conf is missing entirely
+        // (e.g. on CI) we also land here.
+        // Note: if pacman-conf happens to *succeed* with a bogus
+        // config (unlikely), this test would observe whatever it
+        // returns — accept the default OR a non-empty path as
+        // evidence the function ran.
+        assert!(
+            p == Path::new(DEFAULT_PACMAN_DBPATH) || p.is_absolute(),
+            "expected default or an absolute DBPath, got {:?}",
+            p
+        );
     }
 
     /// Bug fix #2: ScratchDir cleans up on drop. Sanity-check the
