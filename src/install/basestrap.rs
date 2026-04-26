@@ -1,6 +1,7 @@
 //! Basestrap wrapper for base system installation
 
 use crate::config::{DeploymentConfig, DesktopEnvironment, Filesystem, NetworkBackend};
+use crate::pkgdeps::preflight as pkg_preflight;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::collections::HashSet;
@@ -924,6 +925,15 @@ pub fn run_basestrap_with_retries(
     // Ensure the Arch [extra] repo is available for packages that
     // are not mirrored in the Artix repositories.
     let custom_conf = ensure_arch_repos(custom_conf, cmd)?;
+
+    // Dependency preflight: ask pacman -S --print to resolve the full
+    // transaction against the same pacman.conf basestrap will use. This
+    // surfaces missing virtual providers, target-not-found errors, and
+    // conflict-driven removals before basestrap starts downloading
+    // anything. Best-effort — failures here only log; basestrap itself
+    // is the source of truth.
+    let _report =
+        pkg_preflight::preflight_host(custom_conf.as_deref(), &packages, cmd.is_dry_run())?;
 
     info!(
         "Installing {} packages with basestrap to {}",
