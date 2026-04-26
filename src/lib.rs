@@ -6,6 +6,7 @@ pub mod configure;
 pub mod desktop;
 pub mod disk;
 pub mod install;
+pub mod pkgdeps;
 pub mod resources;
 pub mod utils;
 

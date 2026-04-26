@@ -335,6 +335,141 @@ Deploytix will check for missing dependencies at startup and offer to install th
 - Standard / LVM Thin layout: ~75 GiB
 - Minimal layout: ~25 GiB
 
+## Package Dependency Tracking (`deploytix deps …`)
+
+Deploytix ships a built-in dependency tracker for Artix/Arch packages. It is used internally to plan what `basestrap` will pull in, and exposed as a CLI for inspecting any package in any sync database.
+
+### Why pacman/libalpm metadata, not the Artix website
+
+`packages.artixlinux.org` is a useful **human** reference, but it is not a reliable source of truth for automation:
+
+- **HTML changes break scrapers.** Layout updates silently invalidate selectors.
+- **It lags the actual sync DBs.** The page shows what the index render last saw; the file under `/var/lib/pacman/sync/*.db` is what `pacman` will actually use to resolve a transaction. They can disagree by hours.
+- **It cannot tell you about *your* configuration.** The same package name can resolve to different versions, deps, or providers depending on which repos you have enabled, your `Architecture`, and any `IgnorePkg` / `Server` overrides in `pacman.conf`.
+- **It doesn't know your installed state.** Transaction planning (what would actually be installed) requires consulting `pacman -Sy` databases plus the local `installed` DB — neither of which the website exposes.
+
+For these reasons Deploytix uses the same metadata sources `pacman` itself uses:
+
+1. **libalpm-style sync DB reads** via `pacman -Si`, `pacman -Ss`, and `pactree`.
+2. **Transaction resolution** via `pacman -S --print --print-format '%r/%n %v'` — no installs, no downloads, no system mutation.
+3. **The user's own `pacman.conf`** (or any `--config /path` override) so the answers match what the target system, ISO, or chroot will actually see.
+
+The website remains useful for humans browsing packages — and we link to it in error messages — but it is never parsed or scraped.
+
+### Subcommands
+
+```text
+deploytix deps resolve <package>          # full runtime closure
+deploytix deps tree <package>             # human-readable tree
+deploytix deps reverse <package>          # who depends on this?
+deploytix deps graph <package> -o pkg.dot # Graphviz DOT (≡ pactree -s -g)
+deploytix deps plan-install <package>     # what `pacman -S` would do
+deploytix deps metadata <package>         # full normalized metadata
+deploytix deps compare <pkg-a> <pkg-b>    # diff two packages
+```
+
+Common flags (apply to all `deps` subcommands):
+
+| Flag | Description |
+|---|---|
+| `--config <path>` | alternate `pacman.conf` (e.g. an ISO build profile) |
+| `--dbpath <path>` | alternate pacman db (e.g. `/mnt/var/lib/pacman` for a chroot) |
+| `--root <path>` | alternate root for transaction planning |
+| `--include-optional` | include `optdepends` in the closure |
+| `--include-make` | include `makedepends` |
+| `--include-check` | include `checkdepends` |
+| `--json` | machine-readable output |
+| `--dot` | Graphviz output (also accepted by `resolve`/`tree`/`reverse`) |
+| `--offline <fixture.json>` | bypass pacman entirely; use a JSON fixture (CI/sandbox mode) |
+| `deps plan-install --clean-root` | plan as if no packages are installed (chroot-style) |
+
+### Examples
+
+```bash
+# Full runtime closure of the Artix `base` package, default sync DBs:
+deploytix deps resolve base
+
+# Same query, but planning against a soon-to-be chroot:
+deploytix deps plan-install base \
+    --config ./iso/pacman.conf \
+    --dbpath /mnt/var/lib/pacman \
+    --root /mnt \
+    --clean-root
+
+# Build a DOT graph (equivalent to: pactree -s -g pacman > pacman.dot):
+deploytix deps graph pacman --output pacman.dot
+dot -Tpng pacman.dot -o pacman.png
+
+# Reverse dependency lookup (who would break if I removed glibc?):
+deploytix deps reverse glibc --include-optional
+
+# Stable JSON for CI:
+deploytix deps resolve linux-zen --json --include-optional > closure.json
+```
+
+### Example JSON output
+
+```json
+{
+  "roots": ["base"],
+  "nodes": [
+    {
+      "name": "base",
+      "version": "1.0",
+      "repo": "system",
+      "depends": [
+        { "name": "glibc", "constraint": ">=2.39" },
+        { "name": "pacman" }
+      ],
+      "optdepends": [
+        { "name": "man-db", "description": "read manpages" }
+      ],
+      "provides": [],
+      "conflicts": [],
+      "replaces": [],
+      "required_by": [],
+      "optional_for": [],
+      "groups": [],
+      "licenses": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "base",
+      "to": "glibc",
+      "kind": "runtime",
+      "constraint": ">=2.39"
+    }
+  ],
+  "providers": [
+    { "virtual_name": "sh", "chosen": "bash" }
+  ],
+  "databases_used": ["system", "world", "extra"],
+  "warnings": []
+}
+```
+
+The schema is stable and round-trips through `serde_json::from_str::<DepClosure>(…)`. Edges and nodes are sorted deterministically so the output diffs cleanly.
+
+### Architecture
+
+| Module | Responsibility |
+|---|---|
+| `pkgdeps::model` | Normalized `Package`, `Dep`, `EdgeKind`, `DepClosure`, `InstallPlan` types. Version constraints and optdep descriptions preserved. |
+| `pkgdeps::source` | `MetadataSource` trait + in-memory `MockSource` for tests/`--offline`. |
+| `pkgdeps::pacman` | Production backend: shells out to `pacman` / `pactree` / `pacman-conf` / `expac` through the small `CmdExec` trait, with `--config` / `--dbpath` / `--root` plumbing. |
+| `pkgdeps::resolver` | Recursive closure with provider resolution, conflicts, replacements. Reverse-dep walk. Package diff. |
+| `pkgdeps::graph` | Graphviz DOT serializer with edge-kind-coloured edges. |
+| `pkgdeps::cli` | Subcommand handlers, JSON / DOT / human formatters, offline fixture loader. |
+
+Because `MetadataSource` is a trait, all of the resolver and graph logic is testable without pacman installed: the test suite drives an in-memory mock and exercises the same code paths real users hit. On a real Artix system, the `PacmanSource` backend takes over and runs the actual `pacman -Si` / `pactree` / `pacman -S --print` invocations — never modifying system state.
+
+### Known limitations
+
+- `optional_for` reverse lookups use `expac -S '%n %O'`. If `expac` is not installed, optional reverse-deps are reported as empty rather than failing the command. Install `expac` (extra repo) for full coverage.
+- The bundled `MockSource` does not enforce version-constraint satisfiability; pacman itself does that at install time. Use `deps plan-install` to surface real conflicts.
+- Stale local sync DB (`/var/lib/pacman/sync/*.db`) will silently produce stale resolutions. The CLI emits a warning when the closure is empty; refresh with `pacman -Sy` (which Deploytix never does on its own).
+
 ## Development
 
 ```bash
