@@ -109,6 +109,10 @@ fn install_service_packages(
         return Ok(());
     }
 
+    // Preflight: resolve the chroot transaction first so missing
+    // virtual providers / target-not-found surface before pacman runs.
+    let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &packages, cmd.is_dry_run());
+
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     cmd.run_in_chroot(install_root, &install_cmd)
         .map(|_| ())

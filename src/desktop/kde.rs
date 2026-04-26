@@ -71,23 +71,20 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
         return Ok(());
     }
 
-    // Install packages via pacman in chroot
-    let pkg_list = packages.join(" ");
-    let mut install_cmd = if use_session_switching {
-        // No sddm or sddm-{init} when session switching is active
-        format!("pacman -S --noconfirm {}", pkg_list)
-    } else {
-        let sddm_service = format!("sddm-{}", config.system.init);
-        format!("pacman -S --noconfirm {} {}", pkg_list, sddm_service)
-    };
-
-    // Add init-specific service packages for non-s6 init systems
+    // Build the full package list (including init-specific service
+    // pkgs) up front so we can preflight resolution before pacman runs.
+    let mut all_pkgs: Vec<String> = packages.iter().map(|s| (*s).to_string()).collect();
+    if !use_session_switching {
+        all_pkgs.push(format!("sddm-{}", config.system.init));
+    }
     if config.system.init != InitSystem::S6 {
-        let bluez_service = format!("bluez-{}", config.system.init);
-        let power_service = format!("power-profiles-daemon-{}", config.system.init);
-        install_cmd = format!("{} {} {}", install_cmd, bluez_service, power_service);
+        all_pkgs.push(format!("bluez-{}", config.system.init));
+        all_pkgs.push(format!("power-profiles-daemon-{}", config.system.init));
     }
 
+    let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &all_pkgs, cmd.is_dry_run());
+
+    let install_cmd = format!("pacman -S --noconfirm {}", all_pkgs.join(" "));
     cmd.run_in_chroot(install_root, &install_cmd)?;
 
     // Configure SDDM (skip when session switching uses greetd instead)
