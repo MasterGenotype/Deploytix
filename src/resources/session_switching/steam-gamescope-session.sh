@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # ==================================================
 # Steam + Gamescope System Session
 # Uses ready-fd socket approach (per gamescope-session-plus)
@@ -83,7 +83,7 @@ WIDTH=1920
 HEIGHT=1200
 
 # --------- 7. Create Sockets ---------
-# Ready-fd socket: gamescope writes DISPLAY and WAYLAND_DISPLAY here when ready.
+# Ready-fd pipe: gamescope writes DISPLAY and WAYLAND_DISPLAY here when ready.
 # Stats pipe: used by mangoapp and Steam for perf data.
 tmpdir=$(mktemp -p "$XDG_RUNTIME_DIR" -d -t gamescope.XXXXXXX)
 socket="$tmpdir/startup.socket"
