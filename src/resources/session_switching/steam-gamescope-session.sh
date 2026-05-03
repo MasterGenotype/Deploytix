@@ -20,13 +20,35 @@ echo "[steam-session] ==== starting at $(date -Is) pid=$$ uid=$(id -u) ===="
 echo "[steam-session] env: USER=${USER:-?} HOME=${HOME:-?} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-?} XDG_SEAT=${XDG_SEAT:-?} XDG_SESSION_ID=${XDG_SESSION_ID:-?} XDG_VTNR=${XDG_VTNR:-?}"
 
 # --------- 1. Seat & Session Environment ---------
-# Use logind backend to avoid seatd/elogind dual-seat conflict
-export LIBSEAT_BACKEND=logind
+# Select libseat backend adaptively:
+# - Prefer logind (elogind) when its D-Bus service is reachable; greetd's PAM
+#   stack (pam_elogind) already created an active seat session that grants
+#   DRM/input ACLs, and forcing logind avoids seatd/elogind dual-seat
+#   confusion when both daemons are present (non-S6 installs).
+# - Fall back to seatd when elogind is not running (S6 installs, or any
+#   system that ships only seatd).  The user must be in the 'seat' group.
+if pidof elogind >/dev/null 2>&1; then
+    export LIBSEAT_BACKEND=logind
+    echo "[steam-session] libseat backend: logind (elogind running)"
+elif [ -S /run/seatd.sock ]; then
+    export LIBSEAT_BACKEND=seatd
+    echo "[steam-session] libseat backend: seatd"
+else
+    echo "[steam-session] warning: neither elogind nor seatd detected; libseat will auto-detect"
+fi
 
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=gamescope
 export XDG_SESSION_DESKTOP=gamescope
+# XDG_RUNTIME_DIR is created by pam_elogind on normal greetd sessions.
+# On S6 (no greetd/pam) it may be absent; create it here so mktemp and
+# PipeWire sockets have a place to live.
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    echo "[steam-session] Created XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+fi
 export XDG_RUNTIME_DIR
 
 # --------- 2. GPU / Vulkan ---------
@@ -79,7 +101,7 @@ if flock -n 9 && rm -f "$sessionlink" && ln -sf "$tmpdir" "$sessionlink"; then
 fi
 
 # --------- 8. Gamescope Command ---------
-GAMESCOPE_CMD="/usr/local/bin/gamescope \
+GAMESCOPE_CMD="/usr/bin/gamescope \
     -w $WIDTH -h $HEIGHT \
     -f \
     --steam \

@@ -49,12 +49,21 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // Display manager - greetd is enabled for non-s6 init systems.
-    // Artix does not provide a greetd-s6 package/service.
-    if config.desktop.environment != DesktopEnvironment::None
-        && config.system.init != InitSystem::S6
-    {
+    // Display manager — greetd on all init systems.
+    // No official greetd-s6 package exists, so for S6 we write the service
+    // directory ourselves in configure_greetd(); enable_s6_service() will
+    // then find greetd-srv and touch the bundle entry as usual.
+    if config.desktop.environment != DesktopEnvironment::None {
         services.push("greetd".to_string());
+    }
+
+    // elogind — must be running before greetd so PAM pam_elogind can
+    // create the seat session that grants gamescope DRM/input ACLs.
+    // elogind-s6 exists in Artix repos alongside all other init variants.
+    if config.packages.install_session_switching
+        && config.desktop.environment != DesktopEnvironment::None
+    {
+        services.push("elogind".to_string());
     }
 
     services
@@ -78,6 +87,9 @@ fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String>
     for service in services {
         let base = service_base_package(service);
         packages.push(base.to_string());
+        // No greetd-s6 package exists in Artix repos; we write the service
+        // directory ourselves in configure_greetd().  All other services
+        // (including elogind-s6) have proper Artix packages.
         if *init == InitSystem::S6 && base == "greetd" {
             continue;
         }
