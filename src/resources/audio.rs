@@ -18,28 +18,16 @@ pub struct AudioHandle {
 /// During heavy disk I/O the audio buffer starves, causing ALSA's default
 /// handler to print "underrun occurred" to stderr on every glitch. A no-op
 /// handler silences the output without changing ALSA's recovery behaviour.
-/// libasound is already in the link path via rodio → cpal → alsa-sys.
+///
+/// The handler is registered through a C shim (alsa_noop.c) so the variadic
+/// callback signature `void(*)(const char*, int, const char*, int, const char*, ...)`
+/// is expressed in C, which avoids the Rust-stable limitation on variadic fn pointers.
 #[cfg(target_os = "linux")]
 fn suppress_alsa_errors() {
-    use std::ffi::{c_char, c_int};
-
-    type AlsaHandler =
-        unsafe extern "C" fn(*const c_char, c_int, *const c_char, c_int, *const c_char);
-
-    unsafe extern "C" fn noop(
-        _: *const c_char,
-        _: c_int,
-        _: *const c_char,
-        _: c_int,
-        _: *const c_char,
-    ) {
-    }
-
     extern "C" {
-        fn snd_lib_error_set_handler(handler: Option<AlsaHandler>);
+        fn deploytix_suppress_alsa_errors();
     }
-
-    unsafe { snd_lib_error_set_handler(Some(noop)) };
+    unsafe { deploytix_suppress_alsa_errors() };
 }
 
 #[cfg(not(target_os = "linux"))]

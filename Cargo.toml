@@ -59,6 +59,9 @@ name = "deploytix-gui"
 path = "src/gui_main.rs"
 required-features = ["gui"]
 
+[build-dependencies]
+cc = "1"
+
 [profile.release]
 opt-level = "z"
 lto = true
