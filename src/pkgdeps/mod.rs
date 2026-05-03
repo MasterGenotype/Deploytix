@@ -24,6 +24,8 @@ pub mod preflight;
 pub mod resolver;
 pub mod source;
 
-pub use model::{Dep, DepClosure, DepKind, EdgeKind, InstallPlan, Package, PackageRef};
-pub use preflight::{preflight_chroot, preflight_host, PreflightReport};
-pub use source::{MetadataSource, MockSource};
+// Re-export only types referenced via the `pkgdeps` module root by
+// external consumers (currently the integration test suite uses
+// `deploytix::pkgdeps::DepClosure`). Other types are reachable through
+// their submodule paths and don't need a flat re-export.
+pub use model::DepClosure;

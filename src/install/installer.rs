@@ -751,6 +751,35 @@ impl Installer {
     fn configure_system(&self) -> Result<()> {
         info!("[Phase 4/6] Configuring system in chroot (locale, users, bootloader, network, services)");
 
+        // Ensure the chroot's pacman keyring trusts current Artix signing
+        // keys.  basestrap copies the host keyring, but it can be stale if
+        // the ISO is old or a buildbot key has been rotated.
+        //
+        // Sequence:
+        //   1. pacman-key --init          — create the GPG keyring
+        //   2. pacman -Sy artixlinux-keyring — pull the latest keyring
+        //      package so --populate has the current keys (the version
+        //      basestrap installed may be too old to know about a
+        //      rotated buildbot key)
+        //   3. pacman-key --populate      — import all keys from the
+        //      (now-updated) keyring package
+        if !self.cmd.is_dry_run() {
+            info!("Initialising pacman keyring in chroot");
+            self.cmd
+                .run_in_chroot(INSTALL_ROOT, "pacman-key --init")?;
+            // Refresh the keyring package before populating. The old
+            // keyring can still verify the *keyring package* itself
+            // (Artix signs keyring updates with the master key that
+            // ships in every keyring version).  Best-effort: if this
+            // fails we still populate with whatever is installed.
+            let _ = self.cmd.run_in_chroot(
+                INSTALL_ROOT,
+                "pacman -Sy --noconfirm artix-keyring",
+            );
+            self.cmd
+                .run_in_chroot(INSTALL_ROOT, "pacman-key --populate artix")?;
+        }
+
         // Locale and timezone
         configure::locale::configure_locale(&self.cmd, &self.config, INSTALL_ROOT)?;
 

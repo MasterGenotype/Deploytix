@@ -75,20 +75,23 @@ pub fn load_offline_fixture(path: &Path) -> Result<MockSource> {
     let fixture: Fixture = serde_json::from_str(&text).map_err(|e| {
         DeploytixError::ConfigError(format!("invalid offline fixture {}: {}", path.display(), e))
     })?;
-    let mut mock = MockSource::default();
+
+    // Build via the chainable builder so the JSON-fixture loader and any
+    // future programmatic callers share one composition path.
+    let mut builder = MockSource::builder();
     for p in fixture.packages {
-        mock.insert(p);
+        builder = builder.package(p);
     }
     for n in fixture.installed {
-        mock.mark_installed(&n);
+        builder = builder.installed(&n);
     }
-    if !fixture.databases.is_empty() {
-        mock.set_databases(fixture.databases);
+    for db in fixture.databases {
+        builder = builder.database(db);
     }
     for pc in fixture.providers {
-        mock.set_provider(&pc.virtual_name, &pc.chosen);
+        builder = builder.provider(&pc.virtual_name, &pc.chosen);
     }
-    Ok(mock)
+    Ok(builder.build())
 }
 
 #[derive(Serialize)]

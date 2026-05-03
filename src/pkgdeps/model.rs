@@ -76,17 +76,6 @@ impl Dep {
     }
 }
 
-/// Which kind of dependency edge produced this entry. Used to keep
-/// build-time deps separate from runtime, and to colour DOT graphs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DepKind {
-    Runtime,
-    Make,
-    Check,
-    Optional,
-}
-
 /// Edge kinds for dependency graph output. Reverse edges share the
 /// graph but are tagged separately so consumers can filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -127,40 +116,6 @@ impl EdgeKind {
             EdgeKind::Optional => "optdepends",
             EdgeKind::ReverseRuntime => "required_by",
             EdgeKind::ReverseOptional => "optional_for",
-        }
-    }
-}
-
-/// A `repo/name` reference. `repo` is the sync database name (e.g.
-/// `system`, `world`, `extra`). It may be empty when the source did not
-/// report it (older pactree output).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PackageRef {
-    pub repo: String,
-    pub name: String,
-}
-
-impl PackageRef {
-    pub fn new<R: Into<String>, N: Into<String>>(repo: R, name: N) -> Self {
-        Self {
-            repo: repo.into(),
-            name: name.into(),
-        }
-    }
-
-    /// Parse `repo/name` (or just `name`).
-    pub fn parse(s: &str) -> Self {
-        match s.split_once('/') {
-            Some((r, n)) => Self::new(r.trim(), n.trim()),
-            None => Self::new("", s.trim()),
-        }
-    }
-
-    pub fn qualified(&self) -> String {
-        if self.repo.is_empty() {
-            self.name.clone()
-        } else {
-            format!("{}/{}", self.repo, self.name)
         }
     }
 }
@@ -225,10 +180,6 @@ impl Package {
             required_by: Vec::new(),
             optional_for: Vec::new(),
         }
-    }
-
-    pub fn pref(&self) -> PackageRef {
-        PackageRef::new(self.repo.clone(), self.name.clone())
     }
 }
 
@@ -341,22 +292,6 @@ mod tests {
         assert_eq!(d.name, "python");
         assert_eq!(d.constraint.as_deref(), Some(">=3.10"));
         assert_eq!(d.description.as_deref(), Some("for the foo plugin"));
-    }
-
-    #[test]
-    fn package_ref_parse_qualified() {
-        let p = PackageRef::parse("system/glibc");
-        assert_eq!(p.repo, "system");
-        assert_eq!(p.name, "glibc");
-        assert_eq!(p.qualified(), "system/glibc");
-    }
-
-    #[test]
-    fn package_ref_parse_unqualified() {
-        let p = PackageRef::parse("glibc");
-        assert!(p.repo.is_empty());
-        assert_eq!(p.name, "glibc");
-        assert_eq!(p.qualified(), "glibc");
     }
 
     #[test]

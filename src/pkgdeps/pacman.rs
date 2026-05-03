@@ -428,10 +428,7 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
         for t in targets {
             args.push((*t).to_string());
         }
-        let out = match self.exec.run("pacman", &args) {
-            Ok(s) => s,
-            Err(e) => return Err(e),
-        };
+        let out = self.exec.run("pacman", &args)?;
         let mut plan = InstallPlan {
             targets: targets.iter().map(|s| s.to_string()).collect(),
             clean_root,

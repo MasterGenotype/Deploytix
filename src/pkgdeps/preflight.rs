@@ -246,18 +246,190 @@ fn prepare_host_scratch_dbpath(host_sync_dir: &Path) -> Option<ScratchDir> {
         return None;
     }
 
-    // Re-use the host's sync DBs: symlink rather than copy so we don't
-    // duplicate hundreds of MB. Linux-only (the target platform).
+    // Re-use the host's sync DBs: per-file symlinks rather than a
+    // single symlink for the whole sync directory. We don't copy
+    // (avoid duplicating hundreds of MB) and we don't symlink the
+    // whole directory (would prevent the caller from overlaying
+    // individual repo .db files for local file:// repos whose host
+    // sync entry is stale or absent).
     let scratch_sync = dir.path().join("sync");
-    if let Err(e) = std::os::unix::fs::symlink(host_sync_dir, &scratch_sync) {
-        debug!(
-            "Preflight: failed to symlink host sync DB into scratch: {}",
-            e
-        );
+    if let Err(e) = std::fs::create_dir_all(&scratch_sync) {
+        debug!("Preflight: failed to create scratch sync/: {}", e);
         return None;
+    }
+    let entries = match std::fs::read_dir(host_sync_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            debug!(
+                "Preflight: failed to read host sync dir {}: {}",
+                host_sync_dir.display(),
+                e
+            );
+            return None;
+        }
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let name = match src.file_name() {
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+        let dst = scratch_sync.join(&name);
+        if let Err(e) = std::os::unix::fs::symlink(&src, &dst) {
+            debug!(
+                "Preflight: failed to symlink {} -> {}: {}",
+                dst.display(),
+                src.display(),
+                e
+            );
+            return None;
+        }
     }
 
     Some(dir)
+}
+
+/// Parse a pacman.conf and yield `(repo_name, server_dir)` for every
+/// repository whose `Server = file://<dir>` URL points at a local
+/// directory. Other server schemes (`http`, `https`, `Include = ...`)
+/// are ignored — they're already handled by the host's sync DB.
+///
+/// We deliberately do not pull in a TOML/INI parser: pacman.conf is
+/// line-oriented and the subset we need (section header + `Server =`
+/// lines) is trivial to scan. Comments (`#`) and `Include =` directives
+/// are skipped.
+fn parse_local_file_repos(conf_path: &str) -> Vec<(String, PathBuf)> {
+    let content = match std::fs::read_to_string(conf_path) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!(
+                "Preflight: failed to read pacman.conf {} for local-repo overlay: {}",
+                conf_path, e
+            );
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    let mut current: Option<String> = None;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(name) = rest.strip_suffix(']') {
+                let name = name.trim();
+                current = if name.eq_ignore_ascii_case("options") {
+                    None
+                } else {
+                    Some(name.to_string())
+                };
+            }
+            continue;
+        }
+        let repo = match &current {
+            Some(r) => r,
+            None => continue,
+        };
+        // Match `Server = file://<dir>` (with optional whitespace around `=`).
+        let kv = line.split_once('=');
+        let (key, value) = match kv {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        if !key.eq_ignore_ascii_case("Server") {
+            continue;
+        }
+        if let Some(path) = value.strip_prefix("file://") {
+            // Already-known repo wins (first Server = ... in the file)
+            // — pacman uses the first server for its repo definition
+            // when multiple are listed.
+            if !out.iter().any(|(r, _)| r == repo) {
+                out.push((repo.clone(), PathBuf::from(path)));
+            }
+        }
+    }
+    out
+}
+
+/// Overlay each local file:// repo's `.db` (and `.files`, when
+/// available) into `<scratch>/sync/`, replacing any existing entry.
+///
+/// Why this is necessary: the host's sync DB may carry a stale
+/// `<repo>.db` from a previous installer run (or from an earlier
+/// version of the same repo), while the freshly built local repo at
+/// `Server = file://<dir>` carries the up-to-date package list. A
+/// preflight `pacman -S --print` does NOT fetch the sync DB — it just
+/// reads `<dbpath>/sync/<repo>.db`. Without overlay, packages added in
+/// the new local repo would be reported as `target not found` even
+/// though basestrap (which runs `-Sy` and would re-fetch) would resolve
+/// them correctly. The mismatch produces a misleading WARN and erodes
+/// trust in the preflight signal.
+fn overlay_local_repo_dbs(scratch: &Path, custom_conf: Option<&str>) {
+    let conf = match custom_conf {
+        Some(c) => c,
+        None => return,
+    };
+    let scratch_sync = scratch.join("sync");
+    for (repo, dir) in parse_local_file_repos(conf) {
+        // pacman accepts both the bare `<repo>.db` symlink and the
+        // `<repo>.db.tar.zst` archive form. Prefer the bare name (what
+        // `repo-add` writes by default), fall back to the archive.
+        let db_candidates = [
+            dir.join(format!("{}.db", repo)),
+            dir.join(format!("{}.db.tar.zst", repo)),
+        ];
+        let db_src = match db_candidates.iter().find(|p| p.exists()) {
+            Some(p) => p,
+            None => {
+                debug!(
+                    "Preflight: local repo [{}] at {} has no .db; skipping overlay",
+                    repo,
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        let db_dst = scratch_sync.join(format!("{}.db", repo));
+        // Remove any prior entry (host symlink or earlier overlay).
+        // Ignore NotFound; surface anything else as a debug log.
+        match std::fs::remove_file(&db_dst) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => debug!(
+                "Preflight: could not clear {} before overlay: {}",
+                db_dst.display(),
+                e
+            ),
+        }
+        if let Err(e) = std::os::unix::fs::symlink(db_src, &db_dst) {
+            debug!(
+                "Preflight: failed to overlay {} -> {}: {}",
+                db_dst.display(),
+                db_src.display(),
+                e
+            );
+            continue;
+        }
+        debug!(
+            "Preflight: overlaid local repo [{}] db from {}",
+            repo,
+            db_src.display()
+        );
+
+        // Optional: same treatment for .files, used by `pacman -F`.
+        // Not required for `-S --print` resolution but cheap to keep
+        // consistent if the local repo has it.
+        let files_candidates = [
+            dir.join(format!("{}.files", repo)),
+            dir.join(format!("{}.files.tar.zst", repo)),
+        ];
+        if let Some(files_src) = files_candidates.iter().find(|p| p.exists()) {
+            let files_dst = scratch_sync.join(format!("{}.files", repo));
+            let _ = std::fs::remove_file(&files_dst);
+            let _ = std::os::unix::fs::symlink(files_src, &files_dst);
+        }
+    }
 }
 
 /// Build a [`PacmanSource`] that resolves against the chroot's pacman
@@ -413,6 +585,16 @@ pub fn preflight_host(
     let host_sync_dir = host_dbpath.join("sync");
     let scratch = prepare_host_scratch_dbpath(&host_sync_dir);
     let scratch_path = scratch.as_ref().map(|s| s.path());
+
+    // For any local file:// repo declared in custom_conf, replace the
+    // host-side sync entry in the scratch dbpath with the freshly
+    // built local repo's .db. Without this, a stale host
+    // <dbpath>/sync/<repo>.db (left over from a previous installer
+    // run) masks new packages added to the local repo and triggers
+    // false `target not found` warnings during preflight.
+    if let Some(scratch_path) = scratch_path {
+        overlay_local_repo_dbs(scratch_path, custom_conf);
+    }
 
     let source = if let Some(scratch_path) = scratch_path {
         debug!(
@@ -627,20 +809,25 @@ mod tests {
             .any(|w| w.contains("pacman.conf not found")));
     }
 
-    /// Bug fix #2: the host preflight must point pacman at the target
-    /// install root and a scratch dbpath whose `local/` is empty, so
-    /// already-installed host packages don't mask missing deps that
-    /// will still fail in the fresh basestrap target. We exercise the
-    /// scratch-prep helper directly: a successful prep yields an empty
-    /// `local/` (with the libalpm version marker) and a `sync` symlink
-    /// pointing at the supplied host sync directory.
+    /// The host preflight must point pacman at the target install root
+    /// and a scratch dbpath whose `local/` is empty, so already-installed
+    /// host packages don't mask missing deps that will still fail in the
+    /// fresh basestrap target. We exercise the scratch-prep helper
+    /// directly: a successful prep yields an empty `local/` (with the
+    /// libalpm version marker) and a real `sync/` directory containing
+    /// per-file symlinks pointing at the supplied host sync entries.
+    /// Per-file (rather than whole-directory) symlinks let the caller
+    /// overlay individual repo .db files for stale local file:// repos.
     #[test]
-    fn scratch_dbpath_has_empty_local_and_sync_symlink_when_host_sync_exists() {
+    fn scratch_dbpath_has_empty_local_and_per_file_sync_symlinks_when_host_sync_exists() {
         // Stage a fake host sync dir so the test does not depend on
         // /var/lib/pacman/sync being present.
         let fake_host = ScratchDir::new("deploytix-preflight-fakehost-").unwrap();
         let fake_sync = fake_host.path().join("sync");
         std::fs::create_dir_all(&fake_sync).unwrap();
+        // Stage two repo .db files in the fake host sync.
+        std::fs::write(fake_sync.join("core.db"), b"core").unwrap();
+        std::fs::write(fake_sync.join("extra.db"), b"extra").unwrap();
 
         let scratch =
             prepare_host_scratch_dbpath(&fake_sync).expect("scratch dbpath should be prepared");
@@ -649,24 +836,34 @@ mod tests {
         // Local exists, has only the version marker, no per-package
         // descriptors → installed-DB is empty from libalpm's POV.
         assert!(local.is_dir());
-        let entries: Vec<_> = std::fs::read_dir(&local)
+        let local_entries: Vec<_> = std::fs::read_dir(&local)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(entries, vec!["ALPM_DB_VERSION".to_string()]);
-        // sync is a symlink to the supplied host sync directory.
-        let meta = std::fs::symlink_metadata(&sync).unwrap();
-        assert!(meta.file_type().is_symlink());
-        let target = std::fs::read_link(&sync).unwrap();
-        assert_eq!(target, fake_sync);
+        assert_eq!(local_entries, vec!["ALPM_DB_VERSION".to_string()]);
+        // sync is a real directory (NOT a symlink to the host sync dir),
+        // so the caller can overlay individual entries safely.
+        let sync_meta = std::fs::symlink_metadata(&sync).unwrap();
+        assert!(
+            sync_meta.file_type().is_dir(),
+            "sync/ must be a real directory so per-repo overlays don't leak into the host sync"
+        );
+        // Each host sync entry is mirrored as a symlink to its source.
+        let core_link = sync.join("core.db");
+        let extra_link = sync.join("extra.db");
+        assert!(std::fs::symlink_metadata(&core_link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&extra_link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&core_link).unwrap(), fake_sync.join("core.db"));
+        assert_eq!(std::fs::read_link(&extra_link).unwrap(), fake_sync.join("extra.db"));
     }
 
     /// Bug fix #1: a custom DBPath set in the effective pacman.conf
     /// must drive the scratch sync source — the helper must mirror
     /// `<DBPath>/sync` for whatever DBPath the caller resolves, not a
     /// hardcoded `/var/lib/pacman/sync`. Exercised by passing a
-    /// non-default sync directory in directly.
+    /// non-default sync directory in directly and verifying the
+    /// per-file symlink targets the expected source.
     #[test]
     fn scratch_dbpath_mirrors_custom_host_sync_dir() {
         let fake_host = ScratchDir::new("deploytix-preflight-customdb-").unwrap();
@@ -674,15 +871,100 @@ mod tests {
         // /opt/pacdb/sync.
         let custom_sync = fake_host.path().join("opt").join("pacdb").join("sync");
         std::fs::create_dir_all(&custom_sync).unwrap();
+        std::fs::write(custom_sync.join("world.db"), b"world").unwrap();
 
         let scratch = prepare_host_scratch_dbpath(&custom_sync)
             .expect("scratch dbpath should be prepared from custom sync");
-        let sync_link = scratch.path().join("sync");
-        let target = std::fs::read_link(&sync_link).unwrap();
+        let world_link = scratch.path().join("sync").join("world.db");
+        let target = std::fs::read_link(&world_link).unwrap();
         assert_eq!(
-            target, custom_sync,
-            "scratch sync symlink must point at the configured DBPath/sync, not the default"
+            target,
+            custom_sync.join("world.db"),
+            "scratch sync entries must point at the configured DBPath/sync, not the default"
         );
+    }
+
+    /// Regression: a stale host-side `<repo>.db` (left over from a
+    /// previous installer run) must not mask a freshly built local
+    /// file:// repo of the same name. After scratch prep, calling
+    /// `overlay_local_repo_dbs` with a custom pacman.conf that points
+    /// `[deploytix]` at a local directory should replace the stale
+    /// host symlink with one pointing at the fresh repo's `.db`.
+    #[test]
+    fn overlay_replaces_stale_host_repo_db_with_local_file_repo_db() {
+        // Fake host sync containing a stale deploytix.db.
+        let fake_host = ScratchDir::new("deploytix-preflight-stalehost-").unwrap();
+        let fake_sync = fake_host.path().join("sync");
+        std::fs::create_dir_all(&fake_sync).unwrap();
+        let stale_db = fake_sync.join("deploytix.db");
+        std::fs::write(&stale_db, b"STALE").unwrap();
+
+        // Fresh local file:// repo with the up-to-date deploytix.db.
+        let local_repo = ScratchDir::new("deploytix-preflight-localrepo-").unwrap();
+        let fresh_db = local_repo.path().join("deploytix.db");
+        std::fs::write(&fresh_db, b"FRESH").unwrap();
+
+        // Custom pacman.conf declaring [deploytix] -> file://<local_repo>.
+        let conf_dir = ScratchDir::new("deploytix-preflight-conf-").unwrap();
+        let conf_path = conf_dir.path().join("pacman.conf");
+        let conf_body = format!(
+            "[options]\nHoldPkg = pacman glibc\n\n[deploytix]\nSigLevel = Optional TrustAll\nServer = file://{}\n",
+            local_repo.path().display()
+        );
+        std::fs::write(&conf_path, conf_body).unwrap();
+
+        // Prep scratch (now per-file symlinks) then overlay.
+        let scratch =
+            prepare_host_scratch_dbpath(&fake_sync).expect("scratch dbpath should be prepared");
+        let scratch_db = scratch.path().join("sync").join("deploytix.db");
+        // Pre-overlay: the symlink resolves to the stale host db.
+        assert_eq!(
+            std::fs::read_link(&scratch_db).unwrap(),
+            stale_db,
+            "prep must mirror the host sync entries before overlay runs"
+        );
+
+        overlay_local_repo_dbs(scratch.path(), Some(conf_path.to_str().unwrap()));
+
+        // Post-overlay: the symlink points at the fresh local repo db.
+        let post = std::fs::read_link(&scratch_db).unwrap();
+        assert_eq!(
+            post, fresh_db,
+            "overlay must replace the stale host symlink with one pointing at the local file:// repo"
+        );
+        // And reading through the symlink yields the fresh contents,
+        // not the stale ones.
+        assert_eq!(std::fs::read(&scratch_db).unwrap(), b"FRESH");
+    }
+
+    /// `parse_local_file_repos` must return only `Server = file://`
+    /// repos, ignore the `[options]` section, and skip non-file
+    /// schemes (`http`, `https`).
+    #[test]
+    fn parse_local_file_repos_filters_to_file_scheme_outside_options() {
+        let conf_dir = ScratchDir::new("deploytix-preflight-parse-").unwrap();
+        let conf_path = conf_dir.path().join("pacman.conf");
+        std::fs::write(
+                &conf_path,
+                concat!(
+                    "[options]\n",
+                    "Server = file:///etc/should-be-ignored\n",
+                    "\n",
+                    "[core]\n",
+                    "Server = https://mirror.example.com/$repo/$arch\n",
+                    "\n",
+                    "# inline comment\n",
+                    "[deploytix]\n",
+                    "SigLevel = Optional TrustAll\n",
+                    "Server = file:///tmp/deploytix-local-repo\n",
+                ),
+            )
+            .unwrap();
+
+        let repos = parse_local_file_repos(conf_path.to_str().unwrap());
+        assert_eq!(repos.len(), 1, "expected exactly one local file:// repo, got {:?}", repos);
+        assert_eq!(repos[0].0, "deploytix");
+        assert_eq!(repos[0].1, PathBuf::from("/tmp/deploytix-local-repo"));
     }
 
     /// Bug fix #1: when the supplied host sync directory does not

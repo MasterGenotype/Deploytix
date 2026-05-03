@@ -49,6 +49,13 @@ MODULAR_REPO_URL="https://github.com/MasterGenotype/Modular-1.git"
 MODULAR_LOCAL_DIR=""   # Resolved to sibling repo if present
 MODULAR_CLONE_DIR=""
 MODULAR_PKG_DIR=""
+# Gamescope (Bazzite fork). The pkg/PKGBUILD is NOT tracked in the
+# upstream bazzite-org/gamescope repository, so we cannot fall back to
+# an automatic clone like we do for tkg-gui / Modular. The script
+# requires a sibling checkout at <repo-root>/../gamescope/pkg/PKGBUILD.
+GAMESCOPE_REPO_URL="https://github.com/bazzite-org/gamescope"
+GAMESCOPE_LOCAL_DIR=""
+GAMESCOPE_PKG_DIR=""
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -131,6 +138,8 @@ resolve_paths() {
     else
         MODULAR_PKG_DIR="${MODULAR_CLONE_DIR}/pkg"
     fi
+    GAMESCOPE_LOCAL_DIR="$(dirname "${REPO_ROOT}")/gamescope"
+    GAMESCOPE_PKG_DIR="${GAMESCOPE_LOCAL_DIR}/pkg"
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -280,9 +289,12 @@ build_packages() {
         if [[ -n "${MODULAR_PKG_DIR}" && -d "${MODULAR_PKG_DIR}" ]]; then
             count=$(( count + $(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
         fi
+        if [[ -n "${GAMESCOPE_PKG_DIR}" && -d "${GAMESCOPE_PKG_DIR}" ]]; then
+            count=$(( count + $(find "${GAMESCOPE_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        fi
 
         if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, or ${MODULAR_PKG_DIR}/ and -s (skip rebuild) was set"
+            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, ${MODULAR_PKG_DIR}/, or ${GAMESCOPE_PKG_DIR}/ and -s (skip rebuild) was set"
         fi
 
         msg "Skipping package build (-s); reusing existing packages"
@@ -309,6 +321,7 @@ build_packages() {
 
     build_tkg_gui_packages
     build_modular_packages
+    build_gamescope_packages
 }
 
 build_tkg_gui_packages() {
@@ -377,6 +390,34 @@ build_modular_packages() {
     msg2 "Built ${count} Modular package(s)"
 }
 
+build_gamescope_packages() {
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would build gamescope from ${GAMESCOPE_PKG_DIR}"
+        return 0
+    fi
+
+    msg "Building gamescope packages..."
+
+    if [[ ! -f "${GAMESCOPE_PKG_DIR}/PKGBUILD" ]]; then
+        die "gamescope pkg/PKGBUILD not found at ${GAMESCOPE_PKG_DIR}/PKGBUILD
+  The PKGBUILD is not tracked in ${GAMESCOPE_REPO_URL} upstream; it must
+  exist in a sibling checkout at ${GAMESCOPE_LOCAL_DIR}.
+  Clone the upstream there and place a pkg/PKGBUILD, or copy from another
+  working deploytix checkout."
+    fi
+
+    msg2 "Using local gamescope repo at ${GAMESCOPE_LOCAL_DIR}"
+
+    pushd "${GAMESCOPE_PKG_DIR}" >/dev/null
+    makepkg -sf --noconfirm
+    popd >/dev/null
+
+    local count
+    count=$(find "${GAMESCOPE_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
+    (( count > 0 )) || die "makepkg produced no gamescope packages"
+    msg2 "Built ${count} gamescope package(s)"
+}
+
 # ── Step C: Create local pacman repository ───────────────────────────────────
 create_local_repo() {
     msg "Creating local pacman repository..."
@@ -393,7 +434,7 @@ create_local_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
@@ -570,7 +611,7 @@ generate_gui_profile() {
 
     cp "$de_profile" "$dest/profile.yaml"
 
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git"]' "$dest/profile.yaml"
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
@@ -594,7 +635,7 @@ embed_live_repo() {
     local pkg_count=0
     local src_dir pkg
 
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue

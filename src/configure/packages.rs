@@ -15,10 +15,160 @@
 
 use crate::config::{DeploymentConfig, GpuDriverVendor};
 use crate::utils::command::CommandRunner;
-use crate::utils::error::Result;
+use crate::utils::error::{DeploytixError, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use tracing::info;
+use tracing::{info, warn};
+
+// ======================== Signature-error recovery ========================
+
+/// Check whether a pacman stderr message indicates a package signature
+/// verification failure (as opposed to a network error, missing target,
+/// or conflict).
+fn is_signature_error(stderr: &str) -> bool {
+    // "signature from … is invalid" — key rotation or stale keyring
+    // "signature is unknown trust" — key not in the keyring at all
+    // "invalid or corrupted package" — always accompanies sig failures
+    // "key … could not be looked up remotely" — missing key
+    // "required key missing" — key not imported
+    (stderr.contains("is invalid") && stderr.contains("signature from"))
+        || stderr.contains("signature is unknown trust")
+        || stderr.contains("required key missing")
+        || stderr.contains("could not be looked up remotely")
+}
+
+/// Chroot-relative path for the relaxed-SigLevel pacman.conf.
+/// Must NOT be under /tmp — artix-chroot mounts a fresh tmpfs there
+/// on each invocation, so files written from the host side are masked.
+const SIG_BYPASS_CONF: &str = "/etc/deploytix-siglevel.conf";
+
+/// Write a temporary pacman.conf inside the chroot that mirrors the
+/// real one but sets `SigLevel = Optional TrustAll` so that packages
+/// with broken/mismatched signatures can still be installed.
+fn write_relaxed_pacman_conf(install_root: &str) -> Result<()> {
+    let real_conf_path = format!("{}/etc/pacman.conf", install_root);
+    let contents = std::fs::read_to_string(&real_conf_path).map_err(DeploytixError::Io)?;
+
+    // Replace every SigLevel directive with a permissive one, and
+    // inject a global override at the top of [options].
+    let mut out = String::with_capacity(contents.len() + 128);
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("SigLevel") && !trimmed.starts_with('#') {
+            out.push_str("SigLevel = Optional TrustAll\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    let dest = format!("{}{}", install_root, SIG_BYPASS_CONF);
+    std::fs::write(&dest, &out).map_err(DeploytixError::Io)?;
+    Ok(())
+}
+
+/// Remove the temporary relaxed pacman.conf from the chroot.
+fn remove_relaxed_pacman_conf(install_root: &str) {
+    let dest = format!("{}{}", install_root, SIG_BYPASS_CONF);
+    let _ = std::fs::remove_file(&dest);
+}
+
+/// Rewrite `pacman_cmd` to use `--config <SIG_BYPASS_CONF>`.
+///
+/// Handles both `pacman -S …` and `pacman -Sy …` forms.
+fn inject_config_flag(pacman_cmd: &str) -> String {
+    // Insert `--config <path>` right after `pacman`.
+    if let Some(rest) = pacman_cmd.strip_prefix("pacman ") {
+        format!("pacman --config {} {}", SIG_BYPASS_CONF, rest)
+    } else {
+        // Shouldn't happen, but be safe.
+        pacman_cmd.to_string()
+    }
+}
+
+/// Run a `pacman -S …` (or similar) command inside the chroot, retrying
+/// after a keyring refresh if the first attempt fails with a package
+/// signature error.  If the keyring refresh doesn't help (the mirror
+/// genuinely serves a mis-signed package), falls back to a final retry
+/// with `SigLevel = Optional TrustAll`.
+///
+/// Recovery sequence on signature failure:
+///  1. Clear the pacman package cache so the corrupt / invalid download
+///     is not reused on the retry.
+///  2. Re-init the GPG keyring.
+///  3. Update the `artix-keyring` package (the installed version may
+///     predate a key rotation).
+///  4. `pacman-key --populate` with the now-updated keyring.
+///  5. Retry the original command.
+///  6. If still a signature error: retry once more with relaxed
+///     SigLevel (last resort for mirror-side signing issues).
+///
+/// This is the single call-site for every chroot pacman install in the
+/// codebase.  Call sites that previously did
+/// `cmd.run_in_chroot(root, &install_cmd)?` should use this instead.
+pub(crate) fn pacman_install_chroot(
+    cmd: &CommandRunner,
+    install_root: &str,
+    pacman_cmd: &str,
+) -> Result<()> {
+    match cmd.run_in_chroot(install_root, pacman_cmd) {
+        Ok(_) => return Ok(()),
+        Err(DeploytixError::CommandFailed { ref stderr, .. }) if is_signature_error(stderr) => {
+            warn!(
+                "pacman signature verification failed; refreshing keyring and retrying: {}",
+                stderr.lines().next().unwrap_or("(no details)")
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // --- Keyring refresh retry ---
+
+    // 1. Wipe the package cache so the bad download is not reused.
+    let _ = cmd.run_in_chroot(install_root, "pacman -Scc --noconfirm");
+
+    // 2. Re-init the keyring.
+    cmd.run_in_chroot(install_root, "pacman-key --init")?;
+
+    // 3. Pull the latest keyring package (best-effort).
+    let _ = cmd.run_in_chroot(
+        install_root,
+        "pacman -Sy --noconfirm artix-keyring",
+    );
+
+    // 4. Populate with updated keys.
+    cmd.run_in_chroot(install_root, "pacman-key --populate artix")?;
+    // If the Arch keyring is installed, refresh that too.
+    let _ = cmd.run_in_chroot(install_root, "pacman-key --populate archlinux");
+
+    // 5. Retry with refreshed keyring.
+    match cmd.run_in_chroot(install_root, pacman_cmd) {
+        Ok(_) => return Ok(()),
+        Err(DeploytixError::CommandFailed { ref stderr, .. }) if is_signature_error(stderr) => {
+            warn!(
+                "Signature error persists after keyring refresh; \
+                 retrying with relaxed SigLevel as last resort: {}",
+                stderr.lines().next().unwrap_or("(no details)")
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // --- Last-resort: relaxed SigLevel ---
+
+    // 6. Clear cache again (the re-download above cached the same bad
+    //    package), write a permissive pacman.conf, retry, clean up.
+    let _ = cmd.run_in_chroot(install_root, "pacman -Scc --noconfirm");
+    write_relaxed_pacman_conf(install_root)?;
+
+    let relaxed_cmd = inject_config_flag(pacman_cmd);
+    let result = cmd.run_in_chroot(install_root, &relaxed_cmd);
+
+    remove_relaxed_pacman_conf(install_root);
+
+    result?;
+    Ok(())
+}
 
 // ======================== GPU Driver Packages ========================
 
@@ -98,7 +248,7 @@ pub fn install_gpu_drivers(
     let _ =
         crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     info!("GPU driver installation complete");
     Ok(())
@@ -128,7 +278,8 @@ fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Resul
         &["artix-archlinux-support".to_string()],
         cmd.is_dry_run(),
     );
-    cmd.run_in_chroot(
+    pacman_install_chroot(
+        cmd,
         install_root,
         "pacman -S --noconfirm --needed artix-archlinux-support",
     )?;
@@ -213,7 +364,7 @@ pub fn install_wine_packages(
     let _ =
         crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     info!("Wine installation complete");
     Ok(())
@@ -223,66 +374,12 @@ pub fn install_wine_packages(
 
 /// Packages installed via pacman for the gaming path.
 ///
-/// Note: `gamescope` is intentionally absent — the Artix/Arch repo build has
-/// long-standing issues on handheld hardware.  We build gamescope from the
-/// Bazzite-maintained fork (`github.com/bazzite-org/gamescope`) in
-/// [`build_bazzite_gamescope`] and install it into `/usr/bin/gamescope`,
-/// replacing the distro copy.
+/// `gamescope-git` (Bazzite fork) is installed during basestrap from the
+/// custom [deploytix] repository — its runtime deps are declared in the
+/// PKGBUILD and pulled in automatically by pacman, so they are not listed
+/// here.  Steam is installed in the chroot phase because it requires the
+/// [lib32] repo which is enabled here.
 const GAMING_PACKAGES: &[&str] = &["steam"];
-
-/// Runtime libraries gamescope links against at runtime. These are the
-/// dependencies listed by the Artix `gamescope` package; we install them
-/// directly since we are not pulling in the packaged gamescope itself.
-const GAMESCOPE_RUNTIME_DEPS: &[&str] = &[
-    "lcms2",
-    "libavif",
-    "libcap",
-    "libdecor",
-    "libdrm",
-    "libei",
-    "libinput",
-    "libpipewire",
-    "libx11",
-    "libxcb",
-    "libxcomposite",
-    "libxcursor",
-    "libxdamage",
-    "libxext",
-    "libxfixes",
-    "libxi",
-    "libxkbcommon",
-    "libxmu",
-    "libxrender",
-    "libxres",
-    "libxtst",
-    "libxxf86vm",
-    "luajit",
-    "pixman",
-    "sdl2",
-    "seatd",
-    "vulkan-icd-loader",
-    "wayland",
-    "xcb-util-errors",
-    "xcb-util-wm",
-    "xorg-server-xwayland",
-];
-
-/// Build-time tools and headers required to compile the Bazzite gamescope
-/// fork from source inside the chroot.
-const GAMESCOPE_BUILD_DEPS: &[&str] = &[
-    "git",
-    "meson",
-    "ninja",
-    "cmake",
-    "glslang",
-    "pkgconf",
-    "wayland-protocols",
-    "vulkan-headers",
-    "xorgproto",
-    "hwdata",
-    "stb",
-    "benchmark",
-];
 
 /// Enable the [lib32] repository in the chroot's pacman.conf.
 ///
@@ -326,15 +423,12 @@ fn lib32_vulkan_packages(config: &DeploymentConfig) -> Vec<&'static str> {
     pkgs
 }
 
-/// Install gaming packages via pacman in chroot, then build the Bazzite
-/// gamescope fork from source into `/usr/bin/gamescope`.
+/// Install gaming packages via pacman in chroot.
 ///
 /// 1. Enables the `[lib32]` repository (required for Steam's 32-bit deps).
 /// 2. Installs the appropriate `lib32-*` Vulkan driver for every selected GPU.
-/// 3. Installs Steam + gamescope's runtime library dependencies.
-/// 4. Builds gamescope from `github.com/bazzite-org/gamescope` and installs
-///    it with `meson install --prefix=/usr`, replacing any pre-existing
-///    `/usr/bin/gamescope`.
+/// 3. Installs Steam (gamescope-git is already installed during basestrap
+///    from the custom [deploytix] repository).
 pub fn install_gaming_packages(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
@@ -358,18 +452,6 @@ pub fn install_gaming_packages(
             "  [dry-run] Would install gaming packages: {:?}",
             GAMING_PACKAGES
         );
-        println!(
-            "  [dry-run] Would install gamescope runtime deps: {:?}",
-            GAMESCOPE_RUNTIME_DEPS
-        );
-        println!(
-            "  [dry-run] Would install gamescope build deps: {:?}",
-            GAMESCOPE_BUILD_DEPS
-        );
-        println!(
-            "  [dry-run] Would clone and build github.com/bazzite-org/gamescope as {}",
-            config.user.name
-        );
         return Ok(());
     }
 
@@ -387,90 +469,18 @@ pub fn install_gaming_packages(
             cmd.is_dry_run(),
         );
         let vulkan_cmd = format!("pacman -S --noconfirm --needed {}", vulkan_list);
-        cmd.run_in_chroot(install_root, &vulkan_cmd)?;
+        pacman_install_chroot(cmd, install_root, &vulkan_cmd)?;
     }
 
-    // Step 3: Install Steam + gamescope runtime dependencies (we do not
-    // install the packaged gamescope — we build the Bazzite fork in step 4).
-    let mut packages: Vec<&str> = Vec::new();
-    packages.extend(GAMING_PACKAGES);
-    packages.extend(GAMESCOPE_RUNTIME_DEPS);
-    let pkg_list = packages.join(" ");
-    let pkg_strings: Vec<String> = packages.iter().map(|s| (*s).to_string()).collect();
+    // Step 3: Install Steam
+    let pkg_list = GAMING_PACKAGES.join(" ");
+    let pkg_strings: Vec<String> = GAMING_PACKAGES.iter().map(|s| (*s).to_string()).collect();
     let _ =
         crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    cmd.run_in_chroot(install_root, &install_cmd)?;
-
-    // Step 4: Build gamescope from the Bazzite-maintained source
-    build_bazzite_gamescope(cmd, config, install_root)?;
+    pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     info!("Gaming package installation complete");
-    Ok(())
-}
-
-/// Clone and build gamescope from the Bazzite-maintained fork, then install
-/// it with `meson install --prefix=/usr`, overwriting any stock
-/// `/usr/bin/gamescope`.
-///
-/// The clone, submodule init, and meson build run as the target user (via
-/// `sudo -u`) so that the source checkout is owned by the user, not root.
-/// `meson install` is invoked as root since writing under `/usr` requires
-/// elevated privileges.
-fn build_bazzite_gamescope(
-    cmd: &CommandRunner,
-    config: &DeploymentConfig,
-    install_root: &str,
-) -> Result<()> {
-    let username = &config.user.name;
-
-    info!(
-        "Building gamescope from bazzite-org/gamescope fork as {}",
-        username
-    );
-
-    // Ensure build tool chain is present inside the chroot.
-    let build_deps = GAMESCOPE_BUILD_DEPS.join(" ");
-    let mut build_pkgs: Vec<String> = vec!["base-devel".to_string()];
-    build_pkgs.extend(GAMESCOPE_BUILD_DEPS.iter().map(|s| (*s).to_string()));
-    let _ =
-        crate::pkgdeps::preflight::preflight_chroot(install_root, &build_pkgs, cmd.is_dry_run());
-    cmd.run_in_chroot(
-        install_root,
-        &format!("pacman -S --noconfirm --needed base-devel {build_deps}"),
-    )?;
-
-    // Clone, update submodules, configure, build, and install. The whole
-    // thing runs inside a single chroot invocation so /tmp state persists
-    // across commands (artix-chroot mounts a fresh tmpfs on each call).
-    //
-    // `meson install --skip-subprojects` is the upstream-recommended install
-    // incantation — bundled libs live under subprojects/ and don't belong in
-    // /usr/{bin,lib}.  We still need root for the install step.
-    let build_script = format!(
-        "set -e; \
-         rm -rf /tmp/gamescope-build; \
-         mkdir -p /tmp/gamescope-build; \
-         chown {user}:{user} /tmp/gamescope-build; \
-         sudo -u {user} bash -c '\
-           set -e; \
-           cd /tmp/gamescope-build && \
-           git clone --depth=1 https://github.com/bazzite-org/gamescope gamescope && \
-           cd gamescope && \
-           git submodule update --init --recursive --depth=1 && \
-           meson setup build \
-             --prefix=/usr \
-             --buildtype=release \
-             -Dpipewire=enabled && \
-           ninja -C build'; \
-         meson install -C /tmp/gamescope-build/gamescope/build --skip-subprojects; \
-         rm -rf /tmp/gamescope-build",
-        user = username
-    );
-
-    cmd.run_in_chroot(install_root, &build_script)?;
-
-    info!("Bazzite gamescope installed to /usr/bin/gamescope");
     Ok(())
 }
 
@@ -515,7 +525,8 @@ pub fn install_yay(
         &yay_build_deps,
         cmd.is_dry_run(),
     );
-    cmd.run_in_chroot(
+    pacman_install_chroot(
+        cmd,
         install_root,
         "pacman -S --noconfirm --needed go git base-devel",
     )?;

@@ -7,19 +7,16 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-mod cleanup;
-mod config;
-mod configure;
-mod desktop;
-mod disk;
-mod install;
-mod pkgdeps;
-mod resources;
-mod utils;
-
-use crate::config::DeploymentConfig;
-use crate::pkgdeps::cli as deps_cli;
-use crate::utils::error::DeploytixError;
+// Consume from the `deploytix` library crate rather than redeclaring
+// every module in this binary. This avoids compiling the entire source
+// tree twice and lets the library's public API surface (e.g. the
+// `pkgdeps` types referenced by `tests/*_integration.rs`) count as
+// genuinely used, instead of being flagged as dead code in the binary's
+// private copy of the module tree.
+use deploytix::{cleanup, config, desktop, disk, install, resources};
+use deploytix::config::DeploymentConfig;
+use deploytix::pkgdeps::cli as deps_cli;
+use deploytix::utils::error::DeploytixError;
 
 #[derive(clap::Args, Debug, Clone, Default)]
 struct DepsCommonArgs {
@@ -261,7 +258,7 @@ fn main() -> Result<()> {
 }
 
 fn cmd_install(config_path: Option<String>, device: Option<String>, dry_run: bool) -> Result<()> {
-    use crate::install::Installer;
+    use install::Installer;
 
     // Check for root privileges
     if !nix::unistd::geteuid().is_root() {
@@ -288,7 +285,7 @@ fn cmd_install(config_path: Option<String>, device: Option<String>, dry_run: boo
 }
 
 fn cmd_list_disks(all: bool) -> Result<()> {
-    use crate::disk::detection::list_block_devices;
+    use disk::detection::list_block_devices;
 
     let devices = list_block_devices(all)?;
 
@@ -329,7 +326,7 @@ fn cmd_generate_config(output: &str) -> Result<()> {
 }
 
 fn cmd_cleanup(device: Option<String>, wipe: bool, dry_run: bool) -> Result<()> {
-    use crate::cleanup::Cleaner;
+    use cleanup::Cleaner;
 
     if !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
@@ -346,8 +343,8 @@ fn cmd_generate_desktop_file(
     bindir: Option<String>,
     output: String,
 ) -> Result<()> {
-    use crate::config::DesktopEnvironment;
-    use crate::desktop::generate_desktop_file;
+    use config::DesktopEnvironment;
+    use desktop::generate_desktop_file;
 
     // Detect desktop environment if not specified
     let desktop_env = if let Some(de_str) = de {

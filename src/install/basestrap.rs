@@ -185,6 +185,13 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("modular-git".to_string());
     }
 
+    // Gamescope (Bazzite fork, pre-built) — installed via basestrap so the
+    // custom [deploytix] repo is available.  Runtime dependencies are
+    // declared in the PKGBUILD and pulled in automatically by pacman.
+    if config.packages.install_gaming {
+        packages.push("gamescope-git".to_string());
+    }
+
     // Decky Loader is installed from the `decky-loader-bin` AUR package in
     // a later phase (yay handles the download); no extra basestrap packages
     // are needed for it.
@@ -219,6 +226,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 const CUSTOM_PKG_PREFIXES: &[&str] = &[
     "deploytix-git-",
     "deploytix-gui-git-",
+    "gamescope-git-",
     "tkg-gui-git-",
     "modular-git-",
 ];
@@ -227,6 +235,7 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
 const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "deploytix-git",
     "deploytix-gui-git",
+    "gamescope-git",
     "tkg-gui-git",
     "modular-git",
 ];
@@ -322,7 +331,7 @@ fn custom_packages_in_sync_db(needed: &[&str]) -> bool {
 ///
 /// The installer runs as root, either via `sudo` (sets `SUDO_USER`) or
 /// `pkexec`/polkit (sets `PKEXEC_UID`).  This function tries both and
-/// falls back to scanning `/home` for a Deploytix checkout.
+/// falls back to scanning `/home` for a deploytix checkout.
 fn resolve_invoking_user_home() -> Option<PathBuf> {
     // 1. SUDO_USER — set by sudo.
     if let Ok(user) = std::env::var("SUDO_USER") {
@@ -341,11 +350,18 @@ fn resolve_invoking_user_home() -> Option<PathBuf> {
         }
     }
 
-    // 3. Scan /home for a directory containing .gitrepos/Deploytix/pkg.
+    // 3. Scan /home for a directory containing a deploytix checkout.
+    let scan_markers = [
+        ".gitrepos/deploytix-2/pkg",
+        ".gitrepos/gamescope/pkg",
+    ];
     if let Ok(entries) = std::fs::read_dir("/home") {
         for entry in entries.flatten() {
             let candidate = entry.path();
-            if candidate.join(".gitrepos/Deploytix/pkg").is_dir() {
+            if scan_markers
+                .iter()
+                .any(|m| candidate.join(m).is_dir())
+            {
                 return Some(candidate);
             }
         }
@@ -387,8 +403,9 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
-            // Sibling tkg-gui and Modular-1 repos.
+            // Sibling repos.
             if let Some(parent) = repo_root.parent() {
+                search_dirs.push(parent.join("gamescope/pkg"));
                 search_dirs.push(parent.join("tkg-gui/pkg"));
                 search_dirs.push(parent.join("Modular-1/pkg"));
             }
@@ -396,11 +413,20 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     }
 
     // 2. Invoking user's home (works for both sudo and pkexec/polkit).
-    if let Some(home) = resolve_invoking_user_home() {
-        search_dirs.push(home.join(".gitrepos/Deploytix/pkg"));
+    let invoking_home = resolve_invoking_user_home();
+    if let Some(ref home) = invoking_home {
+        info!("Resolved invoking user home: {}", home.display());
+        search_dirs.push(home.join(".gitrepos/deploytix-2/pkg"));
+        search_dirs.push(home.join(".gitrepos/gamescope/pkg"));
         search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
         search_dirs.push(home.join(".gitrepos/Modular-1/pkg"));
         search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
+    } else {
+        warn!(
+            "Could not resolve invoking user home (SUDO_USER={:?}, PKEXEC_UID={:?})",
+            std::env::var("SUDO_USER").ok(),
+            std::env::var("PKEXEC_UID").ok(),
+        );
     }
 
     // 3. Current working directory (might be repo root).
@@ -413,14 +439,23 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     // 5. Local artools repo that build-deploytix-iso.sh creates.
     search_dirs.push(PathBuf::from("/var/lib/artools/repos/deploytix"));
 
+    info!(
+        "Package search directories: {:?}",
+        search_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>()
+    );
+
     let mut found = Vec::new();
     let mut seen_names = HashSet::new();
 
     for dir in &search_dirs {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                info!("  {} — not found / unreadable", dir.display());
+                continue;
+            }
         };
+        info!("  {} — scanning", dir.display());
         for entry in entries.flatten() {
             let path = entry.path();
             let name = match path.file_name().and_then(|n| n.to_str()) {
@@ -433,7 +468,8 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             let is_custom = CUSTOM_PKG_PREFIXES
                 .iter()
                 .any(|prefix| name.starts_with(prefix));
-            if is_custom && seen_names.insert(name) {
+            if is_custom && seen_names.insert(name.clone()) {
+                info!("    Found: {}", path.display());
                 found.push(path);
             }
         }
@@ -448,7 +484,8 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
 /// contains its PKGBUILD.
 fn repo_dir_for_package(pkg_name: &str) -> &'static str {
     match pkg_name {
-        "deploytix-git" | "deploytix-gui-git" => "Deploytix",
+        "deploytix-git" | "deploytix-gui-git" => "deploytix-2",
+        "gamescope-git" => "gamescope",
         "tkg-gui-git" => "tkg-gui",
         "modular-git" => "Modular-1",
         _ => "",
@@ -472,7 +509,7 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
         {
-            if repo_name == "Deploytix" {
+            if repo_name == "deploytix-2" {
                 candidates.push(repo_root.join("pkg"));
             } else if let Some(parent) = repo_root.parent() {
                 candidates.push(parent.join(repo_name).join("pkg"));
@@ -488,8 +525,8 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
         }
     }
 
-    // CWD for Deploytix itself.
-    if repo_name == "Deploytix" {
+    // CWD for deploytix itself.
+    if repo_name == "deploytix-2" {
         candidates.push(PathBuf::from("pkg"));
     }
 
@@ -932,12 +969,31 @@ pub fn run_basestrap_with_retries(
     // conflict-driven removals before basestrap starts downloading
     // anything. Best-effort — failures here only log; basestrap itself
     // is the source of truth.
-    let _report = pkg_preflight::preflight_host(
+    let report = pkg_preflight::preflight_host(
         custom_conf.as_deref(),
         install_root,
         &packages,
         cmd.is_dry_run(),
     )?;
+    if report.skipped {
+        info!(
+            "Preflight skipped (dry-run, missing pacman tooling, or empty sync DB); \
+             deferring to basestrap for resolution"
+        );
+    } else if !report.is_resolvable() {
+        warn!(
+            "Preflight reported {} unresolvable target(s): {}. basestrap is likely to \
+             fail with `target not found`; continuing anyway since basestrap is the \
+             ultimate authority on resolution.",
+            report.unresolved.len(),
+            report.unresolved.join(", ")
+        );
+    } else {
+        info!(
+            "Preflight resolved {} package(s) cleanly",
+            report.planned_install_count
+        );
+    }
 
     info!(
         "Installing {} packages with basestrap to {}",

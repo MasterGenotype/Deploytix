@@ -34,7 +34,7 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     all_pkgs.push(lightdm_service.clone());
     let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &all_pkgs, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, lightdm_service);
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     // Create .xinitrc for startx fallback
     let username = &config.user.name;

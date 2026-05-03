@@ -12,7 +12,10 @@ fn artix_universe() -> MockSource {
     let mut s = MockSource::default();
     s.set_databases(vec!["system".into(), "world".into(), "extra".into()]);
 
-    // base depends on glibc and pacman; pacman depends on libalpm.
+    // Realistic Artix-ish dep graph: every C package transitively depends on
+    // glibc, mirroring how `pacman -Si` actually reports things on a real
+    // system. Without these glibc edges the closures look unnaturally sparse
+    // and miss the most important transitive dep in the universe.
     let mut base = Package::new("base", "1.0", "system");
     base.depends = vec![Dep::parse("glibc>=2.39"), Dep::parse("pacman")];
     base.optdepends = vec![Dep::parse("man-db: read manpages")];
@@ -22,14 +25,15 @@ fn artix_universe() -> MockSource {
     s.insert(glibc);
 
     let mut pacman = Package::new("pacman", "6.1.0-1", "system");
-    pacman.depends = vec![Dep::parse("libalpm")];
+    pacman.depends = vec![Dep::parse("glibc>=2.39"), Dep::parse("libalpm")];
     pacman.makedepends = vec![Dep::parse("meson")];
     pacman.checkdepends = vec![Dep::parse("python-pytest")];
     pacman.conflicts = vec![Dep::parse("pacman-mirrorlist")];
     pacman.replaces = vec![Dep::parse("pacman-contrib<1.0")];
     s.insert(pacman);
 
-    let libalpm = Package::new("libalpm", "13.0", "system");
+    let mut libalpm = Package::new("libalpm", "13.0", "system");
+    libalpm.depends = vec![Dep::parse("glibc>=2.39")];
     s.insert(libalpm);
 
     let meson = Package::new("meson", "1.4", "extra");

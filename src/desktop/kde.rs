@@ -85,7 +85,7 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &all_pkgs, cmd.is_dry_run());
 
     let install_cmd = format!("pacman -S --noconfirm {}", all_pkgs.join(" "));
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     // Configure SDDM (skip when session switching uses greetd instead)
     if !use_session_switching {
