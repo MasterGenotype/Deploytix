@@ -13,6 +13,38 @@ pub struct AudioHandle {
     _sink: rodio::Sink,
 }
 
+/// Install a no-op ALSA error handler to suppress PCM underrun spam.
+///
+/// During heavy disk I/O the audio buffer starves, causing ALSA's default
+/// handler to print "underrun occurred" to stderr on every glitch. A no-op
+/// handler silences the output without changing ALSA's recovery behaviour.
+/// libasound is already in the link path via rodio → cpal → alsa-sys.
+#[cfg(target_os = "linux")]
+fn suppress_alsa_errors() {
+    use std::ffi::{c_char, c_int};
+
+    type AlsaHandler =
+        unsafe extern "C" fn(*const c_char, c_int, *const c_char, c_int, *const c_char);
+
+    unsafe extern "C" fn noop(
+        _: *const c_char,
+        _: c_int,
+        _: *const c_char,
+        _: c_int,
+        _: *const c_char,
+    ) {
+    }
+
+    extern "C" {
+        fn snd_lib_error_set_handler(handler: Option<AlsaHandler>);
+    }
+
+    unsafe { snd_lib_error_set_handler(Some(noop)) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn suppress_alsa_errors() {}
+
 /// Ensure the audio server is reachable when running as root via sudo/pkexec.
 ///
 /// PipeWire and PulseAudio live in the invoking user's XDG_RUNTIME_DIR.
@@ -47,6 +79,7 @@ fn ensure_audio_env() {
 /// Returns a handle that must be kept alive for playback to continue.
 /// Returns `None` if audio initialization fails (e.g., no audio device).
 pub fn play_theme_loop() -> Option<AudioHandle> {
+    suppress_alsa_errors();
     ensure_audio_env();
 
     let (stream, stream_handle) = match rodio::OutputStream::try_default() {
