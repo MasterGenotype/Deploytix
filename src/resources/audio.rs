@@ -21,6 +21,15 @@ pub struct AudioHandle {
 fn ensure_audio_env() {
     use nix::unistd::Uid;
 
+    // Suppress libasound diagnostic messages (e.g. "unable to open slave",
+    // "underrun occurred") that are emitted to stderr by ALSA's C layer
+    // before rodio can even attempt to open a device.  These are harmless
+    // on the live ISO where PipeWire may not be the default ALSA plugin
+    // and alsa-utils may not be installed.
+    if std::env::var_os("ALSA_LOG_LEVEL").is_none() {
+        std::env::set_var("ALSA_LOG_LEVEL", "0");
+    }
+
     if !Uid::effective().is_root() {
         return;
     }

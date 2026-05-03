@@ -1,0 +1,81 @@
+[disk]
+device = "/dev/nvme0n1"
+filesystem = "btrfs"
+boot_filesystem = "btrfs"
+encryption = true
+encryption_password = "Herring tomato pear banana tomato head penis suck me"
+luks_mapper_name = "Crypt-Root"
+boot_encryption = false
+luks_boot_mapper_name = "Crypt-Boot"
+integrity = true
+keyfile_enabled = true
+use_subvolumes = true
+use_lvm_thin = false
+lvm_vg_name = "vg0"
+lvm_thin_pool_name = "thinpool"
+lvm_thin_pool_percent = 95
+swap_type = "zramonly"
+swap_file_size_mib = 0
+zram_percent = 15
+zram_algorithm = "zstd"
+preserve_home = false
+
+[[disk.partitions]]
+mount_point = "/"
+size_mib = 92160
+
+[[disk.partitions]]
+mount_point = "/usr"
+size_mib = 122880
+
+[[disk.partitions]]
+mount_point = "/var"
+size_mib = 81920
+
+[[disk.partitions]]
+mount_point = "/home"
+size_mib = 0
+
+[system]
+init = "runit"
+bootloader = "grub"
+timezone = "America/Vancouver"
+locale = "en_US.UTF-8"
+keymap = "us"
+hostname = "artix"
+hibernation = false
+secureboot = true
+secureboot_method = "sbctl"
+
+[user]
+name = "superphenotype"
+password = "angel"
+groups = [
+    "wheel",
+    "video",
+    "audio",
+    "network",
+    "log",
+    "seat",
+]
+sudoer = true
+
+[network]
+backend = "networkmanager"
+
+[desktop]
+environment = "kde"
+
+[packages]
+install_yay = true
+install_wine = true
+install_gaming = true
+install_session_switching = true
+install_btrfs_tools = true
+install_modular = true
+sysctl_gaming_tweaks = true
+sysctl_network_performance = true
+install_hhd = true
+install_decky_loader = true
+install_evdevhook2 = true
+gpu_drivers = ["amd"]

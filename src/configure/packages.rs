@@ -296,14 +296,14 @@ fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Resul
     if !conf_content.lines().any(|line| line.trim() == "[extra]") {
         info!("Adding Arch [extra] repository to chroot pacman.conf");
 
-        // artix-archlinux-support installs the mirrorlist at this path
-        // inside the chroot.
-        let mirrorlist = format!("{}/etc/pacman.d/mirrorlist-arch", install_root);
-        let mirror_entry = if std::path::Path::new(&mirrorlist).exists() {
-            "Include = /etc/pacman.d/mirrorlist-arch".to_string()
-        } else {
-            "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch".to_string()
-        };
+        // Always use a direct Server URL rather than Include = mirrorlist-arch.
+        // The chroot preflight runs host-side pacman with --config pointing at
+        // the chroot's pacman.conf, but pacman resolves Include paths relative
+        // to the host root — not --root.  If artix-archlinux-support is not
+        // installed on the host ISO, /etc/pacman.d/mirrorlist-arch won't exist
+        // and every chroot preflight will fail with "could not be read".
+        // Inside artix-chroot the geo mirror works identically to the mirrorlist.
+        let mirror_entry = "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch";
 
         let extra_section = format!(
             "\n\n# Arch Linux [extra] repository (auto-added by deploytix installer)\n\
@@ -1098,7 +1098,8 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 ///     PluginLoader          (copy installed by decky-loader-helper)
 ///     .loader.version       (version tag written by the helper)
 ///   plugins/
-/// ~/.steam/steam/.cef-enable-remote-debugging
+/// ~/.local/share/Steam/.cef-enable-remote-debugging
+/// ~/.steam/steam -> ~/.local/share/Steam  (symlink)
 /// ```
 ///
 /// The init service runs `PluginLoader` **as the greetd session user**
@@ -1151,11 +1152,27 @@ pub fn install_decky_loader(
     info!("  decky-loader-bin installed");
 
     // Step 2: Enable Steam CEF remote debugging (required by Decky's frontend).
-    // The helper below also does this, but Flatpak Steam installs need it
-    // at a separate path that the helper doesn't know about.
-    let steam_dir = format!("{}/home/{}/.steam/steam", install_root, username);
-    fs::create_dir_all(&steam_dir)?;
-    fs::write(format!("{steam_dir}/.cef-enable-remote-debugging"), "")?;
+    //
+    // Steam's first-run bootstrap creates ~/.steam/steam as a symlink
+    // pointing to ~/.local/share/Steam.  We must NOT create it as a
+    // real directory (fs::create_dir_all) or Steam can't initialise.
+    // Instead: create the real data dir, set up the symlink, and write
+    // the CEF flag into the real directory.
+    let steam_data_dir = format!("{}/home/{}/.local/share/Steam", install_root, username);
+    fs::create_dir_all(&steam_data_dir)?;
+    fs::write(format!("{steam_data_dir}/.cef-enable-remote-debugging"), "")?;
+
+    // Create ~/.steam/ and symlink ~/.steam/steam -> ~/.local/share/Steam
+    let dot_steam_dir = format!("{}/home/{}/.steam", install_root, username);
+    fs::create_dir_all(&dot_steam_dir)?;
+    let steam_symlink = format!("{}/steam", dot_steam_dir);
+    let symlink_path = std::path::Path::new(&steam_symlink);
+    if !symlink_path.exists() && symlink_path.read_link().is_err() {
+        std::os::unix::fs::symlink(
+            format!("/home/{}/.local/share/Steam", username),
+            symlink_path,
+        )?;
+    }
 
     let flatpak_steam = format!(
         "{}/home/{}/.var/app/com.valvesoftware.Steam/data/Steam",

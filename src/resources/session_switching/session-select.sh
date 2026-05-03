@@ -33,7 +33,7 @@ esac
 
 # Terminate the current session so the session manager can switch
 if [[ "$session" == "desktop" ]] && pidof gamescope > /dev/null 2>&1; then
-    kill -TERM "$(pidof gamescope)" 2>/dev/null || true
+    kill -TERM $(pidof gamescope) 2>/dev/null || true
 elif [[ "$session" == "gamescope" ]]; then
     pkill -x kwin_wayland 2>/dev/null || true
     pkill -x startplasma-wayland 2>/dev/null || true

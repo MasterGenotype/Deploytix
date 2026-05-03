@@ -611,7 +611,7 @@ generate_gui_profile() {
 
     cp "$de_profile" "$dest/profile.yaml"
 
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git"]' "$dest/profile.yaml"
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git", "alsa-utils"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"

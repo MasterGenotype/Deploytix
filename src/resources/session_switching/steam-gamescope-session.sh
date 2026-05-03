@@ -49,7 +49,7 @@ export STEAM_DISPLAY_REFRESH_LIMITS=60,144
     LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/lib/libgamemodeauto.so.0"
 [ -f /usr/lib/liblatencyflex.so ] && \
     LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/lib/liblatencyflex.so"
-export LD_PRELOAD
+[ -n "$LD_PRELOAD" ] && export LD_PRELOAD
 
 # --------- 5. D-Bus Session Bus ---------
 # Start D-Bus independently so it persists even if gamescope restarts.

@@ -483,11 +483,25 @@ pub fn resolve(
     let plan = match source.install_plan(&targets, clean_root) {
         Ok(p) => p,
         Err(e) => {
-            warn!(
-                "Preflight ({}): unable to compute install plan ({}). Continuing without preflight; \
-                 the upcoming pacman/basestrap call will be the source of truth.",
-                label, e
-            );
+            let msg = e.to_string();
+            // "could not find database" means a repo was added to the config
+            // but its sync DB hasn't been downloaded yet (no -Sy was run for
+            // the scratch dbpath).  This is expected when [extra] or
+            // [deploytix] are freshly appended; basestrap runs -Sy itself.
+            // Log at debug instead of warn to avoid alarming users.
+            if msg.contains("could not find database") {
+                debug!(
+                    "Preflight ({}): sync DB missing for a newly-added repo ({}). \
+                     Continuing without preflight; basestrap will fetch the DB.",
+                    label, e
+                );
+            } else {
+                warn!(
+                    "Preflight ({}): unable to compute install plan ({}). Continuing without preflight; \
+                     the upcoming pacman/basestrap call will be the source of truth.",
+                    label, e
+                );
+            }
             return Ok(PreflightReport::skipped_reason(&format!(
                 "preflight skipped: {}",
                 e
