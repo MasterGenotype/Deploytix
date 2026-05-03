@@ -107,6 +107,19 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push(seatd_service);
     }
 
+    // elogind — required when session switching is active (all init systems).
+    // The gamescope session script uses LIBSEAT_BACKEND=logind, and greetd's
+    // PAM stack (pam_elogind) needs elogind to create the seat session that
+    // grants DRM/input ACLs.  elogind-s6 exists in Artix repos alongside all
+    // other init variants.
+    if config.packages.install_session_switching
+        && config.desktop.environment != crate::config::DesktopEnvironment::None
+    {
+        packages.push("elogind".to_string());
+        let elogind_service = format!("elogind-{}", config.system.init);
+        packages.push(elogind_service);
+    }
+
     // Network packages based on config
     match config.network.backend {
         NetworkBackend::Iwd => {
