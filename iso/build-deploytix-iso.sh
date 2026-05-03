@@ -18,11 +18,11 @@ err()  { printf "${RED}==> ERROR: %s${NC}\n" "$*" >&2; }
 die()  { err "$@"; exit 1; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-INITSYS="openrc"
-INCLUDE_GUI=false
+INITSYS="runit"
+INCLUDE_GUI=true
 BASE_DE_PROFILE="plasma"
 SKIP_REBUILD=false
-CLEAN_BUILD=false
+CLEAN_BUILD=true
 CHROOT_ONLY=false
 DRY_RUN=false
 RESET_MODE=false
@@ -338,6 +338,14 @@ build_tkg_gui_packages() {
 
     if [[ "${TKG_GUI_PKG_DIR}" == "${TKG_GUI_LOCAL_DIR}/pkg" ]]; then
         msg2 "Using local tkg-gui repo at ${TKG_GUI_LOCAL_DIR}"
+        # Clean stale makepkg source artifacts from previous builds that
+        # may reference a different user's home directory.
+        rm -rf "${TKG_GUI_PKG_DIR}/tkg-gui" "${TKG_GUI_PKG_DIR}/src"
+        # Rewrite the PKGBUILD source to clone from the local checkout
+        # instead of SSH (which requires keys and network access).
+        sed -i.iso-bak \
+            "s|source=(\"tkg-gui::git+ssh://[^\"]*\")|source=(\"tkg-gui::git+file://${TKG_GUI_LOCAL_DIR}\")|" \
+            "${TKG_GUI_PKG_DIR}/PKGBUILD"
     elif [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
         msg2 "Updating tkg-gui repository..."
         git -C "${TKG_GUI_CLONE_DIR}" pull --ff-only
@@ -352,6 +360,11 @@ build_tkg_gui_packages() {
     pushd "${TKG_GUI_PKG_DIR}" >/dev/null
     makepkg -sf --noconfirm
     popd >/dev/null
+
+    # Restore original PKGBUILD if we patched it
+    if [[ -f "${TKG_GUI_PKG_DIR}/PKGBUILD.iso-bak" ]]; then
+        mv "${TKG_GUI_PKG_DIR}/PKGBUILD.iso-bak" "${TKG_GUI_PKG_DIR}/PKGBUILD"
+    fi
 
     local count
     count=$(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
@@ -369,6 +382,14 @@ build_modular_packages() {
 
     if [[ "${MODULAR_PKG_DIR}" == "${MODULAR_LOCAL_DIR}/pkg" ]]; then
         msg2 "Using local Modular repo at ${MODULAR_LOCAL_DIR}"
+        # Clean stale makepkg source artifacts from previous builds that
+        # may reference a different user's home directory.
+        rm -rf "${MODULAR_PKG_DIR}/modular" "${MODULAR_PKG_DIR}/src"
+        # Rewrite the PKGBUILD source to clone from the local checkout
+        # instead of SSH (which requires keys and network access).
+        sed -i.iso-bak \
+            "s|source=(\"modular::git+ssh://[^\"]*\")|source=(\"modular::git+file://${MODULAR_LOCAL_DIR}\")|" \
+            "${MODULAR_PKG_DIR}/PKGBUILD"
     elif [[ -d "${MODULAR_CLONE_DIR}/.git" ]]; then
         msg2 "Updating Modular repository..."
         git -C "${MODULAR_CLONE_DIR}" pull --ff-only
@@ -613,6 +634,8 @@ generate_gui_profile() {
 
     yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git", "alsa-utils"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
+    # Remove packages from the base DE profile that are unavailable in Artix repos
+    yq -i '.rootfs.packages -= ["artix-breeze-sddm"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
 }
