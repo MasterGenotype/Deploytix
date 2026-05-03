@@ -57,6 +57,16 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         services.push("greetd".to_string());
     }
 
+    // elogind — must be running before greetd so PAM pam_elogind can
+    // create the seat session that grants gamescope DRM/input ACLs.
+    // Not available on S6 (no elogind-s6 package in Artix repos).
+    if config.packages.install_session_switching
+        && config.desktop.environment != DesktopEnvironment::None
+        && config.system.init != InitSystem::S6
+    {
+        services.push("elogind".to_string());
+    }
+
     services
 }
 

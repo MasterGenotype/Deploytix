@@ -522,6 +522,8 @@ pub fn default_groups() -> Vec<String> {
         "wheel".to_string(),
         "video".to_string(),
         "audio".to_string(),
+        "input".to_string(),
+        "render".to_string(),
         "network".to_string(),
         "log".to_string(),
         "seat".to_string(),

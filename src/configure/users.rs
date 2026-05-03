@@ -186,6 +186,96 @@ pub fn set_root_password(cmd: &CommandRunner, password: &str, install_root: &str
     Ok(())
 }
 
+/// Configure autologin and session-manager exec for S6 init + session switching.
+///
+/// S6 has no greetd (no `greetd-s6` package in Artix repos), so the normal
+/// greetd IPC path that creates a proper Class=user seat session is
+/// unavailable.  This function provides an equivalent by:
+///
+/// 1. **agetty autologin** — patches `/etc/s6/sv/agetty-tty1/run` to add
+///    `--autologin <user>` so the user is logged in automatically on tty1
+///    without a password prompt.  The patch is idempotent: if `--autologin`
+///    is already present, the file is not rewritten.  If the s6 agetty
+///    service directory does not exist yet (the package may not be installed
+///    until first boot), the modification is skipped with a warning.
+///
+/// 2. **~/.bash_profile exec** — appends a snippet that runs
+///    `deploytix-session-manager` when the session is a login shell on tty1
+///    and no graphical session is already active.  The append is idempotent:
+///    if the sentinel comment is already present, nothing is written.
+pub fn configure_s6_session_autologin(
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let username = &config.user.name;
+    info!(
+        "Configuring S6 autologin + session-manager exec for user '{}'",
+        username
+    );
+
+    // 1. Patch the s6 agetty-tty1 run script for autologin.
+    let agetty_run = format!("{}/etc/s6/sv/agetty-tty1/run", install_root);
+    if std::path::Path::new(&agetty_run).exists() {
+        let content = fs::read_to_string(&agetty_run)?;
+        if content.contains("--autologin") {
+            info!("  agetty-tty1 run script already has --autologin, skipping");
+        } else {
+            // Insert --autologin <user> before the TTY/linux arguments.
+            // Typical lines end with: `agetty … tty1 linux` or `agetty … "$TTY" linux`
+            let patched = content.replace(
+                "exec agetty",
+                &format!("exec agetty --autologin {}", username),
+            );
+            fs::write(&agetty_run, &patched)?;
+            info!(
+                "  Patched agetty-tty1 run script with --autologin {}",
+                username
+            );
+        }
+    } else {
+        tracing::warn!(
+            "  agetty-tty1 s6 service not found at {} — \
+             autologin will not be configured automatically. \
+             Install util-linux-s6 and add --autologin {} to \
+             /etc/s6/sv/agetty-tty1/run manually.",
+            agetty_run,
+            username
+        );
+    }
+
+    // 2. Write ~/.bash_profile exec snippet.
+    let profile_path = format!("{}/home/{}/.bash_profile", install_root, username);
+    let existing = fs::read_to_string(&profile_path).unwrap_or_default();
+
+    // Sentinel keeps the append idempotent across re-runs.
+    let sentinel = "# deploytix: S6 session-manager autostart";
+    if existing.contains(sentinel) {
+        info!("  ~/.bash_profile already contains session-manager autostart, skipping");
+        return Ok(());
+    }
+
+    let snippet = format!(
+        "\n{sentinel}\n\
+         # Launch the gamescope/desktop session manager on tty1.\n\
+         # Skipped when a graphical session is already active (SSH, nested).\n\
+         if [[ -z \"${{DISPLAY:-}}${{WAYLAND_DISPLAY:-}}\" ]] && [[ \"$(tty)\" = \"/dev/tty1\" ]]; then\n\
+         \texec /usr/bin/deploytix-session-manager\n\
+         fi\n",
+        sentinel = sentinel,
+    );
+
+    let mut content = existing;
+    content.push_str(&snippet);
+    fs::write(&profile_path, content)?;
+
+    info!(
+        "  Added session-manager autostart to /home/{}/.bash_profile",
+        username
+    );
+
+    Ok(())
+}
+
 /// Lock root account (disable root login)
 #[allow(dead_code)]
 pub fn lock_root_account(cmd: &CommandRunner, install_root: &str) -> Result<()> {
