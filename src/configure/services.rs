@@ -25,6 +25,14 @@ pub fn enable_services(
     install_service_packages(cmd, config, install_root, &services)?;
 
     for service in services {
+        // The init-specific elogind service package is blacklisted in
+        // build_service_packages() because it conflicts with seatd-<init>,
+        // so no elogind service file lands on disk — skip the enable to
+        // avoid a misleading "service not found" warning.  The base elogind
+        // package is still installed for pam_elogind.
+        if service == "elogind" {
+            continue;
+        }
         enable_service(cmd, &config.system.init, &service, install_root)?;
     }
 
@@ -91,6 +99,14 @@ fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String>
         // directory ourselves in configure_greetd().  All other services
         // (including elogind-s6) have proper Artix packages.
         if *init == InitSystem::S6 && base == "greetd" {
+            continue;
+        }
+        // elogind-<init> conflicts with seatd-<init>: the two service packages
+        // both ship a `org.freedesktop.login1`-style seat manager unit and
+        // pacman refuses to install both.  pam_elogind from the base elogind
+        // package is enough for greetd's PAM stack, so the init-specific
+        // elogind service package is blacklisted from installation.
+        if base == "elogind" {
             continue;
         }
         let init_pkg = format!("{}-{}", base, init);

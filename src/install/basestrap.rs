@@ -107,17 +107,24 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push(seatd_service);
     }
 
-    // elogind — required when session switching is active (all init systems).
-    // The gamescope session script uses LIBSEAT_BACKEND=logind, and greetd's
-    // PAM stack (pam_elogind) needs elogind to create the seat session that
-    // grants DRM/input ACLs.  elogind-s6 exists in Artix repos alongside all
-    // other init variants.
+    // elogind — installed alongside any desktop because greetd's PAM stack
+    // (pam_elogind) needs the elogind D-Bus service to create the seat
+    // session that grants DRM/input ACLs.  Only the base package is
+    // installed; the init-specific elogind-<init> service package conflicts
+    // with seatd-<init> (both ship a login1 seat manager unit) and is
+    // blacklisted in configure::services::build_service_packages().
+    if config.desktop.environment != crate::config::DesktopEnvironment::None {
+        packages.push("elogind".to_string());
+    }
+
+    // Python 3 — the greetd-ipc helper script (greetd-ipc.py) that
+    // deploytix-session-manager uses to create Class=user sessions
+    // via the greetd IPC protocol is written in Python.  Only needed
+    // when session switching is active.
     if config.packages.install_session_switching
         && config.desktop.environment != crate::config::DesktopEnvironment::None
     {
-        packages.push("elogind".to_string());
-        let elogind_service = format!("elogind-{}", config.system.init);
-        packages.push(elogind_service);
+        packages.push("python".to_string());
     }
 
     // Network packages based on config
