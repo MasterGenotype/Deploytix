@@ -261,15 +261,6 @@ impl Installer {
         if self.config.packages.install_session_switching {
             self.report_progress(0.86, "Installing session switching scripts...");
             self.install_session_switching()?;
-
-            // S6 has no greetd: configure agetty autologin + bash_profile exec
-            // so the session manager starts automatically on tty1.
-            if self.config.system.init == crate::config::InitSystem::S6 {
-                configure::users::configure_s6_session_autologin(
-                    &self.config,
-                    INSTALL_ROOT,
-                )?;
-            }
         }
 
         // Phase 5.3: yay AUR helper (after gaming, needs user account)
