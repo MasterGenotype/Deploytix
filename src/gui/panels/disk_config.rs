@@ -21,7 +21,6 @@ pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
             ui,
             &mut disk.filesystem,
             &mut disk.swap_type,
-            &mut disk.zram_percent,
         );
     });
 
@@ -101,7 +100,6 @@ fn filesystem_section(
     ui: &mut Ui,
     filesystem: &mut Filesystem,
     swap_type: &mut SwapType,
-    zram_percent: &mut u8,
 ) {
     ui.horizontal(|ui| {
         ui.label("Filesystem:");
@@ -137,10 +135,7 @@ fn filesystem_section(
 
     if *swap_type == SwapType::FileZram || *swap_type == SwapType::ZramOnly {
         ui.add_space(theme::SPACING_XS);
-        ui.horizontal(|ui| {
-            ui.label("ZRAM Size (% of RAM):");
-            ui.add(egui::Slider::new(zram_percent, 10..=100).suffix("%"));
-        });
+        widgets::info_text(ui, "ZRAM: 4 GiB fixed (zstd compression)");
     }
 }
 

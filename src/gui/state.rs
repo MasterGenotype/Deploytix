@@ -80,7 +80,6 @@ pub struct DiskState {
 
     // Swap
     pub swap_type: SwapType,
-    pub zram_percent: u8,
 
     // Btrfs
     pub use_subvolumes: bool,
@@ -113,7 +112,6 @@ impl Default for DiskState {
             boot_encryption: false,
             integrity: false,
             swap_type: SwapType::Partition,
-            zram_percent: 50,
             use_subvolumes: false,
             preserve_home: false,
             use_lvm_thin: false,

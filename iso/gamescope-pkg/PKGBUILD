@@ -1,0 +1,108 @@
+# Maintainer: Deploytix
+# Bazzite-maintained gamescope fork (github.com/bazzite-org/gamescope)
+
+pkgname=gamescope-git
+pkgver=r2512.c31743d
+pkgrel=1
+pkgdesc='SteamOS session compositing window manager (Bazzite fork)'
+arch=('x86_64')
+url='https://github.com/bazzite-org/gamescope'
+license=('BSD-2-Clause' 'BSD-3-Clause')
+provides=('gamescope')
+conflicts=('gamescope')
+
+depends=(
+    'glibc'
+    'lcms2'
+    'libavif'
+    'libcap'
+    'libdecor'
+    'libdrm'
+    'libei'
+    'libinput'
+    'libpipewire'
+    'libx11'
+    'libxcb'
+    'libxcomposite'
+    'libxcursor'
+    'libxdamage'
+    'libxext'
+    'libxfixes'
+    'libxi'
+    'libxkbcommon'
+    'libxmu'
+    'libxrender'
+    'libxres'
+    'libxtst'
+    'libxxf86vm'
+    'luajit'
+    'pixman'
+    'sdl2'
+    'seatd'
+    'vulkan-icd-loader'
+    'wayland'
+    'xcb-util-errors'
+    'xcb-util-wm'
+    'xorg-server-xwayland'
+)
+
+makedepends=(
+    'git'
+    'meson'
+    'ninja'
+    'cmake'
+    'glslang'
+    'pkgconf'
+    'wayland-protocols'
+    'vulkan-headers'
+    'xorgproto'
+    'hwdata'
+    'stb'
+    'benchmark'
+    'glm'
+)
+
+# Source is the parent directory (the gamescope repo checkout).
+# makepkg --syncdeps --install from within pkg/ will use this.
+source=("gamescope::git+file://$(cd .. && pwd)")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd gamescope
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd gamescope
+    git submodule update --init --recursive
+}
+
+build() {
+    cd gamescope
+    meson setup build \
+        --prefix=/usr \
+        --buildtype=release \
+        -Dpipewire=enabled \
+	-Drt_cap=enabled \
+	-Ddrm_backend=enabled \
+	-Dsdl2_backend=enabled \
+	-Denable_gamescope=true \
+	-Denable_gamescope_wsi_layer=true \
+	-Denable_openvr_support=false \
+	-Dbenchmark=disabled \
+	-Dwlroots:xwayland=enabled \
+	-Dwlroots:renderers='vulkan','gles2' \
+	-Dwlroots:backends='drm','libinput','x11' \
+	-Dwlroots:session=enabled \
+	-Dwlroots:color-management=enabled \
+	-Dwlroots:libliftoff=enabled \
+        -Dc_args=-Wno-error \
+        -Dcpp_args=-Wno-error
+    ninja -C build
+}
+
+package() {
+    cd gamescope
+    meson install -C build --destdir="$pkgdir" --skip-subprojects
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

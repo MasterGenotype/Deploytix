@@ -129,9 +129,6 @@ pub struct DiskConfig {
     /// Swap file size in MiB (only for FileZram, 0 = auto-calculate based on RAM)
     #[serde(default)]
     pub swap_file_size_mib: u64,
-    /// ZRAM size as percentage of RAM (default: 50%)
-    #[serde(default = "default_zram_percent")]
-    pub zram_percent: u8,
     /// ZRAM compression algorithm (default: "zstd")
     #[serde(default = "default_zram_algorithm")]
     pub zram_algorithm: String,
@@ -507,10 +504,6 @@ fn default_thin_pool_name() -> String {
 
 fn default_thin_pool_percent() -> u8 {
     95
-}
-
-fn default_zram_percent() -> u8 {
-    50
 }
 
 fn default_zram_algorithm() -> String {
@@ -941,7 +934,6 @@ impl DeploymentConfig {
                 lvm_thin_pool_percent: default_thin_pool_percent(),
                 swap_type,
                 swap_file_size_mib: 0, // Auto-calculate
-                zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 preserve_home,
                 partitions,
@@ -1008,7 +1000,6 @@ impl DeploymentConfig {
                 lvm_thin_pool_percent: default_thin_pool_percent(),
                 swap_type: SwapType::Partition,
                 swap_file_size_mib: 0,
-                zram_percent: default_zram_percent(),
                 zram_algorithm: default_zram_algorithm(),
                 preserve_home: false,
                 partitions: default_partitions(),
@@ -1154,16 +1145,6 @@ impl DeploymentConfig {
             return Err(DeploytixError::ValidationError(format!(
                 "lvm_thin_pool_percent must be between 1 and 100, got {}",
                 self.disk.lvm_thin_pool_percent
-            )));
-        }
-
-        // zram_percent must be 1–100 when ZRAM is used
-        if (self.disk.swap_type == SwapType::ZramOnly || self.disk.swap_type == SwapType::FileZram)
-            && (self.disk.zram_percent == 0 || self.disk.zram_percent > 100)
-        {
-            return Err(DeploytixError::ValidationError(format!(
-                "zram_percent must be between 1 and 100, got {}",
-                self.disk.zram_percent
             )));
         }
 

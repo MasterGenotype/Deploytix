@@ -16,7 +16,6 @@ lvm_thin_pool_name = "thinpool"
 lvm_thin_pool_percent = 95
 swap_type = "zramonly"
 swap_file_size_mib = 0
-zram_percent = 15
 zram_algorithm = "zstd"
 preserve_home = false
 

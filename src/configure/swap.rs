@@ -15,36 +15,35 @@ use tracing::info;
 /// Default swap file path
 pub const SWAP_FILE_PATH: &str = "/swap/swapfile";
 
+/// Fixed ZRAM size: 4 GiB in bytes.
+const ZRAM_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Setup ZRAM swap device
 ///
-/// Creates a runit service that configures ZRAM at boot.
+/// Creates a init service that configures ZRAM at boot with a fixed 4 GiB device.
 /// ZRAM provides compressed in-memory swap with configurable compression algorithm.
 pub fn setup_zram(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
-    let percent = config.disk.zram_percent;
     let algorithm = &config.disk.zram_algorithm;
 
-    info!(
-        "Setting up ZRAM with {}% of RAM, compression: {}",
-        percent, algorithm
-    );
+    info!("Setting up ZRAM: 4 GiB fixed, compression: {}", algorithm);
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create ZRAM service with {}% RAM, {} compression",
-            percent, algorithm
+            "  [dry-run] Would create ZRAM service: 4 GiB, {} compression",
+            algorithm
         );
         return Ok(());
     }
 
     match config.system.init {
-        InitSystem::Runit => setup_zram_runit(install_root, percent, algorithm)?,
-        InitSystem::OpenRC => setup_zram_openrc(install_root, percent, algorithm)?,
-        InitSystem::S6 => setup_zram_s6(install_root, percent, algorithm)?,
-        InitSystem::Dinit => setup_zram_dinit(install_root, percent, algorithm)?,
+        InitSystem::Runit => setup_zram_runit(install_root, algorithm)?,
+        InitSystem::OpenRC => setup_zram_openrc(install_root, algorithm)?,
+        InitSystem::S6 => setup_zram_s6(install_root, algorithm)?,
+        InitSystem::Dinit => setup_zram_dinit(install_root, algorithm)?,
     }
 
     info!("ZRAM service configured successfully");
@@ -52,7 +51,7 @@ pub fn setup_zram(
 }
 
 /// Create ZRAM runit service
-fn setup_zram_runit(install_root: &str, percent: u8, algorithm: &str) -> Result<()> {
+fn setup_zram_runit(install_root: &str, algorithm: &str) -> Result<()> {
     let sv_dir = format!("{}/etc/runit/sv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
 
@@ -61,16 +60,12 @@ fn setup_zram_runit(install_root: &str, percent: u8, algorithm: &str) -> Result<
         r#"#!/bin/sh
 exec 2>&1
 
-# Calculate ZRAM size based on RAM
-RAM_KB=$(grep MemTotal /proc/meminfo | awk '{{print $2}}')
-ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
-
 # Load zram module
 modprobe zram num_devices=1
 
-# Configure zram0
+# Configure zram0 with fixed 4 GiB size
 echo {algorithm} > /sys/block/zram0/comp_algorithm
-echo $ZRAM_SIZE > /sys/block/zram0/disksize
+echo {size} > /sys/block/zram0/disksize
 
 # Setup swap
 mkswap /dev/zram0
@@ -79,8 +74,8 @@ swapon -p 100 /dev/zram0
 # Keep service running
 exec pause
 "#,
-        percent = percent,
-        algorithm = algorithm
+        algorithm = algorithm,
+        size = ZRAM_SIZE_BYTES
     );
 
     let run_path = format!("{}/run", sv_dir);
@@ -113,7 +108,7 @@ echo 1 > /sys/block/zram0/reset 2>/dev/null
 }
 
 /// Create ZRAM OpenRC service
-fn setup_zram_openrc(install_root: &str, percent: u8, algorithm: &str) -> Result<()> {
+fn setup_zram_openrc(install_root: &str, algorithm: &str) -> Result<()> {
     let init_dir = format!("{}/etc/init.d", install_root);
     fs::create_dir_all(&init_dir)?;
 
@@ -130,12 +125,9 @@ depend() {{
 start() {{
     ebegin "Starting ZRAM swap"
     
-    RAM_KB=$(grep MemTotal /proc/meminfo | awk '{{print $2}}')
-    ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
-    
     modprobe zram num_devices=1
     echo {algorithm} > /sys/block/zram0/comp_algorithm
-    echo $ZRAM_SIZE > /sys/block/zram0/disksize
+    echo {size} > /sys/block/zram0/disksize
     mkswap /dev/zram0
     swapon -p 100 /dev/zram0
     
@@ -149,8 +141,8 @@ stop() {{
     eend $?
 }}
 "#,
-        percent = percent,
-        algorithm = algorithm
+        algorithm = algorithm,
+        size = ZRAM_SIZE_BYTES
     );
 
     let script_path = format!("{}/zram", init_dir);
@@ -175,7 +167,7 @@ stop() {{
 /// oneshot, so the startup script lives in `up` (not `run`, which is for
 /// longruns).  Configuration is stored in `/etc/s6/config/zram.conf` and
 /// read at boot via `envfile`.
-fn setup_zram_s6(install_root: &str, percent: u8, algorithm: &str) -> Result<()> {
+fn setup_zram_s6(install_root: &str, algorithm: &str) -> Result<()> {
     let sv_dir = format!("{}/etc/s6/sv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
 
@@ -189,15 +181,9 @@ fn setup_zram_s6(install_root: &str, percent: u8, algorithm: &str) -> Result<()>
     let config_dir = format!("{}/etc/s6/config", install_root);
     fs::create_dir_all(&config_dir)?;
 
-    // Compute ZRAM size in bytes from the current machine's RAM and the
-    // requested percentage.  The installer runs on the live system which has
-    // the same physical RAM as the target, so this is accurate.
-    let ram_mib = get_ram_mib();
-    let zram_size_bytes = ram_mib * (percent as u64) / 100 * 1024 * 1024;
-
     let config_content = format!(
         "COMP_ALGORITHM={}\nZRAM_SIZE={}\n",
-        algorithm, zram_size_bytes
+        algorithm, ZRAM_SIZE_BYTES
     );
     fs::write(format!("{}/zram.conf", config_dir), config_content)?;
 
@@ -247,7 +233,7 @@ redirfd -w 1 /sys/block/zram0/reset echo 1
 }
 
 /// Create ZRAM dinit service
-fn setup_zram_dinit(install_root: &str, percent: u8, algorithm: &str) -> Result<()> {
+fn setup_zram_dinit(install_root: &str, algorithm: &str) -> Result<()> {
     let dinit_dir = format!("{}/etc/dinit.d", install_root);
     fs::create_dir_all(&dinit_dir)?;
 
@@ -257,17 +243,15 @@ fn setup_zram_dinit(install_root: &str, percent: u8, algorithm: &str) -> Result<
 
     let setup_script = format!(
         r#"#!/bin/sh
-RAM_KB=$(grep MemTotal /proc/meminfo | awk '{{print $2}}')
-ZRAM_SIZE=$((RAM_KB * {percent} / 100 * 1024))
-
+# Fixed 4 GiB ZRAM swap device
 modprobe zram num_devices=1
 echo {algorithm} > /sys/block/zram0/comp_algorithm
-echo $ZRAM_SIZE > /sys/block/zram0/disksize
+echo {size} > /sys/block/zram0/disksize
 mkswap /dev/zram0
 swapon -p 100 /dev/zram0
 "#,
-        percent = percent,
-        algorithm = algorithm
+        algorithm = algorithm,
+        size = ZRAM_SIZE_BYTES
     );
 
     let script_path = format!("{}/zram-setup", script_dir);
