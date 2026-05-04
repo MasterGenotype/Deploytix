@@ -1,0 +1,12 @@
+[submodule "vendor/tkg-gui"]
+	path = vendor/tkg-gui
+	url = https://github.com/MasterGenotype/tkg-gui.git
+	branch = main
+[submodule "vendor/gamescope"]
+	path = vendor/gamescope
+	url = git@github.com:MasterGenotype/gamescope.git
+	branch = gamescope-ba
+[submodule "vendor/Modular-1"]
+	path = vendor/Modular-1
+	url = git@github.com:MasterGenotype/Modular-1.git
+	branch = master
