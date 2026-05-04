@@ -210,6 +210,8 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     // declared in the PKGBUILD and pulled in automatically by pacman.
     if config.packages.install_gaming {
         packages.push("gamescope-git".to_string());
+        // libliftoff: KMS plane management library used by gamescope
+        packages.push("libliftoff".to_string());
     }
 
     // Decky Loader is installed from the `decky-loader-bin` AUR package in
