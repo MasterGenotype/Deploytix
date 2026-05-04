@@ -6,6 +6,7 @@
 #
 # Requires: artools (buildiso), makepkg, repo-add, go-yq
 # Must be run from the Deploytix repository root or the iso/ directory.
+# Run 'git submodule update --init --recursive' once after cloning to populate vendor/.
 
 set -euo pipefail
 
@@ -26,6 +27,11 @@ CLEAN_BUILD=true
 CHROOT_ONLY=false
 DRY_RUN=false
 RESET_MODE=false
+# BUILD_SOURCE controls where makepkg fetches each package's source tree from:
+#   local  — git+file:// pointing at the vendor/ submodule on disk (default, no network needed)
+#   clone  — fetch fresh from the upstream remote URLs (validates published state; needs SSH keys)
+BUILD_SOURCE="local"
+KEEP_PACKAGES=false   # -K: keep built .pkg.tar.zst files after ISO creation
 
 # ── Paths (resolved later) ──────────────────────────────────────────────────
 REPO_ROOT=""
@@ -40,22 +46,20 @@ PACMAN_CONF_DIR="${ARTOOLS_CONF_DIR}/pacman.conf.d"
 PACMAN_CONF_NAME="iso-x86_64.conf"
 SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
 
-# ── External package sources ─────────────────────────────────────────────────
-TKG_GUI_REPO_URL="https://github.com/MasterGenotype/tkg-gui.git"
-TKG_GUI_LOCAL_DIR=""   # Resolved to sibling repo if present
-TKG_GUI_CLONE_DIR=""
+# ── Vendor package dirs and remote URLs ──────────────────────────────────────
+# Paths are resolved in resolve_paths() once REPO_ROOT is known.
 TKG_GUI_PKG_DIR=""
-MODULAR_REPO_URL="https://github.com/MasterGenotype/Modular-1.git"
-MODULAR_LOCAL_DIR=""   # Resolved to sibling repo if present
-MODULAR_CLONE_DIR=""
 MODULAR_PKG_DIR=""
-# Gamescope (Bazzite fork). The pkg/PKGBUILD is NOT tracked in the
-# upstream bazzite-org/gamescope repository, so we cannot fall back to
-# an automatic clone like we do for tkg-gui / Modular. The script
-# requires a sibling checkout at <repo-root>/../gamescope/pkg/PKGBUILD.
-GAMESCOPE_REPO_URL="https://github.com/bazzite-org/gamescope"
-GAMESCOPE_LOCAL_DIR=""
 GAMESCOPE_PKG_DIR=""
+# Remote URLs used when BUILD_SOURCE=clone.
+# tkg-gui's PKGBUILD already carries the correct SSH URL; it is listed here
+# for reference only. Modular and gamescope require an explicit rewrite in clone mode.
+TKG_GUI_REMOTE="git+ssh://git@github.com/MasterGenotype/tkg-gui.git"
+MODULAR_REMOTE="git+ssh://git@github.com/MasterGenotype/Modular-1.git"
+GAMESCOPE_REMOTE="git+ssh://git@github.com/MasterGenotype/gamescope.git#branch=gamescope-ba"
+# Staging directory — single source of truth fed to both the local artools repo
+# and the live-overlay embedded repo, eliminating version drift between the two.
+PKG_STAGE_DIR="/tmp/deploytix-iso-stage-$$"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -65,22 +69,33 @@ Usage: $(basename "$0") [OPTIONS]
 Build a custom Artix Linux ISO with deploytix pre-installed.
 
 Options:
-  -i <init>   Init system: openrc, runit, dinit, s6  [default: openrc]
+  -i <init>   Init system: openrc, runit, dinit, s6  [default: runit]
   -g          Include GUI (deploytix-gui-git + desktop environment)
   -b <de>     Desktop profile to merge for GUI mode   [default: plasma]
   -s          Skip package rebuild (reuse existing .pkg.tar.zst)
   -c          Clean buildiso work directory before building
   -x          Build chroot only (stop before squash/ISO generation)
+  -C          Clone mode — fetch package sources from remote URLs instead of
+              using the vendor/ submodule checkouts (requires network + SSH keys)
+  -K          Keep built .pkg.tar.zst files after ISO creation (skip cleanup)
   -r          Reset — remove installed profile, repo, and pacman.conf override
   -n          Dry run — show what would be done without executing
   -h          Show this help
 
+Build source modes:
+  local (default)  makepkg reads source trees from the vendor/ submodule on disk
+                   via git+file://.  Fast, reproducible, no network for source.
+  clone (-C)       makepkg fetches fresh source from the remote GitHub URLs.
+                   Validates the published state of each repo; requires SSH keys.
+
 Examples:
-  $(basename "$0")                    # Base ISO with CLI deploytix, openrc
-  $(basename "$0") -i runit           # Base ISO with CLI deploytix, runit
+  $(basename "$0")                    # Base ISO, CLI deploytix, runit, local source
+  $(basename "$0") -i openrc          # Base ISO, openrc init
   $(basename "$0") -g -i dinit        # Plasma ISO with GUI deploytix, dinit
   $(basename "$0") -g -b lxqt -i s6   # LXQt ISO with GUI deploytix, s6
-  $(basename "$0") -s -c              # Skip rebuild, clean previous build
+  $(basename "$0") -s -c              # Skip rebuild, clean previous build artifacts
+  $(basename "$0") -C                 # Build with fresh source clones from remote
+  $(basename "$0") -K                 # Build and keep .pkg.tar.zst after ISO
   $(basename "$0") -r                 # Remove all installed artifacts
 
 EOF
@@ -88,7 +103,7 @@ EOF
 }
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
-while getopts ":i:b:gscxrnh" opt; do
+while getopts ":i:b:gscxrnhCK" opt; do
     case "$opt" in
         i) INITSYS="$OPTARG" ;;
         g) INCLUDE_GUI=true ;;
@@ -98,6 +113,8 @@ while getopts ":i:b:gscxrnh" opt; do
         x) CHROOT_ONLY=true ;;
         r) RESET_MODE=true ;;
         n) DRY_RUN=true ;;
+        C) BUILD_SOURCE="clone" ;;
+        K) KEEP_PACKAGES=true ;;
         h) usage ;;
         :) die "Option -${OPTARG} requires an argument" ;;
         *) die "Unknown option: -${OPTARG}. Use -h for help." ;;
@@ -124,22 +141,28 @@ resolve_paths() {
     PKG_DIR="${REPO_ROOT}/pkg"
     LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
-    TKG_GUI_LOCAL_DIR="$(dirname "${REPO_ROOT}")/tkg-gui"
-    TKG_GUI_CLONE_DIR="${WORKSPACE_DIR}/tkg-gui-src"
-    if [[ -d "${TKG_GUI_LOCAL_DIR}/pkg" && -f "${TKG_GUI_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
-        TKG_GUI_PKG_DIR="${TKG_GUI_LOCAL_DIR}/pkg"
-    else
-        TKG_GUI_PKG_DIR="${TKG_GUI_CLONE_DIR}/pkg"
+    TKG_GUI_PKG_DIR="${REPO_ROOT}/vendor/tkg-gui/pkg"
+    MODULAR_PKG_DIR="${REPO_ROOT}/vendor/Modular-1/pkg"
+    GAMESCOPE_PKG_DIR="${REPO_ROOT}/vendor/gamescope/pkg"
+}
+
+# ── Submodule guard ───────────────────────────────────────────────────────────
+ensure_submodules() {
+    local missing=0
+    for sub in vendor/tkg-gui vendor/gamescope vendor/Modular-1; do
+        if [[ ! -f "${REPO_ROOT}/${sub}/pkg/PKGBUILD" ]]; then
+            warn "Submodule ${sub} not initialised — pkg/PKGBUILD missing"
+            missing=1
+        fi
+    done
+    if (( missing )); then
+        if "$DRY_RUN"; then
+            msg2 "[dry-run] Would run: git submodule update --init --recursive"
+        else
+            msg "Initialising vendor submodules..."
+            git -C "${REPO_ROOT}" submodule update --init --recursive
+        fi
     fi
-    MODULAR_LOCAL_DIR="$(dirname "${REPO_ROOT}")/Modular-1"
-    MODULAR_CLONE_DIR="${WORKSPACE_DIR}/modular-src"
-    if [[ -d "${MODULAR_LOCAL_DIR}/pkg" && -f "${MODULAR_LOCAL_DIR}/pkg/PKGBUILD" ]]; then
-        MODULAR_PKG_DIR="${MODULAR_LOCAL_DIR}/pkg"
-    else
-        MODULAR_PKG_DIR="${MODULAR_CLONE_DIR}/pkg"
-    fi
-    GAMESCOPE_LOCAL_DIR="$(dirname "${REPO_ROOT}")/gamescope"
-    GAMESCOPE_PKG_DIR="${GAMESCOPE_LOCAL_DIR}/pkg"
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -162,7 +185,10 @@ check_prerequisites() {
     [[ -f "${PROFILE_SRC}/profile.yaml" ]] || die "Profile not found at ${PROFILE_SRC}/profile.yaml"
     [[ -f "${SYSTEM_PACMAN_CONF}" ]] || die "System pacman.conf not found at ${SYSTEM_PACMAN_CONF}"
 
+    ensure_submodules
+
     msg2 "All prerequisites satisfied"
+    msg2 "Build source: ${BUILD_SOURCE}"
 }
 
 # ── Overlay helpers ──────────────────────────────────────────────────────────
@@ -275,44 +301,85 @@ materialize_overlay_symlink() {
     fi
 }
 
-# ── Step B: Build deploytix packages ─────────────────────────────────────────
+# ── PKGBUILD helpers ──────────────────────────────────────────────────────────
+
+# Create a .iso-bak of a PKGBUILD before modifying it (idempotent).
+_backup_pkgbuild() {
+    local pkgbuild="$1"
+    [[ -f "${pkgbuild}.iso-bak" ]] || cp -f "$pkgbuild" "${pkgbuild}.iso-bak"
+}
+
+# Restore a PKGBUILD from its .iso-bak and remove the bak file.
+restore_pkgbuild() {
+    local pkgbuild="$1"
+    [[ -f "${pkgbuild}.iso-bak" ]] && mv "${pkgbuild}.iso-bak" "$pkgbuild"
+}
+
+# Rewrite source=("PKG::git+...") to use a local git+file:// path (local mode).
+point_pkgbuild_at_submodule() {
+    local pkg="$1" pkgbuild="$2" sub_path="$3"
+    _backup_pkgbuild "$pkgbuild"
+    sed -i "s|source=(\"${pkg}::git+[^\"]*\")|source=(\"${pkg}::git+file://${sub_path}\")|" "$pkgbuild"
+}
+
+# Rewrite source=("PKG::git+...") to a remote URL (clone mode).
+point_pkgbuild_at_remote() {
+    local pkg="$1" pkgbuild="$2" url="$3"
+    _backup_pkgbuild "$pkgbuild"
+    sed -i "s|source=(\"${pkg}::git+[^\"]*\")|source=(\"${pkg}::${url}\")|" "$pkgbuild"
+}
+
+# Stamp pkgrel with a build-time suffix so the buildiso chroot always sees a
+# strictly higher version than its cache and reinstalls the package.
+stamp_pkgrel() {
+    local pkgbuild="$1"
+    local stamp
+    stamp="$(date -u +%Y%m%d%H%M%S)"
+    _backup_pkgbuild "$pkgbuild"
+    sed -i "s/^pkgrel=.*/pkgrel=1.${stamp}/" "$pkgbuild"
+}
+
+# EXIT / INT / TERM handler: restore any PKGBUILD still carrying a .iso-bak
+# (script aborted before the explicit restore ran) and purge the staging dir.
+_cleanup_dirty_pkgbuilds() {
+    local pb bak
+    for pb in \
+        "${PKG_DIR}/PKGBUILD" \
+        "${TKG_GUI_PKG_DIR}/PKGBUILD" \
+        "${MODULAR_PKG_DIR}/PKGBUILD" \
+        "${GAMESCOPE_PKG_DIR}/PKGBUILD"
+    do
+        bak="${pb}.iso-bak"
+        [[ -f "$bak" ]] && mv "$bak" "$pb"
+    done
+    [[ -d "${PKG_STAGE_DIR}" ]] && rm -rf "${PKG_STAGE_DIR}"
+}
+
+# ── Step B: Build packages ────────────────────────────────────────────────────
 build_packages() {
     if "$SKIP_REBUILD"; then
-        local count=0
-
-        if [[ -d "${PKG_DIR}" ]]; then
-            count=$(( count + $(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
-        fi
-        if [[ -d "${TKG_GUI_PKG_DIR}" ]]; then
-            count=$(( count + $(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
-        fi
-        if [[ -n "${MODULAR_PKG_DIR}" && -d "${MODULAR_PKG_DIR}" ]]; then
-            count=$(( count + $(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
-        fi
-        if [[ -n "${GAMESCOPE_PKG_DIR}" && -d "${GAMESCOPE_PKG_DIR}" ]]; then
-            count=$(( count + $(find "${GAMESCOPE_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
-        fi
-
-        if (( count == 0 )); then
-            die "No .pkg.tar.zst found in ${PKG_DIR}/, ${TKG_GUI_PKG_DIR}/, ${MODULAR_PKG_DIR}/, or ${GAMESCOPE_PKG_DIR}/ and -s (skip rebuild) was set"
-        fi
-
-        msg "Skipping package build (-s); reusing existing packages"
+        local count=0 d
+        for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+            [[ -d "$d" ]] || continue
+            count=$(( count + $(find "$d" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
+        done
+        (( count > 0 )) || die "No .pkg.tar.zst found in vendor pkg dirs and -s (skip rebuild) was set"
+        msg "Skipping package build (-s); reusing ${count} existing package(s)"
         return 0
     fi
 
     msg "Building deploytix packages..."
-    pushd "${PKG_DIR}" >/dev/null
 
+    local deploytix_pkgbuild="${PKG_DIR}/PKGBUILD"
     if "$DRY_RUN"; then
-        msg2 "[dry-run] Would run: makepkg -sf --noconfirm"
+        msg2 "[dry-run] Would stamp pkgrel and run: makepkg -sf --noconfirm in ${PKG_DIR}"
     else
+        stamp_pkgrel "$deploytix_pkgbuild"
+        pushd "${PKG_DIR}" >/dev/null
         makepkg -sf --noconfirm
-    fi
+        popd >/dev/null
+        restore_pkgbuild "$deploytix_pkgbuild"
 
-    popd >/dev/null
-
-    if ! "$DRY_RUN"; then
         local count
         count=$(find "${PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
         (( count > 0 )) || die "makepkg produced no deploytix packages"
@@ -324,47 +391,36 @@ build_packages() {
     build_gamescope_packages
 }
 
+# tkg-gui (GUI mode only)
+#   local:  rewrite source SSH URL → git+file:// pointing at vendor/tkg-gui
+#   clone:  PKGBUILD already carries the correct SSH URL — no rewrite needed
 build_tkg_gui_packages() {
     if ! "$INCLUDE_GUI"; then
         return 0
     fi
 
     if "$DRY_RUN"; then
-        msg2 "[dry-run] Would build tkg-gui from ${TKG_GUI_PKG_DIR}"
+        msg2 "[dry-run] Would build tkg-gui (${BUILD_SOURCE} mode) from ${TKG_GUI_PKG_DIR}"
         return 0
     fi
 
-    msg "Building tkg-gui packages..."
+    msg "Building tkg-gui packages (${BUILD_SOURCE} mode)..."
 
-    if [[ "${TKG_GUI_PKG_DIR}" == "${TKG_GUI_LOCAL_DIR}/pkg" ]]; then
-        msg2 "Using local tkg-gui repo at ${TKG_GUI_LOCAL_DIR}"
-        # Clean stale makepkg source artifacts from previous builds that
-        # may reference a different user's home directory.
-        rm -rf "${TKG_GUI_PKG_DIR}/tkg-gui" "${TKG_GUI_PKG_DIR}/src"
-        # Rewrite the PKGBUILD source to clone from the local checkout
-        # instead of SSH (which requires keys and network access).
-        sed -i.iso-bak \
-            "s|source=(\"tkg-gui::git+ssh://[^\"]*\")|source=(\"tkg-gui::git+file://${TKG_GUI_LOCAL_DIR}\")|" \
-            "${TKG_GUI_PKG_DIR}/PKGBUILD"
-    elif [[ -d "${TKG_GUI_CLONE_DIR}/.git" ]]; then
-        msg2 "Updating tkg-gui repository..."
-        git -C "${TKG_GUI_CLONE_DIR}" pull --ff-only
-    else
-        msg2 "Cloning tkg-gui repository..."
-        git clone "${TKG_GUI_REPO_URL}" "${TKG_GUI_CLONE_DIR}"
+    local pkgbuild="${TKG_GUI_PKG_DIR}/PKGBUILD"
+    [[ -f "$pkgbuild" ]] || die "tkg-gui PKGBUILD not found at ${pkgbuild}"
+
+    rm -rf "${TKG_GUI_PKG_DIR}/tkg-gui" "${TKG_GUI_PKG_DIR}/src"
+
+    if [[ "$BUILD_SOURCE" == "local" ]]; then
+        point_pkgbuild_at_submodule "tkg-gui" "$pkgbuild" "${REPO_ROOT}/vendor/tkg-gui"
     fi
+    # clone mode: PKGBUILD source already has the correct SSH remote URL.
 
-    [[ -f "${TKG_GUI_PKG_DIR}/PKGBUILD" ]] \
-        || die "tkg-gui pkg/PKGBUILD not found at ${TKG_GUI_PKG_DIR}/PKGBUILD"
-
+    stamp_pkgrel "$pkgbuild"
     pushd "${TKG_GUI_PKG_DIR}" >/dev/null
     makepkg -sf --noconfirm
     popd >/dev/null
-
-    # Restore original PKGBUILD if we patched it
-    if [[ -f "${TKG_GUI_PKG_DIR}/PKGBUILD.iso-bak" ]]; then
-        mv "${TKG_GUI_PKG_DIR}/PKGBUILD.iso-bak" "${TKG_GUI_PKG_DIR}/PKGBUILD"
-    fi
+    restore_pkgbuild "$pkgbuild"
 
     local count
     count=$(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
@@ -372,38 +428,33 @@ build_tkg_gui_packages() {
     msg2 "Built ${count} tkg-gui package(s)"
 }
 
+# Modular-1 (always built)
+#   local:  rewrite source (hardcoded foreign path) → git+file:// pointing at vendor/Modular-1
+#   clone:  rewrite source → SSH remote URL
 build_modular_packages() {
     if "$DRY_RUN"; then
-        msg2 "[dry-run] Would build modular from ${MODULAR_PKG_DIR}"
+        msg2 "[dry-run] Would build Modular (${BUILD_SOURCE} mode) from ${MODULAR_PKG_DIR}"
         return 0
     fi
 
-    msg "Building Modular packages..."
+    msg "Building Modular packages (${BUILD_SOURCE} mode)..."
 
-    if [[ "${MODULAR_PKG_DIR}" == "${MODULAR_LOCAL_DIR}/pkg" ]]; then
-        msg2 "Using local Modular repo at ${MODULAR_LOCAL_DIR}"
-        # Clean stale makepkg source artifacts from previous builds that
-        # may reference a different user's home directory.
-        rm -rf "${MODULAR_PKG_DIR}/modular" "${MODULAR_PKG_DIR}/src"
-        # Rewrite the PKGBUILD source to clone from the local checkout
-        # instead of SSH (which requires keys and network access).
-        sed -i.iso-bak \
-            "s|source=(\"modular::git+ssh://[^\"]*\")|source=(\"modular::git+file://${MODULAR_LOCAL_DIR}\")|" \
-            "${MODULAR_PKG_DIR}/PKGBUILD"
-    elif [[ -d "${MODULAR_CLONE_DIR}/.git" ]]; then
-        msg2 "Updating Modular repository..."
-        git -C "${MODULAR_CLONE_DIR}" pull --ff-only
+    local pkgbuild="${MODULAR_PKG_DIR}/PKGBUILD"
+    [[ -f "$pkgbuild" ]] || die "Modular PKGBUILD not found at ${pkgbuild}"
+
+    rm -rf "${MODULAR_PKG_DIR}/modular" "${MODULAR_PKG_DIR}/src"
+
+    if [[ "$BUILD_SOURCE" == "local" ]]; then
+        point_pkgbuild_at_submodule "modular" "$pkgbuild" "${REPO_ROOT}/vendor/Modular-1"
     else
-        msg2 "Cloning Modular repository..."
-        git clone "${MODULAR_REPO_URL}" "${MODULAR_CLONE_DIR}"
+        point_pkgbuild_at_remote "modular" "$pkgbuild" "${MODULAR_REMOTE}"
     fi
 
-    [[ -f "${MODULAR_PKG_DIR}/PKGBUILD" ]] \
-        || die "Modular pkg/PKGBUILD not found at ${MODULAR_PKG_DIR}/PKGBUILD"
-
+    stamp_pkgrel "$pkgbuild"
     pushd "${MODULAR_PKG_DIR}" >/dev/null
     makepkg -sf --noconfirm
     popd >/dev/null
+    restore_pkgbuild "$pkgbuild"
 
     local count
     count=$(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
@@ -411,32 +462,78 @@ build_modular_packages() {
     msg2 "Built ${count} Modular package(s)"
 }
 
+# gamescope (always built)
+#   local:  no source rewrite — PKGBUILD uses source=("gamescope::git+file://$(cd .. && pwd)")
+#           which evaluates to vendor/gamescope when makepkg runs from vendor/gamescope/pkg/
+#   clone:  rewrite source → MasterGenotype fork SSH URL on gamescope-ba branch
 build_gamescope_packages() {
     if "$DRY_RUN"; then
-        msg2 "[dry-run] Would build gamescope from ${GAMESCOPE_PKG_DIR}"
+        msg2 "[dry-run] Would build gamescope (${BUILD_SOURCE} mode) from ${GAMESCOPE_PKG_DIR}"
         return 0
     fi
 
-    msg "Building gamescope packages..."
+    msg "Building gamescope packages (${BUILD_SOURCE} mode)..."
 
-    if [[ ! -f "${GAMESCOPE_PKG_DIR}/PKGBUILD" ]]; then
-        die "gamescope pkg/PKGBUILD not found at ${GAMESCOPE_PKG_DIR}/PKGBUILD
-  The PKGBUILD is not tracked in ${GAMESCOPE_REPO_URL} upstream; it must
-  exist in a sibling checkout at ${GAMESCOPE_LOCAL_DIR}.
-  Clone the upstream there and place a pkg/PKGBUILD, or copy from another
-  working deploytix checkout."
+    local pkgbuild="${GAMESCOPE_PKG_DIR}/PKGBUILD"
+    [[ -f "$pkgbuild" ]] || die "gamescope PKGBUILD not found at ${pkgbuild}"
+
+    rm -rf "${GAMESCOPE_PKG_DIR}/gamescope" "${GAMESCOPE_PKG_DIR}/src"
+
+    if [[ "$BUILD_SOURCE" == "clone" ]]; then
+        point_pkgbuild_at_remote "gamescope" "$pkgbuild" "${GAMESCOPE_REMOTE}"
     fi
+    # local mode: $(cd .. && pwd) in the source array evaluates to vendor/gamescope
+    # at makepkg runtime — no rewrite needed.
 
-    msg2 "Using local gamescope repo at ${GAMESCOPE_LOCAL_DIR}"
-
+    stamp_pkgrel "$pkgbuild"
     pushd "${GAMESCOPE_PKG_DIR}" >/dev/null
     makepkg -sf --noconfirm
     popd >/dev/null
+    restore_pkgbuild "$pkgbuild"
 
     local count
     count=$(find "${GAMESCOPE_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
     (( count > 0 )) || die "makepkg produced no gamescope packages"
     msg2 "Built ${count} gamescope package(s)"
+}
+
+# ── Step B2: Stage packages ───────────────────────────────────────────────────
+# Consolidate all built packages into one directory. Both create_local_repo()
+# and embed_live_repo() consume only this dir, so the local artools repo and
+# the ISO-embedded repo are always identical — no version drift possible.
+stage_packages() {
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would stage packages into ${PKG_STAGE_DIR}"
+        return 0
+    fi
+
+    msg "Staging packages..."
+    rm -rf "${PKG_STAGE_DIR}"
+    mkdir -p "${PKG_STAGE_DIR}"
+
+    local src_dir pkg
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+        [[ -d "$src_dir" ]] || continue
+        for pkg in "${src_dir}"/*.pkg.tar.zst; do
+            [[ -f "$pkg" ]] || continue
+            cp -f "$pkg" "${PKG_STAGE_DIR}/"
+        done
+    done
+
+    # Sanity gate — these must always be present.
+    local r
+    for r in deploytix-git gamescope-git modular-git; do
+        compgen -G "${PKG_STAGE_DIR}/${r}-*.pkg.tar.zst" >/dev/null \
+            || die "Stage missing ${r}; rebuild with -s removed"
+    done
+    if "$INCLUDE_GUI"; then
+        compgen -G "${PKG_STAGE_DIR}/tkg-gui-git-*.pkg.tar.zst" >/dev/null \
+            || die "Stage missing tkg-gui-git; rebuild with -s removed"
+    fi
+
+    local staged_count
+    staged_count=$(find "${PKG_STAGE_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
+    msg2 "Staged ${staged_count} package(s) at ${PKG_STAGE_DIR}"
 }
 
 # ── Step C: Create local pacman repository ───────────────────────────────────
@@ -452,25 +549,18 @@ create_local_repo() {
     sudo rm -f "${LOCAL_REPO_DIR}"/*.db* "${LOCAL_REPO_DIR}"/*.files*
     sudo rm -f "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
-    local pkg_count=0
-    local src_dir pkg
-
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
-        [[ -d "$src_dir" ]] || continue
-        for pkg in "${src_dir}"/*.pkg.tar.zst; do
-            [[ -f "$pkg" ]] || continue
-            sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
-            msg2 "Added $(basename "$pkg")"
-            pkg_count=$((pkg_count + 1))
-        done
+    local pkg pkg_count=0
+    for pkg in "${PKG_STAGE_DIR}"/*.pkg.tar.zst; do
+        [[ -f "$pkg" ]] || continue
+        sudo cp -f "$pkg" "${LOCAL_REPO_DIR}/"
+        msg2 "Added $(basename "$pkg")"
+        pkg_count=$(( pkg_count + 1 ))
     done
 
-    if (( pkg_count == 0 )); then
-        die "No packages found to add to repository"
-    fi
+    (( pkg_count > 0 )) || die "No packages found in stage dir to add to repository"
 
     sudo chmod 644 "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
-    sudo repo-add "${LOCAL_REPO_DIR}/deploytix.db.tar.zst" "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
+    sudo repo-add --new "${LOCAL_REPO_DIR}/deploytix.db.tar.zst" "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
     msg2 "Repository created with ${pkg_count} package(s) at ${LOCAL_REPO_DIR}"
 }
@@ -540,14 +630,9 @@ reset_artifacts() {
         msg2 "Removed repo: ${LOCAL_REPO_DIR}"
     fi
 
-    if [[ -d "${TKG_GUI_CLONE_DIR}" && "${TKG_GUI_PKG_DIR}" != "${TKG_GUI_LOCAL_DIR}/pkg" ]]; then
-        rm -rf "${TKG_GUI_CLONE_DIR}"
-        msg2 "Removed tkg-gui clone: ${TKG_GUI_CLONE_DIR}"
-    fi
-
-    if [[ -d "${MODULAR_CLONE_DIR}" && "${MODULAR_PKG_DIR}" != "${MODULAR_LOCAL_DIR}/pkg" ]]; then
-        rm -rf "${MODULAR_CLONE_DIR}"
-        msg2 "Removed Modular clone: ${MODULAR_CLONE_DIR}"
+    if [[ -d "${PKG_STAGE_DIR}" ]]; then
+        rm -rf "${PKG_STAGE_DIR}"
+        msg2 "Removed staging dir: ${PKG_STAGE_DIR}"
     fi
 
     msg "Reset complete"
@@ -653,24 +738,25 @@ embed_live_repo() {
     fi
 
     materialize_overlay_symlink "${live_overlay_dir}"
+
+    # Wipe any leftovers from a previous run so the db reflects only what
+    # is currently in the stage dir.
+    rm -rf "${live_repo_path}"
     mkdir -p "${live_repo_path}"
 
-    local pkg_count=0
-    local src_dir pkg
-
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
-        [[ -d "$src_dir" ]] || continue
-        for pkg in "${src_dir}"/*.pkg.tar.zst; do
-            [[ -f "$pkg" ]] || continue
-            cp -f "$pkg" "${live_repo_path}/"
-            msg2 "Embedded $(basename "$pkg")"
-            pkg_count=$((pkg_count + 1))
-        done
+    local pkg pkg_count=0
+    for pkg in "${PKG_STAGE_DIR}"/*.pkg.tar.zst; do
+        [[ -f "$pkg" ]] || continue
+        cp -f "$pkg" "${live_repo_path}/"
+        msg2 "Embedded $(basename "$pkg")"
+        pkg_count=$(( pkg_count + 1 ))
     done
 
-    (( pkg_count > 0 )) || die "No packages available to embed in live-overlay"
+    (( pkg_count > 0 )) || die "No packages in stage dir to embed in live-overlay"
 
-    repo-add "${live_repo_path}/deploytix.db.tar.zst" \
+    # --new combined with the freshly emptied dir ensures no stale entries
+    # (e.g. a gamescope-git entry from a prior run) survive in the db.
+    repo-add --new "${live_repo_path}/deploytix.db.tar.zst" \
         "${live_repo_path}"/*.pkg.tar.zst
 
     msg2 "Embedded ${pkg_count} package(s); repo at /var/lib/deploytix-repo"
@@ -709,9 +795,32 @@ run_buildiso() {
     fi
 }
 
+# ── Step I: Clean up built packages ──────────────────────────────────────────
+# Removes .pkg.tar.zst files from each vendor pkg/ dir and the staging dir once
+# they are safely embedded in the ISO and in LOCAL_REPO_DIR. Skip with -K.
+cleanup_built_packages() {
+    "$DRY_RUN"       && return 0
+    "$CHROOT_ONLY"   && return 0
+    "$KEEP_PACKAGES" && return 0
+
+    msg "Cleaning up built .pkg.tar.zst files..."
+    local d
+    for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+        [[ -d "$d" ]] || continue
+        find "$d" -maxdepth 1 -name '*.pkg.tar.zst'     -delete
+        find "$d" -maxdepth 1 -name '*.pkg.tar.zst.sig' -delete
+    done
+    rm -rf "${PKG_STAGE_DIR}"
+    msg2 "Done — packages are embedded in the ISO and in ${LOCAL_REPO_DIR}"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
     resolve_paths
+
+    # Install a global handler that restores any modified PKGBUILDs and removes
+    # the staging dir if the script is interrupted or exits on an error.
+    trap '_cleanup_dirty_pkgbuilds' EXIT INT TERM
 
     if "$RESET_MODE"; then
         reset_artifacts
@@ -721,21 +830,24 @@ main() {
     check_prerequisites
 
     msg "Building Deploytix ISO"
-    msg2 "Init system: ${INITSYS}"
-    msg2 "GUI mode:    ${INCLUDE_GUI}"
+    msg2 "Init system:   ${INITSYS}"
+    msg2 "GUI mode:      ${INCLUDE_GUI}"
     if "$INCLUDE_GUI"; then
-        msg2 "Desktop:     ${BASE_DE_PROFILE}"
+        msg2 "Desktop:       ${BASE_DE_PROFILE}"
     fi
-    msg2 "Repo:        ${LOCAL_REPO_DIR}"
-    msg2 "Profile:     ${WORKSPACE_PROFILES}/deploytix"
+    msg2 "Build source:  ${BUILD_SOURCE}"
+    msg2 "Repo:          ${LOCAL_REPO_DIR}"
+    msg2 "Profile:       ${WORKSPACE_PROFILES}/deploytix"
     echo
 
     build_packages
+    stage_packages
     create_local_repo
     install_pacman_conf
     install_profile
     embed_live_repo
     run_buildiso
+    cleanup_built_packages
 
     msg "Done!"
     msg2 "The pacman.conf override and profile remain installed."
