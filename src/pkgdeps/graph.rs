@@ -53,7 +53,10 @@ pub fn to_dot(closure: &DepClosure, opts: DotOpts) -> String {
             edge.kind.dot_style(),
             edge_label(edge)
         );
-        if matches!(edge.kind, EdgeKind::ReverseRuntime | EdgeKind::ReverseOptional) {
+        if matches!(
+            edge.kind,
+            EdgeKind::ReverseRuntime | EdgeKind::ReverseOptional
+        ) {
             attrs.push_str(", arrowhead=invempty");
         }
         let _ = writeln!(

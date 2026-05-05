@@ -168,6 +168,46 @@ impl DeploytixGui {
         }
     }
 
+    fn start_preflight(&mut self) {
+        let config = self.build_config();
+        self.install.preflight_running = true;
+        self.install.preflight_results = None;
+        self.install.preflight_has_failures = false;
+
+        let (tx, rx): (Sender<InstallMessage>, Receiver<InstallMessage>) = channel();
+        self.install.receiver = Some(rx);
+
+        thread::spawn(move || {
+            let report = crate::preflight::run_preflight(&config);
+            let lines = report.to_log_lines();
+            let has_failures = report.has_failures();
+            let _ = tx.send(InstallMessage::PreflightResults {
+                lines,
+                has_failures,
+            });
+        });
+    }
+
+    fn start_rehearsal(&mut self) {
+        let config = self.build_config();
+        self.install.rehearsal_running = true;
+        self.install.rehearsal_results = None;
+        self.install.rehearsal_has_failures = false;
+
+        let (tx, rx): (Sender<InstallMessage>, Receiver<InstallMessage>) = channel();
+        self.install.receiver = Some(rx);
+
+        thread::spawn(move || {
+            let report = crate::rehearsal::run_rehearsal(&config);
+            let lines = report.to_log_lines();
+            let has_failures = report.has_failures();
+            let _ = tx.send(InstallMessage::RehearsalResults {
+                lines,
+                has_failures,
+            });
+        });
+    }
+
     fn start_installation(&mut self) {
         let config = self.build_config();
         let dry_run = self.install.dry_run;
@@ -253,6 +293,24 @@ impl DeploytixGui {
                         self.install.finished = true;
                         should_clear = true;
                     }
+                    InstallMessage::PreflightResults {
+                        lines,
+                        has_failures,
+                    } => {
+                        self.install.preflight_results = Some(lines);
+                        self.install.preflight_has_failures = has_failures;
+                        self.install.preflight_running = false;
+                        should_clear = true;
+                    }
+                    InstallMessage::RehearsalResults {
+                        lines,
+                        has_failures,
+                    } => {
+                        self.install.rehearsal_results = Some(lines);
+                        self.install.rehearsal_has_failures = has_failures;
+                        self.install.rehearsal_running = false;
+                        should_clear = true;
+                    }
                 }
             }
         }
@@ -323,9 +381,12 @@ impl eframe::App for DeploytixGui {
                             }
                         }
                         WizardStep::Summary => {
-                            let enabled = self.install.confirmed || self.install.dry_run;
-                            if widgets::primary_button_enabled(ui, enabled, "Install \u{2192}")
-                                .clicked()
+                            if widgets::primary_button_enabled(
+                                ui,
+                                self.install.confirmed,
+                                "Install \u{2192}",
+                            )
+                            .clicked()
                             {
                                 if let Some(next) = self.step.next() {
                                     self.step = next;
@@ -373,6 +434,14 @@ impl eframe::App for DeploytixGui {
                     if self.install.save_requested {
                         self.install.save_requested = false;
                         self.save_config();
+                    }
+                    if self.install.preflight_requested {
+                        self.install.preflight_requested = false;
+                        self.start_preflight();
+                    }
+                    if self.install.rehearsal_requested {
+                        self.install.rehearsal_requested = false;
+                        self.start_rehearsal();
                     }
                 }
                 WizardStep::Installing => {

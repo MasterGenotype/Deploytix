@@ -180,14 +180,148 @@ pub fn show(
             }
         });
 
+        // ── Preflight dry-run ─────────────────────────────────────
+        widgets::section(ui, "Preflight Dry Run", |ui| {
+            ui.horizontal(|ui| {
+                let running = install.preflight_running;
+                let btn = ui.add_enabled(
+                    !running,
+                    egui::Button::new(if running {
+                        "\u{23f3} Running..."
+                    } else {
+                        "\u{1f50d} Dry Run"
+                    }),
+                );
+                if btn.clicked() {
+                    install.preflight_requested = true;
+                }
+                ui.label(
+                    RichText::new("Verify the installation would succeed without making changes")
+                        .color(theme::TEXT_SECONDARY)
+                        .size(11.0),
+                );
+            });
+
+            if let Some(ref results) = install.preflight_results {
+                ui.add_space(theme::SPACING_XS);
+
+                // Summary line
+                let (pass, warn, fail) = results.iter().fold((0, 0, 0), |(p, w, f), line| {
+                    match line.status {
+                        crate::preflight::report::CheckStatus::Pass => (p + 1, w, f),
+                        crate::preflight::report::CheckStatus::Warn => (p, w + 1, f),
+                        crate::preflight::report::CheckStatus::Fail => (p, w, f + 1),
+                    }
+                });
+                let summary_color = if fail > 0 {
+                    theme::ERROR
+                } else if warn > 0 {
+                    egui::Color32::from_rgb(255, 200, 0)
+                } else {
+                    theme::SUCCESS
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Preflight: {} passed, {} warning(s), {} failure(s)",
+                        pass, warn, fail
+                    ))
+                    .color(summary_color)
+                    .strong(),
+                );
+
+                // Scrollable results
+                let scroll = egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .auto_shrink([false, false]);
+                scroll.show(ui, |ui| {
+                    for line in results {
+                        let color = match line.status {
+                            crate::preflight::report::CheckStatus::Pass => theme::SUCCESS,
+                            crate::preflight::report::CheckStatus::Warn => {
+                                egui::Color32::from_rgb(255, 200, 0)
+                            }
+                            crate::preflight::report::CheckStatus::Fail => theme::ERROR,
+                        };
+                        ui.label(RichText::new(&line.text).monospace().size(11.0).color(color));
+                    }
+                });
+            }
+        });
+
+        // ── Rehearsal ───────────────────────────────────────────────
+        widgets::section(ui, "Rehearsal Install", |ui| {
+            ui.horizontal(|ui| {
+                let running = install.rehearsal_running;
+                let btn = ui.add_enabled(
+                    !running,
+                    egui::Button::new(if running {
+                        "\u{23f3} Running..."
+                    } else {
+                        "\u{1f3ad} Rehearse"
+                    }),
+                );
+                if btn.clicked() {
+                    install.rehearsal_requested = true;
+                }
+                ui.label(
+                    RichText::new(
+                        "Full install on disk, record everything, then wipe (DESTRUCTIVE)",
+                    )
+                    .color(theme::ERROR)
+                    .size(11.0),
+                );
+            });
+
+            if let Some(ref results) = install.rehearsal_results {
+                ui.add_space(theme::SPACING_XS);
+
+                // Summary line
+                let (pass, fail) = results.iter().fold((0, 0), |(p, f), line| {
+                    if line.success {
+                        (p + 1, f)
+                    } else {
+                        (p, f + 1)
+                    }
+                });
+                let summary_color = if fail > 0 {
+                    theme::ERROR
+                } else {
+                    theme::SUCCESS
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Rehearsal: {} passed, {} failed",
+                        pass, fail
+                    ))
+                    .color(summary_color)
+                    .strong(),
+                );
+
+                // Scrollable results
+                let scroll = egui::ScrollArea::vertical()
+                    .id_salt("rehearsal_results")
+                    .max_height(200.0)
+                    .auto_shrink([false, false]);
+                scroll.show(ui, |ui| {
+                    for line in results {
+                        let color = if line.success {
+                            theme::SUCCESS
+                        } else {
+                            theme::ERROR
+                        };
+                        ui.label(
+                            RichText::new(&line.text)
+                                .monospace()
+                                .size(11.0)
+                                .color(color),
+                        );
+                    }
+                });
+            }
+        });
+
         // ── Install options ────────────────────────────────────────
         widgets::section(ui, "Install Options", |ui| {
-            ui.checkbox(
-                &mut install.dry_run,
-                "Dry run mode (preview only, no changes)",
-            );
-            ui.add_space(theme::SPACING_SM);
-
             ui.label(
                 RichText::new("\u{26a0} WARNING: This will ERASE ALL DATA on the selected disk!")
                     .color(theme::ERROR)
@@ -198,7 +332,7 @@ pub fn show(
         });
     });
 
-    install.confirmed || install.dry_run
+    install.confirmed
 }
 
 fn row(ui: &mut Ui, label: &str, value: &str) {

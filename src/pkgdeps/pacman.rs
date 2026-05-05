@@ -74,16 +74,13 @@ pub struct SystemExec;
 impl CmdExec for SystemExec {
     fn run(&self, program: &str, args: &[String]) -> Result<String> {
         debug!("pkgdeps exec: {} {}", program, args.join(" "));
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    DeploytixError::CommandNotFound(program.to_string())
-                } else {
-                    DeploytixError::Io(e)
-                }
-            })?;
+        let output = Command::new(program).args(args).output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DeploytixError::CommandNotFound(program.to_string())
+            } else {
+                DeploytixError::Io(e)
+            }
+        })?;
         if !output.status.success() {
             return Err(DeploytixError::CommandFailed {
                 command: format!("{} {}", program, args.join(" ")),
@@ -302,11 +299,9 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
         //    bug where matches came from package descriptions, not
         //    provides.
         match self.pacman(&["-Sii"]) {
-            Ok(out) => Ok(scan_si_for_provider(
-                &out,
-                virtual_name,
-                |pkg| self.is_installed(pkg).unwrap_or(false),
-            )),
+            Ok(out) => Ok(scan_si_for_provider(&out, virtual_name, |pkg| {
+                self.is_installed(pkg).unwrap_or(false)
+            })),
             Err(DeploytixError::CommandFailed { .. }) => Ok(None),
             Err(_) => Ok(None),
         }
@@ -375,7 +370,10 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
     }
 
     fn is_installed(&self, name: &str) -> Result<bool> {
-        match self.exec.run("pacman", &["-Qq".to_string(), name.to_string()]) {
+        match self
+            .exec
+            .run("pacman", &["-Qq".to_string(), name.to_string()])
+        {
             Ok(_) => Ok(true),
             Err(DeploytixError::CommandFailed { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -507,7 +505,8 @@ pub fn parse_pacman_si(text: &str) -> Result<Package> {
             })
             .unwrap_or_default()
     };
-    let multi_dep = |k: &str| -> Vec<Dep> { multi(k).into_iter().map(|t| Dep::parse(&t)).collect() };
+    let multi_dep =
+        |k: &str| -> Vec<Dep> { multi(k).into_iter().map(|t| Dep::parse(&t)).collect() };
 
     // For optdepends, prefer line-per-entry. If pacman emitted the field
     // on a single line (e.g. with two-space separators), fall back to
@@ -662,10 +661,7 @@ mod tests {
         fn run(&self, program: &str, args: &[String]) -> Result<String> {
             let key = format!("{} {}", program, args.join(" "));
             let mut map = self.responses.lock().unwrap();
-            let key_prefix_match = map
-                .keys()
-                .find(|k| key.starts_with(k.as_str()))
-                .cloned();
+            let key_prefix_match = map.keys().find(|k| key.starts_with(k.as_str())).cloned();
             let lookup = key_prefix_match.or_else(|| {
                 if map.contains_key(&key) {
                     Some(key.clone())
@@ -780,10 +776,7 @@ Optional For    : gamma
     /// resolver is non-interactive regardless of `clean_root`.
     #[test]
     fn install_plan_always_noninteractive_even_when_clean_root_false() {
-        let exec = RecordingExec::new(vec![(
-            "pacman -S --print",
-            Ok("extra/gnome-shell 46-1\n"),
-        )]);
+        let exec = RecordingExec::new(vec![("pacman -S --print", Ok("extra/gnome-shell 46-1\n"))]);
         let src = PacmanSource::new(exec, PacmanConfig::default());
         // Group target — the kind of input pacman would prompt about.
         let _plan = src.install_plan(&["gnome"], false).unwrap();
@@ -804,10 +797,7 @@ Optional For    : gamma
     /// pins the new contract that it is unconditional.
     #[test]
     fn install_plan_passes_noconfirm_when_clean_root_true() {
-        let exec = RecordingExec::new(vec![(
-            "pacman -S --print",
-            Ok("system/glibc 2.39-1\n"),
-        )]);
+        let exec = RecordingExec::new(vec![("pacman -S --print", Ok("system/glibc 2.39-1\n"))]);
         let src = PacmanSource::new(exec, PacmanConfig::default());
         let _plan = src.install_plan(&["glibc"], true).unwrap();
         let calls = src.exec.calls();
@@ -1101,9 +1091,11 @@ Depends On      : glibc
         // description fragments.
         let exec = RecordingExec::new(vec![(
             "expac -S -l \x1f %n\t%O",
-            Ok("git\taur-helper: for AUR helpers\x1fpython: optional scripting\n\
+            Ok(
+                "git\taur-helper: for AUR helpers\x1fpython: optional scripting\n\
 pacman\taur-helper: for sync db operations\n\
-unrelated\tfoo: bar baz\n"),
+unrelated\tfoo: bar baz\n",
+            ),
         )]);
         let src = PacmanSource::new(exec, PacmanConfig::default());
         let parents = src.optional_for("aur-helper").unwrap();
@@ -1168,7 +1160,9 @@ unrelated\tfoo: bar baz\n"),
 
         let calls = src.exec.calls();
         assert!(
-            calls.iter().any(|c| c.contains(" -l \x1f ") && c.contains("%O")),
+            calls
+                .iter()
+                .any(|c| c.contains(" -l \x1f ") && c.contains("%O")),
             "optional_for did not pin expac list delimiter; calls: {:?}",
             calls
         );

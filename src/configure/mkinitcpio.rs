@@ -150,8 +150,8 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             .partitions
             .iter()
             .any(|p| p.mount_point == "/usr");
-        let has_usr_subvolume = config.disk.use_subvolumes
-            && config.disk.filesystem == Filesystem::Btrfs;
+        let has_usr_subvolume =
+            config.disk.use_subvolumes && config.disk.filesystem == Filesystem::Btrfs;
         if has_usr_partition || has_usr_subvolume {
             hooks.push("usr".to_string());
         }

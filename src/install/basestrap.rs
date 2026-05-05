@@ -1,7 +1,6 @@
 //! Basestrap wrapper for base system installation
 
 use crate::config::{DeploymentConfig, DesktopEnvironment, Filesystem, NetworkBackend};
-use crate::pkgdeps::preflight as pkg_preflight;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::collections::HashSet;
@@ -373,17 +372,11 @@ fn resolve_invoking_user_home() -> Option<PathBuf> {
     }
 
     // 3. Scan /home for a directory containing a deploytix checkout.
-    let scan_markers = [
-        ".gitrepos/deploytix-2/pkg",
-        ".gitrepos/gamescope/pkg",
-    ];
+    let scan_markers = [".gitrepos/deploytix-2/pkg", ".gitrepos/gamescope/pkg"];
     if let Ok(entries) = std::fs::read_dir("/home") {
         for entry in entries.flatten() {
             let candidate = entry.path();
-            if scan_markers
-                .iter()
-                .any(|m| candidate.join(m).is_dir())
-            {
+            if scan_markers.iter().any(|m| candidate.join(m).is_dir()) {
                 return Some(candidate);
             }
         }
@@ -463,7 +456,10 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
 
     info!(
         "Package search directories: {:?}",
-        search_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>()
+        search_dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
     );
 
     let mut found = Vec::new();
@@ -984,38 +980,6 @@ pub fn run_basestrap_with_retries(
     // Ensure the Arch [extra] repo is available for packages that
     // are not mirrored in the Artix repositories.
     let custom_conf = ensure_arch_repos(custom_conf, cmd)?;
-
-    // Dependency preflight: ask pacman -S --print to resolve the full
-    // transaction against the same pacman.conf basestrap will use. This
-    // surfaces missing virtual providers, target-not-found errors, and
-    // conflict-driven removals before basestrap starts downloading
-    // anything. Best-effort — failures here only log; basestrap itself
-    // is the source of truth.
-    let report = pkg_preflight::preflight_host(
-        custom_conf.as_deref(),
-        install_root,
-        &packages,
-        cmd.is_dry_run(),
-    )?;
-    if report.skipped {
-        info!(
-            "Preflight skipped (dry-run, missing pacman tooling, or empty sync DB); \
-             deferring to basestrap for resolution"
-        );
-    } else if !report.is_resolvable() {
-        warn!(
-            "Preflight reported {} unresolvable target(s): {}. basestrap is likely to \
-             fail with `target not found`; continuing anyway since basestrap is the \
-             ultimate authority on resolution.",
-            report.unresolved.len(),
-            report.unresolved.join(", ")
-        );
-    } else {
-        info!(
-            "Preflight resolved {} package(s) cleanly",
-            report.planned_install_count
-        );
-    }
 
     info!(
         "Installing {} packages with basestrap to {}",

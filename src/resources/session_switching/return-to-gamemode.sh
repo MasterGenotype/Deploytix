@@ -17,6 +17,21 @@ echo "gamescope" > "$SENTINEL"
 echo "Next session set to gamescope"
 
 # --- Detect desktop environment and log out ---
+# Start a background watchdog that force-kills stale desktop processes
+# after 5 seconds, in case the normal logout path hangs (e.g. kwin or
+# kded6 refusing to exit).  If the session exits cleanly before the
+# timeout, the watchdog dies with the session.
+(
+    sleep 5
+    pkill -x kwin_wayland            2>/dev/null || true
+    pkill -x kwin_wayland_wrapper    2>/dev/null || true
+    pkill -x startplasma-wayland     2>/dev/null || true
+    pkill -x plasma_session          2>/dev/null || true
+    pkill -x kded6                   2>/dev/null || true
+    pkill -f kactivitymanagerd       2>/dev/null || true
+    pkill -f xdg-desktop-portal-kde  2>/dev/null || true
+) &
+
 if command -v startplasma-wayland &>/dev/null || command -v startplasma-x11 &>/dev/null; then
     qdbus org.kde.Shutdown /Shutdown org.kde.Shutdown.logout
 elif command -v gnome-session &>/dev/null; then

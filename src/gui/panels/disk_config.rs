@@ -17,11 +17,7 @@ pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
 
     // ── Filesystem & Swap ──────────────────────────────────────
     widgets::section(ui, "Filesystem & Swap", |ui| {
-        filesystem_section(
-            ui,
-            &mut disk.filesystem,
-            &mut disk.swap_type,
-        );
+        filesystem_section(ui, &mut disk.filesystem, &mut disk.swap_type);
     });
 
     // ── Encryption ─────────────────────────────────────────────
@@ -96,11 +92,7 @@ pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
     validate(ui, disk)
 }
 
-fn filesystem_section(
-    ui: &mut Ui,
-    filesystem: &mut Filesystem,
-    swap_type: &mut SwapType,
-) {
+fn filesystem_section(ui: &mut Ui, filesystem: &mut Filesystem, swap_type: &mut SwapType) {
     ui.horizontal(|ui| {
         ui.label("Filesystem:");
         egui::ComboBox::from_id_salt("filesystem")

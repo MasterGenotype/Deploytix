@@ -32,7 +32,6 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     let pkg_list = XFCE_PACKAGES.join(" ");
     let mut all_pkgs: Vec<String> = XFCE_PACKAGES.iter().map(|s| (*s).to_string()).collect();
     all_pkgs.push(lightdm_service.clone());
-    let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &all_pkgs, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, lightdm_service);
     crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 

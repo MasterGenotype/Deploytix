@@ -1,13 +1,13 @@
 [disk]
-device = "/dev/nvme0n1"
+device = "/dev/sdb"
 filesystem = "btrfs"
 boot_filesystem = "btrfs"
 encryption = true
-encryption_password = "Herring tomato pear banana tomato head penis suck me"
+encryption_password = "angelreb0rn heaven hell magic casting incantation cantation cantrip wizard reagent master grandmaster james"
 luks_mapper_name = "Crypt-Root"
 boot_encryption = false
 luks_boot_mapper_name = "Crypt-Boot"
-integrity = true
+integrity = false
 keyfile_enabled = true
 use_subvolumes = true
 use_lvm_thin = false
@@ -21,15 +21,15 @@ preserve_home = false
 
 [[disk.partitions]]
 mount_point = "/"
-size_mib = 92160
+size_mib = 46080
 
 [[disk.partitions]]
 mount_point = "/usr"
-size_mib = 122880
+size_mib = 66560
 
 [[disk.partitions]]
 mount_point = "/var"
-size_mib = 81920
+size_mib = 40960
 
 [[disk.partitions]]
 mount_point = "/home"
@@ -43,7 +43,7 @@ locale = "en_US.UTF-8"
 keymap = "us"
 hostname = "artix"
 hibernation = false
-secureboot = true
+secureboot = false
 secureboot_method = "sbctl"
 
 [user]
@@ -53,6 +53,8 @@ groups = [
     "wheel",
     "video",
     "audio",
+    "input",
+    "render",
     "network",
     "log",
     "seat",

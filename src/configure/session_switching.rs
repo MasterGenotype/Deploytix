@@ -22,8 +22,7 @@ const STEAMOS_SELECT_BRANCH: &str =
     include_str!("../resources/session_switching/steamos-select-branch.sh");
 const GREETD_IPC: &str = include_str!("../resources/session_switching/greetd-ipc.py");
 const GREETD_PAM: &str = include_str!("../resources/session_switching/greetd.pam");
-const GREETD_GREETER_PAM: &str =
-    include_str!("../resources/session_switching/greetd-greeter.pam");
+const GREETD_GREETER_PAM: &str = include_str!("../resources/session_switching/greetd-greeter.pam");
 
 /// File to deploy with its destination path (relative to install root) and permissions
 struct DeployFile {

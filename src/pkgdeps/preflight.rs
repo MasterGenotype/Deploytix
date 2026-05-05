@@ -116,7 +116,11 @@ fn host_source(
     install_root: Option<&str>,
     scratch_dbpath: Option<&Path>,
 ) -> PacmanSource<super::pacman::SystemExec> {
-    PacmanSource::system(host_pacman_config(custom_conf, install_root, scratch_dbpath))
+    PacmanSource::system(host_pacman_config(
+        custom_conf,
+        install_root,
+        scratch_dbpath,
+    ))
 }
 
 /// Self-cleaning scratch directory. The directory is created in
@@ -173,7 +177,9 @@ fn effective_host_dbpath(custom_conf: Option<&str>) -> PathBuf {
         args.push(c.to_string());
     }
     args.push("DBPath".into());
-    let output = std::process::Command::new("pacman-conf").args(&args).output();
+    let output = std::process::Command::new("pacman-conf")
+        .args(&args)
+        .output();
     match output {
         Ok(out) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout);
@@ -866,10 +872,22 @@ mod tests {
         // Each host sync entry is mirrored as a symlink to its source.
         let core_link = sync.join("core.db");
         let extra_link = sync.join("extra.db");
-        assert!(std::fs::symlink_metadata(&core_link).unwrap().file_type().is_symlink());
-        assert!(std::fs::symlink_metadata(&extra_link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(&core_link).unwrap(), fake_sync.join("core.db"));
-        assert_eq!(std::fs::read_link(&extra_link).unwrap(), fake_sync.join("extra.db"));
+        assert!(std::fs::symlink_metadata(&core_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&extra_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&core_link).unwrap(),
+            fake_sync.join("core.db")
+        );
+        assert_eq!(
+            std::fs::read_link(&extra_link).unwrap(),
+            fake_sync.join("extra.db")
+        );
     }
 
     /// Bug fix #1: a custom DBPath set in the effective pacman.conf
@@ -959,24 +977,29 @@ mod tests {
         let conf_dir = ScratchDir::new("deploytix-preflight-parse-").unwrap();
         let conf_path = conf_dir.path().join("pacman.conf");
         std::fs::write(
-                &conf_path,
-                concat!(
-                    "[options]\n",
-                    "Server = file:///etc/should-be-ignored\n",
-                    "\n",
-                    "[core]\n",
-                    "Server = https://mirror.example.com/$repo/$arch\n",
-                    "\n",
-                    "# inline comment\n",
-                    "[deploytix]\n",
-                    "SigLevel = Optional TrustAll\n",
-                    "Server = file:///tmp/deploytix-local-repo\n",
-                ),
-            )
-            .unwrap();
+            &conf_path,
+            concat!(
+                "[options]\n",
+                "Server = file:///etc/should-be-ignored\n",
+                "\n",
+                "[core]\n",
+                "Server = https://mirror.example.com/$repo/$arch\n",
+                "\n",
+                "# inline comment\n",
+                "[deploytix]\n",
+                "SigLevel = Optional TrustAll\n",
+                "Server = file:///tmp/deploytix-local-repo\n",
+            ),
+        )
+        .unwrap();
 
         let repos = parse_local_file_repos(conf_path.to_str().unwrap());
-        assert_eq!(repos.len(), 1, "expected exactly one local file:// repo, got {:?}", repos);
+        assert_eq!(
+            repos.len(),
+            1,
+            "expected exactly one local file:// repo, got {:?}",
+            repos
+        );
         assert_eq!(repos[0].0, "deploytix");
         assert_eq!(repos[0].1, PathBuf::from("/tmp/deploytix-local-repo"));
     }
@@ -986,8 +1009,7 @@ mod tests {
     /// rather than blindly mirroring a missing path.
     #[test]
     fn scratch_dbpath_returns_none_when_host_sync_missing() {
-        let missing =
-            Path::new("/var/empty/deploytix-preflight-no-sync-here-please-do-not-create");
+        let missing = Path::new("/var/empty/deploytix-preflight-no-sync-here-please-do-not-create");
         assert!(prepare_host_scratch_dbpath(missing).is_none());
     }
 

@@ -301,18 +301,13 @@ struct CompareOutput<'a> {
     differences: Vec<String>,
 }
 
-pub fn cmd_compare(
-    source: &dyn MetadataSource,
-    a: &str,
-    b: &str,
-    args: &DepsArgs,
-) -> Result<()> {
-    let pa = source.package(a)?.ok_or_else(|| {
-        DeploytixError::ConfigError(format!("package '{}' not found", a))
-    })?;
-    let pb = source.package(b)?.ok_or_else(|| {
-        DeploytixError::ConfigError(format!("package '{}' not found", b))
-    })?;
+pub fn cmd_compare(source: &dyn MetadataSource, a: &str, b: &str, args: &DepsArgs) -> Result<()> {
+    let pa = source
+        .package(a)?
+        .ok_or_else(|| DeploytixError::ConfigError(format!("package '{}' not found", a)))?;
+    let pb = source
+        .package(b)?
+        .ok_or_else(|| DeploytixError::ConfigError(format!("package '{}' not found", b)))?;
     let differences = resolver::diff_packages(&pa, &pb);
     if args.json {
         print_json(&CompareOutput {
@@ -331,9 +326,8 @@ pub fn cmd_compare(
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| {
-        DeploytixError::ConfigError(format!("json serialization failed: {}", e))
-    })?;
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| DeploytixError::ConfigError(format!("json serialization failed: {}", e)))?;
     println!("{}", text);
     Ok(())
 }
@@ -387,14 +381,8 @@ mod tests {
         let mut src = fixture_source();
         src.mark_installed("bar");
         let plan = src.install_plan(&["foo"], false).unwrap();
-        assert!(plan
-            .to_install
-            .iter()
-            .any(|p| p.name == "foo"));
-        assert!(!plan
-            .to_install
-            .iter()
-            .any(|p| p.name == "bar"));
+        assert!(plan.to_install.iter().any(|p| p.name == "foo"));
+        assert!(!plan.to_install.iter().any(|p| p.name == "bar"));
     }
 
     #[test]

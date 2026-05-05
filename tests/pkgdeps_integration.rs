@@ -81,10 +81,7 @@ fn full_runtime_closure_includes_transitive_deps() {
         .iter()
         .any(|e| e.to == "glibc" && e.constraint.as_deref() == Some(">=2.39")));
     // databases_used reported.
-    assert!(closure
-        .databases_used
-        .iter()
-        .any(|d| d == "system"));
+    assert!(closure.databases_used.iter().any(|d| d == "system"));
 }
 
 #[test]

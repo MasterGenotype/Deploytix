@@ -2,7 +2,20 @@
 
 use crate::utils::error::{DeploytixError, Result};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
+
+/// Record of a single command invocation captured during rehearsal mode.
+#[derive(Debug, Clone)]
+pub struct OperationRecord {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration: Duration,
+    pub success: bool,
+}
 
 /// Execute a command and return the output
 pub fn run_command(program: &str, args: &[&str]) -> Result<Output> {
@@ -63,14 +76,58 @@ pub fn log_dry_run(program: &str, args: &[&str]) {
     println!("  [dry-run] {} {}", program, args.join(" "));
 }
 
-/// Wrapper for command execution that respects dry-run mode
+/// Wrapper for command execution that respects dry-run mode.
+///
+/// When a recorder channel is set, every executed command is captured as an
+/// `OperationRecord` and sent through the channel.  This is used by the
+/// rehearsal system to produce a detailed execution log.  The recorder is
+/// opt-in and has zero overhead when not configured.
 pub struct CommandRunner {
     dry_run: bool,
+    recorder: Option<Sender<OperationRecord>>,
 }
 
 impl CommandRunner {
     pub fn new(dry_run: bool) -> Self {
-        Self { dry_run }
+        Self {
+            dry_run,
+            recorder: None,
+        }
+    }
+
+    /// Attach a recording channel.  Every command execution will send an
+    /// `OperationRecord` through the channel before returning.
+    pub fn with_recorder(mut self, tx: Sender<OperationRecord>) -> Self {
+        self.recorder = Some(tx);
+        self
+    }
+
+    /// Record an executed command if a recorder is attached.
+    fn record(&self, command_str: &str, output: &Output, elapsed: Duration) {
+        if let Some(ref tx) = self.recorder {
+            let _ = tx.send(OperationRecord {
+                command: command_str.to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+                duration: elapsed,
+                success: output.status.success(),
+            });
+        }
+    }
+
+    /// Record a failed command (one that could not be spawned at all).
+    fn record_err(&self, command_str: &str, err: &DeploytixError, elapsed: Duration) {
+        if let Some(ref tx) = self.recorder {
+            let _ = tx.send(OperationRecord {
+                command: command_str.to_string(),
+                stdout: String::new(),
+                stderr: format!("{}", err),
+                exit_code: -1,
+                duration: elapsed,
+                success: false,
+            });
+        }
     }
 
     pub fn run(&self, program: &str, args: &[&str]) -> Result<Option<Output>> {
@@ -81,7 +138,18 @@ impl CommandRunner {
             log_dry_run(program, args);
             Ok(None)
         } else {
-            run_command(program, args).map(Some)
+            let cmd_str = format!("{} {}", program, args.join(" "));
+            let start = Instant::now();
+            match run_command(program, args) {
+                Ok(output) => {
+                    self.record(&cmd_str, &output, start.elapsed());
+                    Ok(Some(output))
+                }
+                Err(e) => {
+                    self.record_err(&cmd_str, &e, start.elapsed());
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -93,7 +161,18 @@ impl CommandRunner {
             println!("  [dry-run] chroot {} bash -c '{}'", chroot_path, command);
             Ok(None)
         } else {
-            run_in_artix_chroot(chroot_path, command).map(Some)
+            let cmd_str = format!("chroot {} bash -c '{}'", chroot_path, command);
+            let start = Instant::now();
+            match run_in_artix_chroot(chroot_path, command) {
+                Ok(output) => {
+                    self.record(&cmd_str, &output, start.elapsed());
+                    Ok(Some(output))
+                }
+                Err(e) => {
+                    self.record_err(&cmd_str, &e, start.elapsed());
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -104,7 +183,18 @@ impl CommandRunner {
             log_dry_run(program, args);
             Ok(None)
         } else {
-            run_command(program, args).map(Some)
+            let cmd_str = format!("{} {}", program, args.join(" "));
+            let start = Instant::now();
+            match run_command(program, args) {
+                Ok(output) => {
+                    self.record(&cmd_str, &output, start.elapsed());
+                    Ok(Some(output))
+                }
+                Err(e) => {
+                    self.record_err(&cmd_str, &e, start.elapsed());
+                    Err(e)
+                }
+            }
         }
     }
 

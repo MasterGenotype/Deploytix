@@ -46,6 +46,9 @@ cleanup_stale_sessions() {
     pkill -x kwin_wayland_wrapper    2>/dev/null || true
     pkill -x startplasma-wayland     2>/dev/null || true
     pkill -x plasma_session          2>/dev/null || true
+    pkill -x kded6                   2>/dev/null || true
+    pkill -f kactivitymanagerd       2>/dev/null || true
+    pkill -f xdg-desktop-portal-kde  2>/dev/null || true
     pkill -f 'Xwayland :'            2>/dev/null || true
     pkill -x pipewire                2>/dev/null || true
     pkill -x pipewire-pulse          2>/dev/null || true
@@ -57,6 +60,11 @@ cleanup_stale_sessions() {
     pkill -9 -x steamwebhelper       2>/dev/null || true
     pkill -9 -x kwin_wayland         2>/dev/null || true
     pkill -9 -x kwin_wayland_wrapper 2>/dev/null || true
+    pkill -9 -x startplasma-wayland  2>/dev/null || true
+    pkill -9 -x plasma_session       2>/dev/null || true
+    pkill -9 -x kded6                2>/dev/null || true
+    pkill -9 -f kactivitymanagerd    2>/dev/null || true
+    pkill -9 -f xdg-desktop-portal-kde 2>/dev/null || true
     pkill -9 -f 'Xwayland :'         2>/dev/null || true
     pkill -9 -x pipewire             2>/dev/null || true
     pkill -9 -x pipewire-pulse       2>/dev/null || true
@@ -97,11 +105,10 @@ case "$session" in
             echo >&2 "[session-manager] No desktop environment found, falling back to gamescope"
             cmd=("/usr/local/bin/steam-gamescope-session")
         else
-            # Desktop environments need a D-Bus session bus. steam-gamescope-session
-            # starts its own (dbus-launch), but bare desktop commands like
-            # startplasma-wayland do not — without one, kwin_wayland and other
-            # components fail immediately.
-            cmd=("dbus-run-session" "$desktop_cmd")
+            # Use the desktop-session wrapper which runs the desktop in
+            # background + wait, ensuring signal traps fire immediately
+            # for clean session teardown on logout.
+            cmd=("/usr/local/bin/desktop-session")
         fi
         ;;
     *)

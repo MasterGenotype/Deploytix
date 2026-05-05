@@ -59,6 +59,10 @@ name = "deploytix-gui"
 path = "src/gui_main.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "deploytix-rehearsal"
+path = "src-rehearsal/main.rs"
+
 [build-dependencies]
 cc = "1"
 

@@ -131,10 +131,7 @@ pub(crate) fn pacman_install_chroot(
     cmd.run_in_chroot(install_root, "pacman-key --init")?;
 
     // 3. Pull the latest keyring package (best-effort).
-    let _ = cmd.run_in_chroot(
-        install_root,
-        "pacman -Sy --noconfirm artix-keyring",
-    );
+    let _ = cmd.run_in_chroot(install_root, "pacman -Sy --noconfirm artix-keyring");
 
     // 4. Populate with updated keys.
     cmd.run_in_chroot(install_root, "pacman-key --populate artix")?;
@@ -244,9 +241,6 @@ pub fn install_gpu_drivers(
     }
 
     let pkg_list = packages.join(" ");
-    let pkg_strings: Vec<String> = packages.iter().map(|s| (*s).to_string()).collect();
-    let _ =
-        crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
@@ -273,11 +267,6 @@ fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Resul
     // Install artix-archlinux-support which provides the Arch mirrorlist
     // and keyring.  This package is in Artix's own repos.
     info!("Installing artix-archlinux-support in chroot");
-    let _ = crate::pkgdeps::preflight::preflight_chroot(
-        install_root,
-        &["artix-archlinux-support".to_string()],
-        cmd.is_dry_run(),
-    );
     pacman_install_chroot(
         cmd,
         install_root,
@@ -360,9 +349,6 @@ pub fn install_wine_packages(
         .copied()
         .collect();
     let pkg_list = all_pkgs.join(" ");
-    let pkg_strings: Vec<String> = all_pkgs.iter().map(|s| (*s).to_string()).collect();
-    let _ =
-        crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
@@ -462,21 +448,12 @@ pub fn install_gaming_packages(
     if !lib32_vulkan.is_empty() {
         let vulkan_list = lib32_vulkan.join(" ");
         info!("Installing lib32 Vulkan drivers: {}", vulkan_list);
-        let vulkan_strings: Vec<String> = lib32_vulkan.iter().map(|s| (*s).to_string()).collect();
-        let _ = crate::pkgdeps::preflight::preflight_chroot(
-            install_root,
-            &vulkan_strings,
-            cmd.is_dry_run(),
-        );
         let vulkan_cmd = format!("pacman -S --noconfirm --needed {}", vulkan_list);
         pacman_install_chroot(cmd, install_root, &vulkan_cmd)?;
     }
 
     // Step 3: Install Steam
     let pkg_list = GAMING_PACKAGES.join(" ");
-    let pkg_strings: Vec<String> = GAMING_PACKAGES.iter().map(|s| (*s).to_string()).collect();
-    let _ =
-        crate::pkgdeps::preflight::preflight_chroot(install_root, &pkg_strings, cmd.is_dry_run());
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
     pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
@@ -515,16 +492,6 @@ pub fn install_yay(
     }
 
     // Ensure build dependencies are present
-    let yay_build_deps = vec![
-        "go".to_string(),
-        "git".to_string(),
-        "base-devel".to_string(),
-    ];
-    let _ = crate::pkgdeps::preflight::preflight_chroot(
-        install_root,
-        &yay_build_deps,
-        cmd.is_dry_run(),
-    );
     pacman_install_chroot(
         cmd,
         install_root,

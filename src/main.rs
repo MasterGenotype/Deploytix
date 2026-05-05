@@ -13,10 +13,10 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 // `pkgdeps` types referenced by `tests/*_integration.rs`) count as
 // genuinely used, instead of being flagged as dead code in the binary's
 // private copy of the module tree.
-use deploytix::{cleanup, config, desktop, disk, install, resources};
 use deploytix::config::DeploymentConfig;
 use deploytix::pkgdeps::cli as deps_cli;
 use deploytix::utils::error::DeploytixError;
+use deploytix::{cleanup, config, desktop, disk, install, resources};
 
 #[derive(clap::Args, Debug, Clone, Default)]
 struct DepsCommonArgs {
@@ -179,6 +179,25 @@ enum Commands {
         wipe: bool,
     },
 
+    /// Run preflight checks against a configuration without installing
+    Preflight {
+        /// Path to configuration file
+        #[arg(short, long, default_value = "deploytix.toml")]
+        config: String,
+    },
+
+    /// Run a rehearsal installation: execute the full install on disk,
+    /// record every command, then wipe the disk to restore pristine state
+    Rehearse {
+        /// Path to configuration file
+        #[arg(short, long, default_value = "deploytix.toml")]
+        config: String,
+
+        /// Path to write the detailed rehearsal log file
+        #[arg(short, long, default_value = "rehearsal.log")]
+        log_file: String,
+    },
+
     /// Query Artix/Arch package dependency metadata via pacman / libalpm
     Deps {
         #[command(subcommand)]
@@ -241,6 +260,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::Cleanup { device, wipe }) => {
             cmd_cleanup(device, wipe, dry_run)?;
+        }
+        Some(Commands::Preflight { config }) => {
+            cmd_preflight(&config)?;
+        }
+        Some(Commands::Rehearse { config, log_file }) => {
+            cmd_rehearse(&config, &log_file)?;
         }
         Some(Commands::Deps { action }) => {
             cmd_deps(action)?;
@@ -322,6 +347,52 @@ fn cmd_generate_config(output: &str) -> Result<()> {
     let content = toml::to_string_pretty(&sample)?;
     std::fs::write(output, content)?;
     println!("✓ Sample configuration written to {}", output);
+    Ok(())
+}
+
+fn cmd_preflight(config_path: &str) -> Result<()> {
+    use deploytix::preflight::run_preflight;
+
+    let config = DeploymentConfig::from_file(config_path)?;
+    let report = run_preflight(&config);
+    report.print_table();
+
+    if report.has_failures() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_rehearse(config_path: &str, log_file: &str) -> Result<()> {
+    use deploytix::rehearsal::run_rehearsal;
+
+    // Rehearsal writes to real disk — must be root
+    if !nix::unistd::geteuid().is_root() {
+        return Err(DeploytixError::NotRoot.into());
+    }
+
+    let config = DeploymentConfig::from_file(config_path)?;
+    config.validate()?;
+
+    eprintln!(
+        "⚠  REHEARSAL MODE: this will write to {} for real, then WIPE the disk.",
+        config.disk.device
+    );
+    eprintln!("   All data on the target device will be destroyed.\n");
+
+    let report = run_rehearsal(&config);
+    report.print_table();
+
+    // Write detailed log
+    if let Err(e) = report.write_to_file(std::path::Path::new(log_file)) {
+        eprintln!("Warning: failed to write log file {}: {}", log_file, e);
+    } else {
+        eprintln!("Detailed log written to {}", log_file);
+    }
+
+    if report.has_failures() {
+        std::process::exit(1);
+    }
     Ok(())
 }
 

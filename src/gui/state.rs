@@ -58,6 +58,16 @@ pub enum InstallMessage {
     Log(String),
     Finished,
     Error(String),
+    /// Preflight results from the dry-run verification thread.
+    PreflightResults {
+        lines: Vec<crate::preflight::report::PreflightLine>,
+        has_failures: bool,
+    },
+    /// Rehearsal results from the full rehearsal installation thread.
+    RehearsalResults {
+        lines: Vec<crate::rehearsal::RehearsalLogLine>,
+        has_failures: bool,
+    },
 }
 
 // ── State sub-structs ──────────────────────────────────────────────────
@@ -242,6 +252,18 @@ pub struct InstallState {
     pub save_config_status: Option<(String, bool)>,
     pub save_requested: bool,
 
+    // Preflight dry-run
+    pub preflight_running: bool,
+    pub preflight_results: Option<Vec<crate::preflight::report::PreflightLine>>,
+    pub preflight_has_failures: bool,
+    pub preflight_requested: bool,
+
+    // Rehearsal
+    pub rehearsal_running: bool,
+    pub rehearsal_results: Option<Vec<crate::rehearsal::RehearsalLogLine>>,
+    pub rehearsal_has_failures: bool,
+    pub rehearsal_requested: bool,
+
     // Progress
     pub status: String,
     pub progress: f32,
@@ -259,6 +281,14 @@ impl Default for InstallState {
             save_config_path: "deploytix.toml".to_string(),
             save_config_status: None,
             save_requested: false,
+            preflight_running: false,
+            preflight_results: None,
+            preflight_has_failures: false,
+            preflight_requested: false,
+            rehearsal_running: false,
+            rehearsal_results: None,
+            rehearsal_has_failures: false,
+            rehearsal_requested: false,
             status: String::new(),
             progress: 0.0,
             logs: Vec::new(),

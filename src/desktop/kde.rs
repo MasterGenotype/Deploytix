@@ -82,8 +82,6 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
         all_pkgs.push(format!("power-profiles-daemon-{}", config.system.init));
     }
 
-    let _ = crate::pkgdeps::preflight::preflight_chroot(install_root, &all_pkgs, cmd.is_dry_run());
-
     let install_cmd = format!("pacman -S --noconfirm {}", all_pkgs.join(" "));
     crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 

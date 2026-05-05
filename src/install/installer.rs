@@ -27,7 +27,7 @@ use crate::install::{
     generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_preserve,
     mount_partitions_zfs, run_basestrap, unmount_all,
 };
-use crate::utils::command::CommandRunner;
+use crate::utils::command::{CommandRunner, OperationRecord};
 use crate::utils::deps::ensure_dependencies;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
@@ -92,6 +92,15 @@ impl Installer {
     #[allow(dead_code)]
     pub fn with_progress_callback(mut self, cb: ProgressCallback) -> Self {
         self.progress_cb = Some(cb);
+        self
+    }
+
+    /// Attach a recording channel to the internal `CommandRunner`.
+    /// Every command executed during installation will send an
+    /// `OperationRecord` through the channel.  Used by the rehearsal system.
+    #[allow(dead_code)]
+    pub fn with_recorder(mut self, tx: std::sync::mpsc::Sender<OperationRecord>) -> Self {
+        self.cmd = self.cmd.with_recorder(tx);
         self
     }
 
@@ -541,6 +550,19 @@ impl Installer {
         print_layout_summary(&layout);
         self.layout = Some(layout);
 
+        // Run preflight checks in dry-run mode
+        if self.cmd.is_dry_run() {
+            let report = crate::preflight::run_preflight(&self.config);
+            report.print_table();
+            if report.has_failures() {
+                return Err(DeploytixError::ValidationError(
+                    "Preflight checks failed (see table above)".to_string(),
+                ));
+            }
+            // In dry-run mode, preflight IS the run — skip the rest
+            return Ok(());
+        }
+
         // Confirm with user
         let warning = if self.config.disk.preserve_home {
             format!(
@@ -765,17 +787,15 @@ impl Installer {
         //      (now-updated) keyring package
         if !self.cmd.is_dry_run() {
             info!("Initialising pacman keyring in chroot");
-            self.cmd
-                .run_in_chroot(INSTALL_ROOT, "pacman-key --init")?;
+            self.cmd.run_in_chroot(INSTALL_ROOT, "pacman-key --init")?;
             // Refresh the keyring package before populating. The old
             // keyring can still verify the *keyring package* itself
             // (Artix signs keyring updates with the master key that
             // ships in every keyring version).  Best-effort: if this
             // fails we still populate with whatever is installed.
-            let _ = self.cmd.run_in_chroot(
-                INSTALL_ROOT,
-                "pacman -Sy --noconfirm artix-keyring",
-            );
+            let _ = self
+                .cmd
+                .run_in_chroot(INSTALL_ROOT, "pacman -Sy --noconfirm artix-keyring");
             self.cmd
                 .run_in_chroot(INSTALL_ROOT, "pacman-key --populate artix")?;
         }

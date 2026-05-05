@@ -153,20 +153,66 @@ dbus-update-activation-environment DISPLAY GAMESCOPE_WAYLAND_DISPLAY \
 xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c \
     -set GAMESCOPECTRL_BASELAYER_APPID 769
 
-# --------- 12. Launch Steam ---------
+# --------- 12. Cleanup handler (runs on exit or signal) ---------
+_cleaned=0
+cleanup() {
+    [ "$_cleaned" -ne 0 ] && return 0
+    _cleaned=1
+    echo "[steam-session] Cleanup: tearing down session (pid=$$)"
+
+    # Phase 1: Kill child processes of gamescope (Xwayland, etc.) first
+    if [ -n "${gamescope_pid:-}" ]; then
+        for child in $(pgrep -P "$gamescope_pid" 2>/dev/null); do
+            kill "$child" 2>/dev/null || true
+        done
+    fi
+    # Kill Steam and its children
+    if [ -n "${steam_pid:-}" ]; then
+        kill "$steam_pid" 2>/dev/null || true
+    fi
+    pkill -x steamwebhelper 2>/dev/null || true
+    pkill -f 'Xwayland :'  2>/dev/null || true
+
+    sleep 1
+
+    # Phase 2: Now kill gamescope itself
+    if [ -n "${gamescope_pid:-}" ]; then
+        kill "$gamescope_pid" 2>/dev/null || true
+    fi
+
+    # Phase 3: Wait for gamescope exit (2s timeout)
+    sleep 2 &
+    _sp=$!
+    if [ -n "${gamescope_pid:-}" ]; then
+        wait -n "$gamescope_pid" "$_sp" 2>/dev/null || true
+    else
+        wait "$_sp" 2>/dev/null || true
+    fi
+
+    # Phase 4: Force-kill any remaining jobs
+    for job in $(jobs -p); do
+        kill -9 "$job" 2>/dev/null || true
+    done
+
+    # Phase 5: Tear down D-Bus and temp files
+    if [ -n "${DBUS_SESSION_BUS_PID:-}" ]; then
+        kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
+    fi
+    rm -rf "${tmpdir:-}"
+}
+trap cleanup EXIT HUP TERM
+
+# --------- 13. Launch Steam ---------
+# Run Steam in background + wait so that signal traps (TERM/HUP) fire
+# immediately instead of being deferred until the foreground child exits.
+# Without this, a hung Steam process blocks the cleanup trap indefinitely,
+# preventing greetd from restarting the session manager on logout.
 echo "[steam-session] Starting Steam (-steamos3 -gamepadui)..."
-steam -steamos3 -gamepadui
+steam -steamos3 -gamepadui &
+steam_pid=$!
+
+wait "$steam_pid" 2>/dev/null || true
 steam_ret=$?
 echo "[steam-session] Steam exited ($steam_ret)"
 
-# --------- 13. Cleanup ---------
-kill "$gamescope_pid" 2>/dev/null
-sleep 2 &
-sleep_pid=$!
-wait -n "$gamescope_pid" "$sleep_pid" 2>/dev/null || true
-for job in $(jobs -p); do
-    kill -9 "$job" 2>/dev/null
-done
-kill "$DBUS_SESSION_BUS_PID" 2>/dev/null
-rm -rf "$tmpdir"
 exit "$steam_ret"

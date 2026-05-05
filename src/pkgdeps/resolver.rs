@@ -256,10 +256,7 @@ pub fn resolve_reverse<S: MetadataSource + ?Sized>(
 pub fn diff_packages(a: &Package, b: &Package) -> Vec<String> {
     let mut out = Vec::new();
     if a.version != b.version {
-        out.push(format!(
-            "version: {} -> {}",
-            a.version, b.version
-        ));
+        out.push(format!("version: {} -> {}", a.version, b.version));
     }
     let diff_list = |label: &str, av: &[Dep], bv: &[Dep], out: &mut Vec<String>| {
         let aset: BTreeSet<String> = av.iter().map(|d| d.to_token()).collect();
@@ -362,10 +359,7 @@ mod tests {
         s.insert(pkg("git", "2.45", &[]));
 
         let closure = resolve_closure(&s, &["a"], ResolveOpts::default()).unwrap();
-        assert!(!closure
-            .nodes
-            .iter()
-            .any(|p| p.name == "git"));
+        assert!(!closure.nodes.iter().any(|p| p.name == "git"));
 
         let closure_opt = resolve_closure(
             &s,
