@@ -550,19 +550,6 @@ impl Installer {
         print_layout_summary(&layout);
         self.layout = Some(layout);
 
-        // Run preflight checks in dry-run mode
-        if self.cmd.is_dry_run() {
-            let report = crate::preflight::run_preflight(&self.config);
-            report.print_table();
-            if report.has_failures() {
-                return Err(DeploytixError::ValidationError(
-                    "Preflight checks failed (see table above)".to_string(),
-                ));
-            }
-            // In dry-run mode, preflight IS the run — skip the rest
-            return Ok(());
-        }
-
         // Confirm with user
         let warning = if self.config.disk.preserve_home {
             format!(

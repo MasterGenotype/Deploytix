@@ -127,10 +127,6 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Dry run mode - show what would be done without making changes
-    #[arg(short = 'n', long, global = true)]
-    dry_run: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -177,13 +173,6 @@ enum Commands {
         /// Wipe partition table after unmounting
         #[arg(short, long)]
         wipe: bool,
-    },
-
-    /// Run preflight checks against a configuration without installing
-    Preflight {
-        /// Path to configuration file
-        #[arg(short, long, default_value = "deploytix.toml")]
-        config: String,
     },
 
     /// Run a rehearsal installation: execute the full install on disk,
@@ -240,14 +229,9 @@ fn main() -> Result<()> {
     // Start looping theme music (runs in background; stops when handle drops)
     let _audio = resources::audio::play_theme_loop();
 
-    let dry_run = cli.dry_run;
-    if dry_run {
-        info!("Running in dry-run mode - no changes will be made");
-    }
-
     match cli.command {
         Some(Commands::Install { config, device }) => {
-            cmd_install(config, device, dry_run)?;
+            cmd_install(config, device)?;
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
@@ -259,10 +243,7 @@ fn main() -> Result<()> {
             cmd_generate_config(&output)?;
         }
         Some(Commands::Cleanup { device, wipe }) => {
-            cmd_cleanup(device, wipe, dry_run)?;
-        }
-        Some(Commands::Preflight { config }) => {
-            cmd_preflight(&config)?;
+            cmd_cleanup(device, wipe)?;
         }
         Some(Commands::Rehearse { config, log_file }) => {
             cmd_rehearse(&config, &log_file)?;
@@ -275,14 +256,14 @@ fn main() -> Result<()> {
         }
         None => {
             // Default: run interactive wizard
-            cmd_install(None, None, dry_run)?;
+            cmd_install(None, None)?;
         }
     }
 
     Ok(())
 }
 
-fn cmd_install(config_path: Option<String>, device: Option<String>, dry_run: bool) -> Result<()> {
+fn cmd_install(config_path: Option<String>, device: Option<String>) -> Result<()> {
     use install::Installer;
 
     // Check for root privileges
@@ -303,7 +284,7 @@ fn cmd_install(config_path: Option<String>, device: Option<String>, dry_run: boo
     config.validate()?;
 
     // Run installation
-    let installer = Installer::new(config, dry_run);
+    let installer = Installer::new(config, false);
     installer.run()?;
 
     Ok(())
@@ -350,19 +331,6 @@ fn cmd_generate_config(output: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_preflight(config_path: &str) -> Result<()> {
-    use deploytix::preflight::run_preflight;
-
-    let config = DeploymentConfig::from_file(config_path)?;
-    let report = run_preflight(&config);
-    report.print_table();
-
-    if report.has_failures() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 fn cmd_rehearse(config_path: &str, log_file: &str) -> Result<()> {
     use deploytix::rehearsal::run_rehearsal;
 
@@ -396,14 +364,14 @@ fn cmd_rehearse(config_path: &str, log_file: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cleanup(device: Option<String>, wipe: bool, dry_run: bool) -> Result<()> {
+fn cmd_cleanup(device: Option<String>, wipe: bool) -> Result<()> {
     use cleanup::Cleaner;
 
     if !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
     }
 
-    let cleaner = Cleaner::new(dry_run);
+    let cleaner = Cleaner::new(false);
     cleaner.cleanup(device.as_deref(), wipe)?;
 
     Ok(())

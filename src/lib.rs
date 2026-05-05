@@ -7,7 +7,6 @@ pub mod desktop;
 pub mod disk;
 pub mod install;
 pub mod pkgdeps;
-pub mod preflight;
 pub mod rehearsal;
 pub mod resources;
 pub mod utils;

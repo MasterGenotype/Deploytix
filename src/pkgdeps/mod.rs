@@ -20,7 +20,6 @@ pub mod cli;
 pub mod graph;
 pub mod model;
 pub mod pacman;
-pub mod preflight;
 pub mod resolver;
 pub mod source;
 

@@ -168,26 +168,6 @@ impl DeploytixGui {
         }
     }
 
-    fn start_preflight(&mut self) {
-        let config = self.build_config();
-        self.install.preflight_running = true;
-        self.install.preflight_results = None;
-        self.install.preflight_has_failures = false;
-
-        let (tx, rx): (Sender<InstallMessage>, Receiver<InstallMessage>) = channel();
-        self.install.receiver = Some(rx);
-
-        thread::spawn(move || {
-            let report = crate::preflight::run_preflight(&config);
-            let lines = report.to_log_lines();
-            let has_failures = report.has_failures();
-            let _ = tx.send(InstallMessage::PreflightResults {
-                lines,
-                has_failures,
-            });
-        });
-    }
-
     fn start_rehearsal(&mut self) {
         let config = self.build_config();
         self.install.rehearsal_running = true;
@@ -210,7 +190,6 @@ impl DeploytixGui {
 
     fn start_installation(&mut self) {
         let config = self.build_config();
-        let dry_run = self.install.dry_run;
 
         let (tx, rx): (Sender<InstallMessage>, Receiver<InstallMessage>) = channel();
         self.install.receiver = Some(rx);
@@ -220,8 +199,7 @@ impl DeploytixGui {
 
         thread::spawn(move || {
             let _ = tx.send(InstallMessage::Log(format!(
-                "Starting {} installation on {}",
-                if dry_run { "dry-run" } else { "real" },
+                "Starting installation on {}",
                 config.disk.device
             )));
             let _ = tx.send(InstallMessage::Progress(0.05));
@@ -234,9 +212,9 @@ impl DeploytixGui {
             let _ = tx.send(InstallMessage::Log("Configuration validated".to_string()));
             let _ = tx.send(InstallMessage::Progress(0.1));
 
-            if !dry_run && !nix::unistd::geteuid().is_root() {
+            if !nix::unistd::geteuid().is_root() {
                 let _ = tx.send(InstallMessage::Error(
-                    "Must run as root for real installation".to_string(),
+                    "Must run as root for installation".to_string(),
                 ));
                 return;
             }
@@ -257,7 +235,7 @@ impl DeploytixGui {
                     )));
                 });
 
-            let installer = Installer::new(config, dry_run)
+            let installer = Installer::new(config, false)
                 .with_skip_confirm(true)
                 .with_progress_callback(progress_cb);
             match installer.run() {
@@ -291,15 +269,6 @@ impl DeploytixGui {
                     InstallMessage::Error(e) => {
                         self.install.error = Some(e);
                         self.install.finished = true;
-                        should_clear = true;
-                    }
-                    InstallMessage::PreflightResults {
-                        lines,
-                        has_failures,
-                    } => {
-                        self.install.preflight_results = Some(lines);
-                        self.install.preflight_has_failures = has_failures;
-                        self.install.preflight_running = false;
                         should_clear = true;
                     }
                     InstallMessage::RehearsalResults {
@@ -434,10 +403,6 @@ impl eframe::App for DeploytixGui {
                     if self.install.save_requested {
                         self.install.save_requested = false;
                         self.save_config();
-                    }
-                    if self.install.preflight_requested {
-                        self.install.preflight_requested = false;
-                        self.start_preflight();
                     }
                     if self.install.rehearsal_requested {
                         self.install.rehearsal_requested = false;
