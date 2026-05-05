@@ -31,11 +31,20 @@ case "$session" in
         ;;
 esac
 
-# Terminate the current session so the session manager can switch
+# Terminate the current session so the session manager can switch.
+# For gamescope→desktop: kill gamescope so greetd restarts the session
+# manager, which reads the "desktop" sentinel.
+# For desktop→gamescope: stop greetd, kill orphaned processes that
+# survive the session teardown (pipewire, steamwebhelper, etc.), then
+# restart greetd on a clean VT.
 if [[ "$session" == "desktop" ]] && pidof gamescope > /dev/null 2>&1; then
     kill -TERM $(pidof gamescope) 2>/dev/null || true
 elif [[ "$session" == "gamescope" ]]; then
-    pkill -x kwin_wayland 2>/dev/null || true
-    pkill -x startplasma-wayland 2>/dev/null || true
-    pkill -x plasma_session 2>/dev/null || true
+    # Fork a detached root process to handle the restart.  When greetd
+    # stops it kills this session (and this script), so the sequence
+    # must run in a process that survives the teardown.  sudo is on the
+    # outside so the detached shell is already root (no TTY needed).
+    sudo setsid sh -c '
+        sv restart greetd
+    ' </dev/null &>/dev/null &
 fi
