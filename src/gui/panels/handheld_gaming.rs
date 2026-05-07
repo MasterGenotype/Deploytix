@@ -96,7 +96,7 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
             widgets::info_text(
                 ui,
                 "Installs decky-loader-bin via AUR and bootstraps \
-                 ~/.local/var/opt/decky-loader. Runs as the greetd session user.",
+                 ~/homebrew (canonical Decky/SteamOS path). Runs as the greetd session user.",
             );
         }
 

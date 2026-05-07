@@ -1093,19 +1093,22 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 // ======================== Decky Loader ========================
 
 /// Install Decky Loader — the Steam plugin framework — from the
-/// `decky-loader-bin` AUR package, then bootstrap the user's data
-/// directory with `decky-loader-helper` and write an init-specific
-/// service file.
+/// `decky-loader-bin` AUR package, then bootstrap the user's homebrew
+/// directory and write an init-specific service file.
 ///
-/// Layout created on the target system (mirrors the upstream systemd
-/// unit shipped by `decky-loader-bin`):
+/// Layout created on the target system (uses the canonical Decky /
+/// SteamOS path `~/homebrew`, NOT the AUR package's
+/// `~/.local/var/opt/decky-loader` default — the upstream PluginLoader
+/// expects `HOMEBREW_FOLDER=~/homebrew` and every Decky plugin / tutorial
+/// assumes that layout).  Because the AUR-shipped `decky-loader-helper`
+/// hardcodes its destination to `~/.local/var/opt/decky-loader`, we
+/// bypass it and copy `PluginLoader` into place ourselves.
 /// ```
 /// /usr/lib/decky-loader/PluginLoader               (AUR package file)
-/// /usr/bin/decky-loader-helper                     (AUR package file)
-/// /home/{user}/.local/var/opt/decky-loader/
+/// /home/{user}/homebrew/
 ///   services/
-///     PluginLoader          (copy installed by decky-loader-helper)
-///     .loader.version       (version tag written by the helper)
+///     PluginLoader          (copied from /usr/lib/decky-loader)
+///     .loader.version       (version tag we write from pacman -Q)
 ///   plugins/
 /// ~/.local/share/Steam/.cef-enable-remote-debugging
 /// ~/.steam/steam -> ~/.local/share/Steam  (symlink)
@@ -1130,7 +1133,7 @@ pub fn install_decky_loader(
     }
 
     let username = &config.user.name;
-    let decky_data = format!("/home/{}/.local/var/opt/decky-loader", username);
+    let decky_data = format!("/home/{}/homebrew", username);
 
     info!("Installing Decky Loader for user {}", username);
 
@@ -1140,7 +1143,7 @@ pub fn install_decky_loader(
             username
         );
         println!(
-            "  [dry-run] Would bootstrap {} via /usr/bin/decky-loader-helper",
+            "  [dry-run] Would bootstrap {} (services/PluginLoader, plugins/, .loader.version)",
             decky_data
         );
         println!(
@@ -1192,25 +1195,35 @@ pub fn install_decky_loader(
     }
     info!("  Enabled Steam CEF remote debugging");
 
-    // Step 3: Bootstrap the user's Decky data directory with the helper
-    // shipped by decky-loader-bin.  The helper reads the installed version
-    // from pacman, creates {services,plugins}/ owned by the user, copies
-    // /usr/lib/decky-loader/PluginLoader into services/, and records the
-    // version tag in .loader.version.
-    let helper_cmd = format!(
-        "DECKY_VER=$(pacman -Q decky-loader-bin | awk '{{print $2}}' | sed 's/-[0-9]*$//'); \
-         /usr/bin/decky-loader-helper \"v${{DECKY_VER}}\" {user}",
-        user = username
+    // Step 3: Bootstrap the user's homebrew directory manually.
+    //
+    // We deliberately do NOT call /usr/bin/decky-loader-helper — the AUR
+    // helper hardcodes ~/.local/var/opt/decky-loader as its destination,
+    // which conflicts with the canonical ~/homebrew path that upstream
+    // PluginLoader and every Decky plugin assume.  Instead we replicate
+    // what the helper does (create services/ + plugins/ owned by the
+    // user, copy PluginLoader, write the .loader.version tag) but at
+    // ~/homebrew.
+    let bootstrap_cmd = format!(
+        "set -e; \
+         DECKY_VER=$(pacman -Q decky-loader-bin | awk '{{print $2}}' | sed 's/-[0-9]*$//'); \
+         install -dm 755 -o {user} -g {user} {data} {data}/services {data}/plugins; \
+         install -m 755 -o {user} -g {user} \
+           /usr/lib/decky-loader/PluginLoader {data}/services/PluginLoader; \
+         printf 'v%s' \"${{DECKY_VER}}\" > {data}/services/.loader.version; \
+         chown {user}:{user} {data}/services/.loader.version",
+        user = username,
+        data = decky_data,
     );
-    cmd.run_in_chroot(install_root, &helper_cmd)?;
-    info!("  Bootstrapped Decky data directory at {}", decky_data);
+    cmd.run_in_chroot(install_root, &bootstrap_cmd)?;
+    info!("  Bootstrapped Decky homebrew directory at {}", decky_data);
 
     // Step 4: Write init-specific service file
     write_decky_service(config, install_root, username, &decky_data)?;
 
-    // Step 5: Ensure ownership under the user's home stays correct
-    // (helper already sets ownership on the decky data dir, but .steam
-    // was created by us as root above).
+    // Step 5: Ensure ownership under the user's home stays correct.
+    // Bootstrap step above already chowns ~/homebrew; .local and .steam
+    // were created by us as root, so chown them here.
     let chown_cmd = format!(
         "chown -R {user}:{user} /home/{user}/.local /home/{user}/.steam",
         user = username
@@ -1224,9 +1237,9 @@ pub fn install_decky_loader(
 /// Write the `plugin_loader` service file for the configured init system.
 ///
 /// Decky runs as the greetd session user with HOMEBREW_FOLDER pointing at
-/// `~/.local/var/opt/decky-loader`.  UNPRIVILEGED_PATH / PRIVILEGED_PATH
-/// are historical aliases consumed by older PluginLoader builds; we set
-/// them to the same path for compatibility.
+/// `~/homebrew` (the canonical Decky / SteamOS layout).
+/// UNPRIVILEGED_PATH / PRIVILEGED_PATH are historical aliases consumed by
+/// older PluginLoader builds; we set them to the same path for compatibility.
 fn write_decky_service(
     config: &DeploymentConfig,
     install_root: &str,
