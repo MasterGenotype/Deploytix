@@ -978,7 +978,17 @@ pub fn run_basestrap_with_retries(
 ) -> Result<()> {
     // Build the package list first so we know exactly which custom
     // packages need to be resolved.
-    let packages = build_package_list(config);
+    let mut packages = build_package_list(config);
+
+    // Submit to the interactive policy (no-op when none attached).  The
+    // user may edit the package list, skip the install, or cancel.
+    let inv = crate::utils::interactive::PacmanInvocation::basestrap(install_root, packages);
+    let Some(inv) = cmd.review_pacman(inv)? else {
+        info!("basestrap skipped by interactive policy");
+        return Ok(());
+    };
+    packages = inv.packages;
+    let extra_flags = inv.extra_flags;
 
     // Ensure the custom [deploytix] packages are available.
     let custom_conf = prepare_deploytix_repo(cmd, &packages)?;
@@ -994,11 +1004,16 @@ pub fn run_basestrap_with_retries(
     );
 
     // Build argument list — prepend `-C <config>` when a custom
-    // pacman.conf was generated for the [deploytix] repo.
+    // pacman.conf was generated for the [deploytix] repo, then any
+    // user-supplied extra flags from the policy edit, then the install
+    // root and packages.
     let mut args: Vec<&str> = Vec::new();
     if let Some(ref conf_path) = custom_conf {
         args.push("-C");
         args.push(conf_path.as_str());
+    }
+    for f in &extra_flags {
+        args.push(f.as_str());
     }
     args.push(install_root);
     let pkg_refs: Vec<&str> = packages.iter().map(|s| s.as_str()).collect();

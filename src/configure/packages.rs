@@ -16,9 +16,65 @@
 use crate::config::{DeploymentConfig, GpuDriverVendor};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
+use crate::utils::interactive::PacmanInvocation;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use tracing::{info, warn};
+
+// ======================== Reviewed install helpers ========================
+
+/// Run a chroot `pacman -S` install via `pacman_install_chroot`, after
+/// passing the package list through the interactive policy.  Returns
+/// `Ok(())` with no install when the policy skips this step.
+pub(crate) fn pacman_install_chroot_reviewed(
+    cmd: &CommandRunner,
+    install_root: &str,
+    label: &str,
+    packages: Vec<String>,
+) -> Result<()> {
+    let inv = PacmanInvocation::pacman_chroot(install_root, label, packages);
+    let Some(inv) = cmd.review_pacman(inv)? else {
+        return Ok(());
+    };
+    let extras = if inv.extra_flags.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", inv.extra_flags.join(" "))
+    };
+    let install_cmd = format!(
+        "pacman -S --noconfirm --needed {}{}",
+        extras,
+        inv.packages.join(" ")
+    );
+    pacman_install_chroot(cmd, install_root, &install_cmd)
+}
+
+/// Run `sudo -u <user> yay -S` in chroot, after passing the package list
+/// through the interactive policy.
+pub(crate) fn yay_install_chroot_reviewed(
+    cmd: &CommandRunner,
+    install_root: &str,
+    run_as_user: &str,
+    label: &str,
+    packages: Vec<String>,
+) -> Result<()> {
+    let inv = PacmanInvocation::yay_chroot(install_root, run_as_user, label, packages);
+    let Some(inv) = cmd.review_pacman(inv)? else {
+        return Ok(());
+    };
+    let extras = if inv.extra_flags.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", inv.extra_flags.join(" "))
+    };
+    let cmd_str = format!(
+        "sudo -u {} yay -S --noconfirm --needed {}{}",
+        inv.run_as_user.as_deref().unwrap_or(run_as_user),
+        extras,
+        inv.packages.join(" ")
+    );
+    cmd.run_in_chroot(install_root, &cmd_str).map(|_| ())
+}
 
 // ======================== Signature-error recovery ========================
 
@@ -240,9 +296,13 @@ pub fn install_gpu_drivers(
         return Ok(());
     }
 
-    let pkg_list = packages.join(" ");
-    let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    pacman_install_chroot(cmd, install_root, &install_cmd)?;
+    let pkg_strings: Vec<String> = packages.iter().map(|s| s.to_string()).collect();
+    pacman_install_chroot_reviewed(
+        cmd,
+        install_root,
+        "GPU drivers",
+        pkg_strings,
+    )?;
 
     info!("GPU driver installation complete");
     Ok(())
@@ -343,14 +403,12 @@ pub fn install_wine_packages(
     // Enable the Arch [extra] repo in the chroot for wine-mono/wine-gecko.
     ensure_arch_repos_in_chroot(cmd, install_root)?;
 
-    let all_pkgs: Vec<&str> = WINE_PACKAGES_ARTIX
+    let all_pkgs: Vec<String> = WINE_PACKAGES_ARTIX
         .iter()
         .chain(WINE_PACKAGES_ARCH_EXTRA.iter())
-        .copied()
+        .map(|s| s.to_string())
         .collect();
-    let pkg_list = all_pkgs.join(" ");
-    let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    pacman_install_chroot(cmd, install_root, &install_cmd)?;
+    pacman_install_chroot_reviewed(cmd, install_root, "Wine compatibility", all_pkgs)?;
 
     info!("Wine installation complete");
     Ok(())
@@ -446,16 +504,19 @@ pub fn install_gaming_packages(
 
     // Step 2: Install lib32 Vulkan driver(s) for selected GPU vendor(s)
     if !lib32_vulkan.is_empty() {
-        let vulkan_list = lib32_vulkan.join(" ");
-        info!("Installing lib32 Vulkan drivers: {}", vulkan_list);
-        let vulkan_cmd = format!("pacman -S --noconfirm --needed {}", vulkan_list);
-        pacman_install_chroot(cmd, install_root, &vulkan_cmd)?;
+        info!("Installing lib32 Vulkan drivers: {}", lib32_vulkan.join(" "));
+        let pkgs: Vec<String> = lib32_vulkan.iter().map(|s| s.to_string()).collect();
+        pacman_install_chroot_reviewed(
+            cmd,
+            install_root,
+            "lib32 Vulkan drivers",
+            pkgs,
+        )?;
     }
 
     // Step 3: Install Steam
-    let pkg_list = GAMING_PACKAGES.join(" ");
-    let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    pacman_install_chroot(cmd, install_root, &install_cmd)?;
+    let gaming_pkgs: Vec<String> = GAMING_PACKAGES.iter().map(|s| s.to_string()).collect();
+    pacman_install_chroot_reviewed(cmd, install_root, "Gaming (Steam, etc.)", gaming_pkgs)?;
 
     info!("Gaming package installation complete");
     Ok(())
@@ -492,10 +553,11 @@ pub fn install_yay(
     }
 
     // Ensure build dependencies are present
-    pacman_install_chroot(
+    pacman_install_chroot_reviewed(
         cmd,
         install_root,
-        "pacman -S --noconfirm --needed go git base-devel",
+        "yay build deps (go, git, base-devel)",
+        vec!["go".to_string(), "git".to_string(), "base-devel".to_string()],
     )?;
 
     // Create build dir, clone, build, and clean up in a single chroot
@@ -551,15 +613,83 @@ pub fn install_aur_packages(
         return Ok(());
     }
 
-    let pkg_list = YAY_AUR_PACKAGES.join(" ");
-    let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed {}",
-        username, pkg_list
-    );
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    let pkg_strings: Vec<String> = YAY_AUR_PACKAGES.iter().map(|s| s.to_string()).collect();
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
+        username,
+        "AUR: zen-browser-bin",
+        pkg_strings,
+    )?;
 
     info!("AUR packages installed successfully");
     Ok(())
+}
+
+// ======================== Post-install extras (phase 5.95) ========================
+
+/// Install repository (`pacman -S`) extras provided by the user via the
+/// post-install extras step or persisted in `packages.extra_packages.pacman`.
+pub fn install_extras_pacman(
+    cmd: &CommandRunner,
+    install_root: &str,
+    packages: &[String],
+) -> Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    info!("Installing pacman extras: {}", packages.join(", "));
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would install pacman extras: {:?}", packages);
+        return Ok(());
+    }
+    pacman_install_chroot_reviewed(
+        cmd,
+        install_root,
+        "Extras (pacman)",
+        packages.to_vec(),
+    )
+}
+
+/// Install AUR (`yay -S`) extras provided by the user via the
+/// post-install extras step or persisted in `packages.extra_packages.aur`.
+/// Requires `install_yay = true` (validated in `DeploymentConfig::validate`).
+pub fn install_extras_aur(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+    packages: &[String],
+) -> Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    if !config.packages.install_yay {
+        warn!(
+            "extra_packages.aur is non-empty but install_yay = false; skipping {} package(s)",
+            packages.len()
+        );
+        return Ok(());
+    }
+    let username = &config.user.name;
+    info!(
+        "Installing AUR extras via yay as {}: {}",
+        username,
+        packages.join(", ")
+    );
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install AUR extras via yay as {}: {:?}",
+            username, packages
+        );
+        return Ok(());
+    }
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
+        username,
+        "Extras (AUR)",
+        packages.to_vec(),
+    )
 }
 
 // ======================== iwd GUI Frontend (AUR) ========================
@@ -593,8 +723,13 @@ pub fn install_iwd_frontend(
         return Ok(());
     }
 
-    let install_cmd = format!("sudo -u {} yay -S --noconfirm --needed {}", username, pkg);
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
+        username,
+        &format!("AUR: iwd frontend ({})", pkg),
+        vec![pkg.to_string()],
+    )?;
 
     info!("iwd GUI frontend installed successfully");
     Ok(())
@@ -632,12 +767,14 @@ pub fn install_btrfs_tools(
         return Ok(());
     }
 
-    let pkg_list = BTRFS_TOOL_PACKAGES.join(" ");
-    let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed {}",
-        username, pkg_list
-    );
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    let pkgs: Vec<String> = BTRFS_TOOL_PACKAGES.iter().map(|s| s.to_string()).collect();
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
+        username,
+        "AUR: Btrfs snapshot tools",
+        pkgs,
+    )?;
 
     info!("Btrfs snapshot tools installed successfully");
     Ok(())
@@ -956,12 +1093,14 @@ pub fn install_hhd(
     }
 
     // Step 1: Install AUR packages via yay
-    let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed {}",
+    let pkgs: Vec<String> = HHD_AUR_PACKAGES.iter().map(|s| s.to_string()).collect();
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
         username,
-        HHD_AUR_PACKAGES.join(" ")
-    );
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+        "AUR: Handheld Daemon (hhd-git)",
+        pkgs,
+    )?;
     info!("  HHD AUR packages installed");
 
     // Step 2: Ensure the uhid kernel module is loaded at boot.
@@ -1156,11 +1295,13 @@ pub fn install_decky_loader(
     // Step 1: Install decky-loader-bin via yay.  This drops the binary at
     // /usr/lib/decky-loader/PluginLoader and the helper at
     // /usr/bin/decky-loader-helper.
-    let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed decky-loader-bin",
-        username
-    );
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
+        username,
+        "AUR: Decky Loader (decky-loader-bin)",
+        vec!["decky-loader-bin".to_string()],
+    )?;
     info!("  decky-loader-bin installed");
 
     // Step 2: Enable Steam CEF remote debugging (required by Decky's frontend).
@@ -1480,12 +1621,14 @@ pub fn install_evdevhook2(
     }
 
     // Step 1: Install AUR package via yay
-    let install_cmd = format!(
-        "sudo -u {} yay -S --noconfirm --needed {}",
+    let pkgs: Vec<String> = EVDEVHOOK2_AUR_PACKAGES.iter().map(|s| s.to_string()).collect();
+    yay_install_chroot_reviewed(
+        cmd,
+        install_root,
         username,
-        EVDEVHOOK2_AUR_PACKAGES.join(" ")
-    );
-    cmd.run_in_chroot(install_root, &install_cmd)?;
+        "AUR: evdevhook2-git",
+        pkgs,
+    )?;
     info!("  evdevhook2 AUR package installed");
 
     // Step 2: Write the udev rule (GROUP=input, uaccess tag) that grants

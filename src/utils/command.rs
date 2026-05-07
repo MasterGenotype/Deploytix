@@ -1,10 +1,11 @@
 //! Command execution utilities
 
 use crate::utils::error::{DeploytixError, Result};
+use crate::utils::interactive::{PacmanDecision, PacmanInvocation, PolicyHandle};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Record of a single command invocation captured during rehearsal mode.
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ pub fn log_dry_run(program: &str, args: &[&str]) {
 pub struct CommandRunner {
     dry_run: bool,
     recorder: Option<Sender<OperationRecord>>,
+    policy: Option<PolicyHandle>,
 }
 
 impl CommandRunner {
@@ -92,6 +94,7 @@ impl CommandRunner {
         Self {
             dry_run,
             recorder: None,
+            policy: None,
         }
     }
 
@@ -100,6 +103,20 @@ impl CommandRunner {
     pub fn with_recorder(mut self, tx: Sender<OperationRecord>) -> Self {
         self.recorder = Some(tx);
         self
+    }
+
+    /// Attach an interactive policy that reviews user-facing pacman /
+    /// basestrap / yay invocations before they run.  See
+    /// `crate::utils::interactive` for the contract.
+    pub fn with_policy(mut self, policy: PolicyHandle) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Borrow the attached policy, if any.  Used by the installer to
+    /// drive the post-install extras step (phase 5.95).
+    pub fn policy(&self) -> Option<&PolicyHandle> {
+        self.policy.as_ref()
     }
 
     /// Record an executed command if a recorder is attached.
@@ -200,5 +217,54 @@ impl CommandRunner {
 
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    // ─── Interactive-aware install entry points ────────────────────────
+    //
+    // All user-facing package installs (basestrap, pacman -S in chroot,
+    // yay -S as user) go through these helpers.  The attached policy (if
+    // any) gets to approve / edit / skip / cancel each invocation.
+    // Internal pacman housekeeping (`pacman -Sy`, `pacman-key`, the
+    // signature-retry fallback) is NOT routed through here.
+
+    /// Submit a [`PacmanInvocation`] to the attached policy (if any) and
+    /// return the dispatched form.
+    ///
+    ///   * `Ok(Some(inv))`     — execute this (possibly edited) invocation.
+    ///   * `Ok(None)`           — policy said skip; caller should no-op.
+    ///   * `Err(UserCancelled)` — policy said cancel; caller bubbles.
+    ///
+    /// With no policy attached, the invocation is returned unchanged.
+    /// Callers render the (possibly edited) result into their existing
+    /// command-execution path (e.g. `pacman_install_chroot` for chroot
+    /// pacman calls, the basestrap retry loop for basestrap calls).
+    pub fn review_pacman(&self, inv: PacmanInvocation) -> Result<Option<PacmanInvocation>> {
+        let Some(policy) = &self.policy else {
+            return Ok(Some(inv));
+        };
+        match policy.confirm_pacman(&inv) {
+            PacmanDecision::Approve => Ok(Some(inv)),
+            PacmanDecision::EditedTo {
+                packages,
+                extra_flags,
+            } => {
+                let mut edited = inv;
+                edited.packages = packages;
+                edited.extra_flags = extra_flags;
+                if edited.packages.is_empty() {
+                    info!(
+                        "Policy edited '{}' down to zero packages — skipping",
+                        edited.label
+                    );
+                    return Ok(None);
+                }
+                Ok(Some(edited))
+            }
+            PacmanDecision::Skip => {
+                info!("Policy skipped '{}'", inv.label);
+                Ok(None)
+            }
+            PacmanDecision::Cancel => Err(DeploytixError::UserCancelled),
+        }
     }
 }

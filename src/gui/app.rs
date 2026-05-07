@@ -142,6 +142,7 @@ impl DeploytixGui {
                     }
                     drivers
                 },
+                extra_packages: crate::config::ExtraPackagesConfig::default(),
             },
         }
     }

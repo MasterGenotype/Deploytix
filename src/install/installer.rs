@@ -33,10 +33,38 @@ use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::warn_confirm;
 use crate::utils::signal;
 use std::fs;
-use tracing::info;
+use std::path::PathBuf;
+use tracing::{info, warn};
 
 /// Installation target path
 pub const INSTALL_ROOT: &str = "/install";
+
+/// Where the post-install extras step persists the merged config.
+/// `~/.config/deploytix/last-install.toml`.
+fn extras_save_path() -> Result<PathBuf> {
+    // Honour XDG_CONFIG_HOME if set, otherwise fall back to ~/.config.
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config")
+    } else {
+        return Err(DeploytixError::ConfigError(
+            "neither HOME nor XDG_CONFIG_HOME is set".to_string(),
+        ));
+    };
+    Ok(base.join("deploytix").join("last-install.toml"))
+}
+
+/// Persist the merged deployment config (with collected extras) to
+/// `last-install.toml`.  Called from phase 5.95 only when the user
+/// opts in.
+fn save_config_with_extras(config: &DeploymentConfig) -> Result<()> {
+    let path = extras_save_path()?;
+    config.save_to(&path)?;
+    info!("Saved merged config with extras to {}", path.display());
+    println!("  → Saved extras config to {}", path.display());
+    Ok(())
+}
 
 /// Progress callback type for reporting installation progress.
 /// Takes a value between 0.0 and 1.0, and a status message describing the current phase.
@@ -101,6 +129,14 @@ impl Installer {
     #[allow(dead_code)]
     pub fn with_recorder(mut self, tx: std::sync::mpsc::Sender<OperationRecord>) -> Self {
         self.cmd = self.cmd.with_recorder(tx);
+        self
+    }
+
+    /// Attach an interactive policy that reviews pacman / basestrap /
+    /// yay invocations before they run, and prompts for extras at the
+    /// end of phase 5.
+    pub fn with_policy(mut self, policy: crate::utils::interactive::PolicyHandle) -> Self {
+        self.cmd = self.cmd.with_policy(policy);
         self
     }
 
@@ -353,8 +389,14 @@ impl Installer {
             )?;
         }
 
+        // Phase 5.95: Post-install extras.  Always installs whatever is
+        // already in `config.packages.extra_packages` (e.g. from a saved
+        // config).  Additionally, when an interactive policy is attached,
+        // prompts the user for more.
+        self.run_extras_phase()?;
+
         // Phase 6: Finalization
-        self.report_progress(0.90, "Finalizing installation...");
+        self.report_progress(0.96, "Finalizing installation...");
         self.finalize()?;
 
         self.report_progress(1.0, "Installation complete");
@@ -971,6 +1013,84 @@ impl Installer {
     fn install_evdevhook2(&self) -> Result<()> {
         info!("Installing evdevhook2 (Cemuhook UDP motion server)");
         configure::packages::install_evdevhook2(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Phase 5.95 — post-install extras.
+    ///
+    /// Pulls the latest extras from two sources, in order:
+    ///   1. Whatever is already in `config.packages.extra_packages`
+    ///      (typically loaded from a saved TOML).
+    ///   2. The attached interactive policy, if any — its `prompt_extras`
+    ///      runs the user through pacman/yay loops and may opt to merge
+    ///      results back into the config and persist them.
+    ///
+    /// Both layers install; failures are logged but don't abort the run.
+    fn run_extras_phase(&mut self) -> Result<()> {
+        // (1) install whatever is already in the config.
+        let pre_pacman = self.config.packages.extra_packages.pacman.clone();
+        let pre_aur = self.config.packages.extra_packages.aur.clone();
+        if !pre_pacman.is_empty() {
+            self.report_progress(0.94, "Installing extra pacman packages from config...");
+            if let Err(e) =
+                configure::packages::install_extras_pacman(&self.cmd, INSTALL_ROOT, &pre_pacman)
+            {
+                warn!("config-supplied pacman extras failed: {}", e);
+            }
+        }
+        if !pre_aur.is_empty() {
+            self.report_progress(0.945, "Installing extra AUR packages from config...");
+            if let Err(e) = configure::packages::install_extras_aur(
+                &self.cmd,
+                &self.config,
+                INSTALL_ROOT,
+                &pre_aur,
+            ) {
+                warn!("config-supplied AUR extras failed: {}", e);
+            }
+        }
+
+        // (2) prompt for more, if a policy is attached.
+        if let Some(policy) = self.cmd.policy().cloned() {
+            self.report_progress(0.95, "Optional: install extra packages...");
+            let can_use_yay = self.config.packages.install_yay;
+            let (extras, save) = policy.prompt_extras(can_use_yay);
+            if !extras.pacman.is_empty() {
+                if let Err(e) = configure::packages::install_extras_pacman(
+                    &self.cmd,
+                    INSTALL_ROOT,
+                    &extras.pacman,
+                ) {
+                    warn!("interactive pacman extras failed: {}", e);
+                }
+                self.config
+                    .packages
+                    .extra_packages
+                    .pacman
+                    .extend(extras.pacman.iter().cloned());
+            }
+            if !extras.aur.is_empty() {
+                if let Err(e) = configure::packages::install_extras_aur(
+                    &self.cmd,
+                    &self.config,
+                    INSTALL_ROOT,
+                    &extras.aur,
+                ) {
+                    warn!("interactive AUR extras failed: {}", e);
+                }
+                self.config
+                    .packages
+                    .extra_packages
+                    .aur
+                    .extend(extras.aur.iter().cloned());
+            }
+            if save {
+                if let Err(e) = save_config_with_extras(&self.config) {
+                    warn!("could not persist extras to config: {}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Finalize installation

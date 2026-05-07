@@ -269,6 +269,27 @@ pub struct PackagesConfig {
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
+    /// User-supplied extras collected by the post-install extras step
+    /// (phase 5.95).  When set in a config-driven run, these install
+    /// non-interactively at the end of phase 5.
+    #[serde(default)]
+    pub extra_packages: ExtraPackagesConfig,
+}
+
+/// User-supplied extras to install in phase 5.95 after the configured
+/// selection has finished.  AUR entries require `install_yay = true`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExtraPackagesConfig {
+    #[serde(default)]
+    pub pacman: Vec<String>,
+    #[serde(default)]
+    pub aur: Vec<String>,
+}
+
+impl ExtraPackagesConfig {
+    pub fn is_empty(&self) -> bool {
+        self.pacman.is_empty() && self.aur.is_empty()
+    }
 }
 
 /// GPU driver vendor selection
@@ -625,6 +646,18 @@ impl DeploymentConfig {
         let content = std::fs::read_to_string(path)?;
         let config: DeploymentConfig = toml::from_str(&content)?;
         Ok(config)
+    }
+
+    /// Serialise the config to TOML and write it to `path`, creating
+    /// any missing parent directories.  Used by the post-install
+    /// extras step to persist user-entered extras for later re-runs.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
     }
 
     /// Create configuration interactively
@@ -1029,6 +1062,7 @@ impl DeploymentConfig {
                 install_decky_loader,
                 install_evdevhook2,
                 gpu_drivers,
+                extra_packages: ExtraPackagesConfig::default(),
             },
         })
     }
@@ -1340,6 +1374,13 @@ impl DeploymentConfig {
                     "Decky Loader requires install_yay = true (installed from decky-loader-bin AUR package)".to_string(),
                 ));
             }
+        }
+
+        // AUR extras require yay
+        if !self.packages.extra_packages.aur.is_empty() && !self.packages.install_yay {
+            return Err(DeploytixError::ValidationError(
+                "extra_packages.aur is non-empty but install_yay = false".to_string(),
+            ));
         }
 
         // Btrfs tools require yay + btrfs filesystem

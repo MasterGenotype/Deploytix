@@ -142,6 +142,19 @@ enum Commands {
         /// Target disk device (e.g., /dev/sda)
         #[arg(short, long)]
         device: Option<String>,
+
+        /// Review every pacman/basestrap/yay invocation interactively
+        /// before it runs, and prompt for extra packages at the end of
+        /// the install.  Defaults to ON when no `--config` is supplied
+        /// (so the wizard install gets reviewed) and OFF when `--config`
+        /// is set (so automated runs stay silent).
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Disable interactive review even when no config is supplied.
+        /// Mutually exclusive with `--interactive`.
+        #[arg(long, conflicts_with = "interactive")]
+        no_interactive: bool,
     },
 
     /// List available disks for installation
@@ -230,8 +243,22 @@ fn main() -> Result<()> {
     let _audio = resources::audio::play_theme_loop();
 
     match cli.command {
-        Some(Commands::Install { config, device }) => {
-            cmd_install(config, device)?;
+        Some(Commands::Install {
+            config,
+            device,
+            interactive,
+            no_interactive,
+        }) => {
+            // Activation: explicit flag wins; otherwise interactive ON
+            // when no config file is supplied, OFF when -c is given.
+            let interactive_resolved = if no_interactive {
+                false
+            } else if interactive {
+                true
+            } else {
+                config.is_none()
+            };
+            cmd_install(config, device, interactive_resolved)?;
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
@@ -255,15 +282,19 @@ fn main() -> Result<()> {
             cmd_generate_desktop_file(de, bindir, output)?;
         }
         None => {
-            // Default: run interactive wizard
-            cmd_install(None, None)?;
+            // Default: run interactive wizard with full interactive review
+            cmd_install(None, None, true)?;
         }
     }
 
     Ok(())
 }
 
-fn cmd_install(config_path: Option<String>, device: Option<String>) -> Result<()> {
+fn cmd_install(
+    config_path: Option<String>,
+    device: Option<String>,
+    interactive: bool,
+) -> Result<()> {
     use install::Installer;
 
     // Check for root privileges
@@ -284,7 +315,13 @@ fn cmd_install(config_path: Option<String>, device: Option<String>) -> Result<()
     config.validate()?;
 
     // Run installation
-    let installer = Installer::new(config, false);
+    let mut installer = Installer::new(config, false);
+    if interactive {
+        use std::sync::Arc;
+        let policy = Arc::new(deploytix::utils::cli_policy::CliInteractivePolicy::new());
+        installer = installer.with_policy(policy);
+        info!("Interactive mode ON — pacman commands will be reviewed before running");
+    }
     installer.run()?;
 
     Ok(())
