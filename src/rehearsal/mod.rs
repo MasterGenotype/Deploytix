@@ -14,7 +14,9 @@ use crate::config::DeploymentConfig;
 use crate::install::Installer;
 use crate::utils::command::OperationRecord;
 use guard::DiskWipeGuard;
+use report::print_live_record;
 use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 use tracing::info;
 
@@ -41,11 +43,23 @@ pub fn run_rehearsal(config: &DeploymentConfig) -> RehearsalReport {
     let start = Instant::now();
 
     // Recording channel — the Sender goes into the CommandRunner, and we
-    // drain the Receiver after the installer finishes.
+    // consume the Receiver in a live-output thread.
     let (tx, rx) = mpsc::channel::<OperationRecord>();
 
     // RAII guard: no matter what happens below, the disk gets wiped.
     let mut wipe_guard = DiskWipeGuard::new(&device);
+
+    // Spawn a thread that prints each operation to stderr as it arrives
+    // and collects all records for the final report.
+    let consumer = thread::spawn(move || {
+        let mut records = Vec::new();
+        for rec in rx.iter() {
+            records.push(rec);
+            let idx = records.len();
+            print_live_record(idx, &records[idx - 1]);
+        }
+        records
+    });
 
     // Build the installer in real mode (dry_run = false) with recording
     // enabled and interactive confirmation skipped.
@@ -65,10 +79,10 @@ pub fn run_rehearsal(config: &DeploymentConfig) -> RehearsalReport {
         }
     };
 
-    // Collect all recorded operations.  The Sender was moved into the
-    // installer and is now dropped (installer consumed by `run()`), so
-    // `rx.iter()` will terminate.
-    let records: Vec<OperationRecord> = rx.iter().collect();
+    // The Sender was moved into the installer and is now dropped
+    // (installer consumed by `run()`), so `rx.iter()` terminates and
+    // the consumer thread joins with all collected records.
+    let records = consumer.join().unwrap_or_default();
 
     // Wipe the disk (cleanup + wipefs + blank GPT).
     let disk_wiped = wipe_guard.wipe_now();

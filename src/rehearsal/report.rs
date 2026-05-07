@@ -228,6 +228,40 @@ impl RehearsalReport {
     }
 }
 
+// ── live output ────────────────────────────────────────────────────────
+
+/// Print a single operation record to stderr as it happens.
+///
+/// `index` is the 1-based running counter.  Output goes to stderr so it
+/// does not interfere with any structured stdout (e.g. the final table).
+pub fn print_live_record(index: usize, rec: &OperationRecord) {
+    let status = if rec.success {
+        "✓".green().bold()
+    } else {
+        "✗".red().bold()
+    };
+    let dur = format_duration(rec.duration);
+    let cmd = truncate(&rec.command, 72);
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "  [{}] {}  {:>10}  {}",
+        index, status, dur, cmd
+    );
+
+    // Show first line of stderr for failures
+    if !rec.success && !rec.stderr.is_empty() {
+        let err_preview = rec.stderr.lines().next().unwrap_or("").trim();
+        let err_text = truncate(err_preview, 72);
+        let _ = writeln!(
+            std::io::stderr(),
+            "  {}    └─ {}",
+            " ".repeat(index.to_string().len()),
+            err_text.red()
+        );
+    }
+}
+
 // ── helpers ────────────────────────────────────────────────────────────
 
 fn format_duration(d: Duration) -> String {

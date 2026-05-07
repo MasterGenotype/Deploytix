@@ -56,7 +56,8 @@ fn main() -> Result<()> {
         "⚠  REHEARSAL MODE: this will write to {} for real, then WIPE the disk.",
         config.disk.device
     );
-    eprintln!("   All data on the target device will be destroyed.\n");
+    eprintln!("   All data on the target device will be destroyed.");
+    eprintln!("   Live output will appear below as each operation completes.\n");
 
     let report = run_rehearsal(&config);
     report.print_table();
