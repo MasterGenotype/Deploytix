@@ -1,4 +1,18 @@
+# Cargo build artifacts
 /target
+
+# Release staging — packages, SHA256SUMS, .SRCINFO, RELEASE_NOTES.md.
+# Published artifacts live on GitHub Releases, not in this repo.
+/releases/
+
+# Default rehearsal log (deploytix rehearse [-l rehearsal.log])
+/rehearsal.log
+
+# Custom pacman repo embedded into the live ISO
+iso/repo/*.pkg.tar*
+
+# Local makepkg artefacts and staging dirs.  Only the PKGBUILD is
+# tracked; everything else (built tarballs, .SRCINFO, $srcdir/$pkgdir
+# scratch, generated .desktop.out) is regenerated on demand.
 pkg/
 !pkg/PKGBUILD
-iso/repo/*.pkg.tar*
