@@ -122,7 +122,7 @@ The installer executes a **feature-driven pipeline** where each step checks its 
 
 **Phase 4 — System Configuration.** Enters the target via `artix-chroot` and configures locale, timezone, keymap, hostname, user account, mkinitcpio hooks, GRUB bootloader, network backend, init system services, Secure Boot (if enabled), GPU drivers, and swap (ZRAM/file).
 
-**Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, Handheld Daemon, Decky Loader, evdevhook2, and Modular mod manager.
+**Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, Handheld Daemon, Decky Loader, and evdevhook2.
 
 **Phase 6 — Finalize.** Regenerates the initramfs, unmounts all filesystems in reverse order, exports ZFS pools if applicable, and closes all LUKS containers.
 
@@ -193,7 +193,6 @@ install_wine = true            # Wine compatibility layer
 install_gaming = true          # Steam, gamescope (Bazzite fork)
 install_session_switching = true  # gamescope ↔ desktop via greetd
 install_btrfs_tools = true     # snapper, btrfs-assistant (via yay)
-install_modular = true         # Modular mod manager
 sysctl_gaming_tweaks = true    # vm.max_map_count, swappiness, etc.
 sysctl_network_performance = true  # BBR, fq, larger buffers
 install_hhd = true             # Handheld Daemon (gamepad remapping, TDP)
@@ -246,7 +245,6 @@ The `[packages]` section provides a full gaming/handheld device stack:
 - **Handheld Daemon (HHD)** — Gamepad remapping, TDP control, per-game profiles (AUR: `hhd-git`). Writes init-specific service files.
 - **Decky Loader** — Steam plugin framework (AUR: `decky-loader-bin`). Writes init-specific service files.
 - **evdevhook2** — Cemuhook UDP motion server for DualShock/DualSense/Joy-Con controllers (AUR: `evdevhook2-git`). Installs udev rules and service files.
-- **Modular** — Game mod manager from vendored source (`vendor/Modular-1`).
 - **Wine** — Wine compatibility layer packages.
 - **GPU Drivers** — NVIDIA, AMD, and/or Intel driver stacks.
 - **Sysctl Tweaks** — Gaming performance (`vm.max_map_count`, swappiness) and network performance (BBR, fq, larger socket buffers, ECN).
@@ -296,7 +294,7 @@ src-rehearsal/
 └── main.rs                # Standalone rehearsal binary entry point
 
 iso/                       # ISO build scripts and profile for bootable Deploytix media
-vendor/                    # Vendored submodules: tkg-gui, gamescope, Modular-1
+vendor/                    # Vendored submodules: tkg-gui, gamescope
 ref/                       # Original bash installer and mkinitcpio hook reference scripts
 docs/                      # Detailed specs: crypto+btrfs integration, crypttab hooks, session switching, etc.
 tests/                     # Integration tests: pkgdeps_integration

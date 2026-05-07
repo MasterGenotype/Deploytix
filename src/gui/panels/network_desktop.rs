@@ -146,16 +146,5 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
         } else {
             packages.install_btrfs_tools = false;
         }
-
-        ui.checkbox(
-            &mut packages.install_modular,
-            "Modular mod manager (CLI + GUI for NexusMods, GameBanana)",
-        );
-        if packages.install_modular {
-            widgets::info_text(
-                ui,
-                "Extensible mod manager with plugin support for downloading and organizing game mods.",
-            );
-        }
     });
 }

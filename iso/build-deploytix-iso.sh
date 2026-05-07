@@ -49,13 +49,11 @@ SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
 # ── Vendor package dirs and remote URLs ──────────────────────────────────────
 # Paths are resolved in resolve_paths() once REPO_ROOT is known.
 TKG_GUI_PKG_DIR=""
-MODULAR_PKG_DIR=""
 GAMESCOPE_PKG_DIR=""
 # Remote URLs used when BUILD_SOURCE=clone.
 # tkg-gui's PKGBUILD already carries the correct SSH URL; it is listed here
-# for reference only. Modular and gamescope require an explicit rewrite in clone mode.
+# for reference only. gamescope requires an explicit rewrite in clone mode.
 TKG_GUI_REMOTE="git+ssh://git@github.com/MasterGenotype/tkg-gui.git"
-MODULAR_REMOTE="git+ssh://git@github.com/MasterGenotype/Modular-1.git"
 GAMESCOPE_REMOTE="git+ssh://git@github.com/MasterGenotype/gamescope.git#branch=gamescope-ba"
 # Staging directory — single source of truth fed to both the local artools repo
 # and the live-overlay embedded repo, eliminating version drift between the two.
@@ -142,14 +140,13 @@ resolve_paths() {
     LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
     TKG_GUI_PKG_DIR="${REPO_ROOT}/vendor/tkg-gui/pkg"
-    MODULAR_PKG_DIR="${REPO_ROOT}/vendor/Modular-1/pkg"
     GAMESCOPE_PKG_DIR="${REPO_ROOT}/vendor/gamescope/pkg"
 }
 
 # ── Submodule guard ───────────────────────────────────────────────────────────
 ensure_submodules() {
     local missing=0
-    for sub in vendor/tkg-gui vendor/gamescope vendor/Modular-1; do
+    for sub in vendor/tkg-gui vendor/gamescope; do
         if [[ ! -f "${REPO_ROOT}/${sub}/pkg/PKGBUILD" ]]; then
             warn "Submodule ${sub} not initialised — pkg/PKGBUILD missing"
             missing=1
@@ -346,7 +343,6 @@ _cleanup_dirty_pkgbuilds() {
     for pb in \
         "${PKG_DIR}/PKGBUILD" \
         "${TKG_GUI_PKG_DIR}/PKGBUILD" \
-        "${MODULAR_PKG_DIR}/PKGBUILD" \
         "${GAMESCOPE_PKG_DIR}/PKGBUILD"
     do
         bak="${pb}.iso-bak"
@@ -359,7 +355,7 @@ _cleanup_dirty_pkgbuilds() {
 build_packages() {
     if "$SKIP_REBUILD"; then
         local count=0 d
-        for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+        for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
             [[ -d "$d" ]] || continue
             count=$(( count + $(find "$d" -maxdepth 1 -name '*.pkg.tar.zst' 2>/dev/null | wc -l) ))
         done
@@ -387,7 +383,6 @@ build_packages() {
     fi
 
     build_tkg_gui_packages
-    build_modular_packages
     build_gamescope_packages
 }
 
@@ -426,40 +421,6 @@ build_tkg_gui_packages() {
     count=$(find "${TKG_GUI_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
     (( count > 0 )) || die "makepkg produced no tkg-gui packages"
     msg2 "Built ${count} tkg-gui package(s)"
-}
-
-# Modular-1 (always built)
-#   local:  rewrite source (hardcoded foreign path) → git+file:// pointing at vendor/Modular-1
-#   clone:  rewrite source → SSH remote URL
-build_modular_packages() {
-    if "$DRY_RUN"; then
-        msg2 "[dry-run] Would build Modular (${BUILD_SOURCE} mode) from ${MODULAR_PKG_DIR}"
-        return 0
-    fi
-
-    msg "Building Modular packages (${BUILD_SOURCE} mode)..."
-
-    local pkgbuild="${MODULAR_PKG_DIR}/PKGBUILD"
-    [[ -f "$pkgbuild" ]] || die "Modular PKGBUILD not found at ${pkgbuild}"
-
-    rm -rf "${MODULAR_PKG_DIR}/modular" "${MODULAR_PKG_DIR}/src"
-
-    if [[ "$BUILD_SOURCE" == "local" ]]; then
-        point_pkgbuild_at_submodule "modular" "$pkgbuild" "${REPO_ROOT}/vendor/Modular-1"
-    else
-        point_pkgbuild_at_remote "modular" "$pkgbuild" "${MODULAR_REMOTE}"
-    fi
-
-    stamp_pkgrel "$pkgbuild"
-    pushd "${MODULAR_PKG_DIR}" >/dev/null
-    makepkg -sf --noconfirm
-    popd >/dev/null
-    restore_pkgbuild "$pkgbuild"
-
-    local count
-    count=$(find "${MODULAR_PKG_DIR}" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)
-    (( count > 0 )) || die "makepkg produced no Modular packages"
-    msg2 "Built ${count} Modular package(s)"
 }
 
 # gamescope (always built)
@@ -512,7 +473,7 @@ stage_packages() {
     mkdir -p "${PKG_STAGE_DIR}"
 
     local src_dir pkg
-    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+    for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
         [[ -d "$src_dir" ]] || continue
         for pkg in "${src_dir}"/*.pkg.tar.zst; do
             [[ -f "$pkg" ]] || continue
@@ -522,7 +483,7 @@ stage_packages() {
 
     # Sanity gate — these must always be present.
     local r
-    for r in deploytix-git gamescope-git modular-git; do
+    for r in deploytix-git gamescope-git; do
         compgen -G "${PKG_STAGE_DIR}/${r}-*.pkg.tar.zst" >/dev/null \
             || die "Stage missing ${r}; rebuild with -s removed"
     done
@@ -805,7 +766,7 @@ cleanup_built_packages() {
 
     msg "Cleaning up built .pkg.tar.zst files..."
     local d
-    for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${MODULAR_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
+    for d in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
         [[ -d "$d" ]] || continue
         find "$d" -maxdepth 1 -name '*.pkg.tar.zst'     -delete
         find "$d" -maxdepth 1 -name '*.pkg.tar.zst.sig' -delete

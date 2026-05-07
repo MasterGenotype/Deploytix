@@ -124,7 +124,6 @@ impl DeploytixGui {
                 install_gaming: self.packages.install_gaming,
                 install_session_switching: self.packages.install_session_switching,
                 install_btrfs_tools: self.packages.install_btrfs_tools,
-                install_modular: self.packages.install_modular,
                 sysctl_gaming_tweaks: self.packages.sysctl_gaming_tweaks,
                 sysctl_network_performance: self.packages.sysctl_network_performance,
                 install_hhd: self.packages.install_hhd,

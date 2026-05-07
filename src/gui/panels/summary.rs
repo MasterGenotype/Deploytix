@@ -147,15 +147,6 @@ pub fn show(
                             "Disabled"
                         },
                     );
-                    row(
-                        ui,
-                        "Modular Mod Manager",
-                        if packages.install_modular {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
                 });
         });
 

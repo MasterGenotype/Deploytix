@@ -216,11 +216,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("go".to_string());
     }
 
-    // Modular mod manager (optional)
-    if config.packages.install_modular {
-        packages.push("modular-git".to_string());
-    }
-
     // Gamescope (Bazzite fork, pre-built) — installed via basestrap so the
     // custom [deploytix] repo is available.  Runtime dependencies are
     // declared in the PKGBUILD and pulled in automatically by pacman.
@@ -266,7 +261,6 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
     "deploytix-gui-git-",
     "gamescope-git-",
     "tkg-gui-git-",
-    "modular-git-",
 ];
 
 /// All custom package names that may live in the [deploytix] repo.
@@ -275,7 +269,6 @@ const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "deploytix-gui-git",
     "gamescope-git",
     "tkg-gui-git",
-    "modular-git",
 ];
 
 /// Path where the ISO live-overlay embeds the deploytix repo.
@@ -439,7 +432,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             if let Some(parent) = repo_root.parent() {
                 search_dirs.push(parent.join("gamescope/pkg"));
                 search_dirs.push(parent.join("tkg-gui/pkg"));
-                search_dirs.push(parent.join("Modular-1/pkg"));
             }
         }
     }
@@ -451,7 +443,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         search_dirs.push(home.join(".gitrepos/deploytix-2/pkg"));
         search_dirs.push(home.join(".gitrepos/gamescope/pkg"));
         search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
-        search_dirs.push(home.join(".gitrepos/Modular-1/pkg"));
         search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
     } else {
         warn!(
@@ -522,7 +513,6 @@ fn repo_dir_for_package(pkg_name: &str) -> &'static str {
         "deploytix-git" | "deploytix-gui-git" => "deploytix-2",
         "gamescope-git" => "gamescope",
         "tkg-gui-git" => "tkg-gui",
-        "modular-git" => "Modular-1",
         _ => "",
     }
 }
@@ -876,8 +866,7 @@ pub fn prepare_deploytix_repo(
              To fix, try one of:\n\
              - Run from the Deploytix live ISO (has all packages embedded)\n\
              - Build packages first: cd pkg && makepkg -s\n\
-             - Clone sibling repos (tkg-gui, Modular-1) and build \
-               their PKGBUILDs\n\
+             - Clone sibling repos (tkg-gui) and build their PKGBUILDs\n\
              - Run iso/build-deploytix-iso.sh to build everything at once",
             missing_str
         )));

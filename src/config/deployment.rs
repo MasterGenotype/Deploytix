@@ -237,9 +237,6 @@ pub struct PackagesConfig {
     /// Requires: install_yay = true + btrfs filesystem.
     #[serde(default)]
     pub install_btrfs_tools: bool,
-    /// Install Modular mod manager (CLI + GUI) for game mod management
-    #[serde(default)]
-    pub install_modular: bool,
     /// Apply gaming/handheld sysctl performance tweaks.
     /// Writes /etc/sysctl.d/99-gaming.conf with vm.max_map_count, swappiness, etc.
     #[serde(default)]
@@ -928,11 +925,6 @@ impl DeploymentConfig {
             false
         };
 
-        let install_modular = prompt_confirm(
-            "Install Modular mod manager? (CLI + GUI for NexusMods, GameBanana)",
-            false,
-        )?;
-
         // sysctl gaming tweaks (standalone — no prerequisites)
         let sysctl_gaming_tweaks = prompt_confirm(
             "Apply gaming sysctl performance tweaks? (vm.max_map_count, swappiness, etc.)",
@@ -1031,7 +1023,6 @@ impl DeploymentConfig {
                 install_gaming,
                 install_session_switching,
                 install_btrfs_tools,
-                install_modular,
                 sysctl_gaming_tweaks,
                 sysctl_network_performance,
                 install_hhd,
