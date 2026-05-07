@@ -129,21 +129,113 @@ else
     )
 fi
 
+# --- changelog generation ----------------------------------------------------
+# Parses commits since the previous tag, groups by conventional-commit type,
+# and emits categorised markdown to stdout.
+generate_changelog() {
+    # Find the previous release tag.
+    local prev_tag
+    prev_tag="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+    [[ "$prev_tag" == "$TAG" ]] && \
+        prev_tag="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+
+    local range
+    if [[ -n "$prev_tag" ]]; then
+        range="${prev_tag}..HEAD"
+    else
+        range=""
+    fi
+
+    # Collect non-merge commit subjects.
+    local -a commits
+    if [[ -n "$range" ]]; then
+        mapfile -t commits < <(git log --oneline --no-merges "$range" 2>/dev/null)
+    else
+        mapfile -t commits < <(git log --oneline --no-merges 2>/dev/null | head -50)
+    fi
+
+    if (( ${#commits[@]} == 0 )); then
+        echo "No changes since previous release."
+        return
+    fi
+
+    # Print range summary.
+    if [[ -n "$prev_tag" ]]; then
+        echo "**${#commits[@]} commits** since [\`${prev_tag}\`](https://github.com/MasterGenotype/Deploytix/releases/tag/${prev_tag})"
+        echo
+    fi
+
+    # Category buckets.
+    local -a feat=() fix=() build=() other=()
+    local msg cc_type cc_scope cc_desc entry
+    # Regex stored in variable — inline regex with literal parens breaks [[ =~ ]].
+    local cc_re='^([a-z]+)(\(([^)]+)\))?!?: (.+)'
+
+    for line in "${commits[@]}"; do
+        msg="${line#* }"
+
+        # Skip merge commits that slipped through.
+        [[ "$msg" =~ ^[Mm]erge\  ]] && continue
+
+        # Parse conventional commit: type(scope)!: description
+        if [[ "$msg" =~ $cc_re ]]; then
+            cc_type="${BASH_REMATCH[1]}"
+            cc_scope="${BASH_REMATCH[3]}"
+            cc_desc="${BASH_REMATCH[4]}"
+
+            if [[ -n "$cc_scope" ]]; then
+                entry="**${cc_scope}**: ${cc_desc}"
+            else
+                entry="${cc_desc}"
+            fi
+
+            case "$cc_type" in
+                feat)                    feat+=("$entry") ;;
+                fix)                     fix+=("$entry")  ;;
+                chore|build|ci|refactor) build+=("$entry") ;;
+                *)                       other+=("$entry") ;;
+            esac
+        else
+            # Free-form commit message — include as-is.
+            other+=("$msg")
+        fi
+    done
+
+    # Render non-empty sections.
+    _print_section() {
+        local title="$1"; shift
+        (( $# == 0 )) && return
+        echo "### $title"
+        local item; for item in "$@"; do echo "- $item"; done
+        echo
+    }
+    _print_section "Features"            "${feat[@]}"
+    _print_section "Bug Fixes"           "${fix[@]}"
+    _print_section "Build & Maintenance" "${build[@]}"
+    _print_section "Other Changes"       "${other[@]}"
+}
+
 # --- release notes ----------------------------------------------------------
 NOTES="$STAGE_DIR/RELEASE_NOTES.md"
 if [[ -n "$NOTES_FILE" ]]; then
     run "cp -f '$NOTES_FILE' '$NOTES'"
 elif [[ ! -f "$NOTES" ]]; then
-    log "auto-generating $NOTES (edit before publish if desired)"
+    log "auto-generating $NOTES"
     commit="$(git rev-parse --short=7 HEAD)"
     if ((DRY_RUN)); then
         printf '   [dry-run] write %s\n' "$NOTES"
     else
-        cat > "$NOTES" <<EOF
+        {
+            cat <<HEADER
 # Deploytix $TAG
 
 Snapshot of \`main\` at commit [\`$commit\`](https://github.com/MasterGenotype/Deploytix/commit/$(git rev-parse HEAD)). Built with \`makepkg\` on Arch/Artix Linux.
 
+## What's changed
+
+HEADER
+            generate_changelog
+            cat <<FOOTER
 ## Package version
 
 \`$PKGVER-1\` (x86_64)
@@ -170,7 +262,8 @@ makepkg -sCf
 ## Checksums
 
 See \`SHA256SUMS\`.
-EOF
+FOOTER
+        } > "$NOTES"
     fi
 else
     log "using existing $NOTES"
