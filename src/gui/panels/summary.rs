@@ -171,6 +171,23 @@ pub fn show(
             }
         });
 
+        // ── Interactive review ──────────────────────────────────────
+        widgets::section(ui, "Interactive Review", |ui| {
+            ui.checkbox(
+                &mut install.interactive_enabled,
+                "Review every pacman / basestrap / yay command before it runs",
+            );
+            if install.interactive_enabled {
+                widgets::info_text(
+                    ui,
+                    "A modal will open for each install (basestrap + every selected \
+                     optional package set). You can edit the package list, skip, or \
+                     cancel. After main installation finishes, a final prompt collects \
+                     additional pacman / AUR packages to install.",
+                );
+            }
+        });
+
         // ── Rehearsal ───────────────────────────────────────────────
         widgets::section(ui, "Rehearsal Install", |ui| {
             ui.horizontal(|ui| {

@@ -260,6 +260,37 @@ pub struct InstallState {
     pub finished: bool,
     pub error: Option<String>,
     pub receiver: Option<Receiver<InstallMessage>>,
+
+    // Interactive review (Commit B)
+    pub interactive_enabled: bool,
+    /// Queue of prompt requests sent by the worker thread; drained each frame.
+    #[cfg(feature = "gui")]
+    pub prompt_receiver: Option<Receiver<crate::gui::interactive::GuiPromptRequest>>,
+    /// In-flight prompt the modal is currently showing.
+    #[cfg(feature = "gui")]
+    pub active_prompt: Option<ActivePrompt>,
+}
+
+#[cfg(feature = "gui")]
+pub enum ActivePrompt {
+    /// Pacman / basestrap / yay invocation review.
+    Pacman {
+        inv: crate::utils::interactive::PacmanInvocation,
+        edited_packages: String,
+        edited_flags: String,
+        reply: std::sync::mpsc::SyncSender<crate::utils::interactive::PacmanDecision>,
+    },
+    /// Post-install extras step.
+    Extras {
+        can_use_yay: bool,
+        pacman_text: String,
+        aur_text: String,
+        save_to_config: bool,
+        reply: std::sync::mpsc::SyncSender<(
+            crate::utils::interactive::ExtraPackages,
+            bool,
+        )>,
+    },
 }
 
 impl Default for InstallState {
@@ -279,6 +310,11 @@ impl Default for InstallState {
             finished: false,
             error: None,
             receiver: None,
+            interactive_enabled: false,
+            #[cfg(feature = "gui")]
+            prompt_receiver: None,
+            #[cfg(feature = "gui")]
+            active_prompt: None,
         }
     }
 }

@@ -197,6 +197,20 @@ impl DeploytixGui {
         self.install.status = "Starting installation...".to_string();
         self.install.progress = 0.0;
         self.install.logs.clear();
+        self.install.active_prompt = None;
+
+        // Set up the prompt-queue channel only when the user opted into
+        // interactive review.  Otherwise no policy is attached and the
+        // install runs unattended.
+        let policy_handle: Option<crate::utils::interactive::PolicyHandle> =
+            if self.install.interactive_enabled {
+                let (ptx, prx) = channel();
+                self.install.prompt_receiver = Some(prx);
+                Some(std::sync::Arc::new(super::interactive::GuiPolicy::new(ptx)))
+            } else {
+                self.install.prompt_receiver = None;
+                None
+            };
 
         thread::spawn(move || {
             let _ = tx.send(InstallMessage::Log(format!(
@@ -236,9 +250,12 @@ impl DeploytixGui {
                     )));
                 });
 
-            let installer = Installer::new(config, false)
+            let mut installer = Installer::new(config, false)
                 .with_skip_confirm(true)
                 .with_progress_callback(progress_cb);
+            if let Some(policy) = policy_handle {
+                installer = installer.with_policy(policy);
+            }
             match installer.run() {
                 Ok(()) => {
                     let _ = tx.send(InstallMessage::Progress(1.0));
@@ -289,6 +306,222 @@ impl DeploytixGui {
             self.install.receiver = None;
         }
     }
+
+    /// Drain interactive prompt requests from the worker thread.  At
+    /// most one prompt is shown at a time; subsequent requests sit in
+    /// the queue until the active one closes.
+    fn poll_prompt_queue(&mut self) {
+        if self.install.active_prompt.is_some() {
+            return;
+        }
+        let req = if let Some(ref rx) = self.install.prompt_receiver {
+            rx.try_recv().ok()
+        } else {
+            None
+        };
+        if let Some(req) = req {
+            use super::interactive::GuiPromptRequest;
+            self.install.active_prompt = Some(match req {
+                GuiPromptRequest::ConfirmPacman { inv, reply } => {
+                    let edited_packages = inv.packages.join("\n");
+                    let edited_flags = inv.extra_flags.join("\n");
+                    ActivePrompt::Pacman {
+                        inv,
+                        edited_packages,
+                        edited_flags,
+                        reply,
+                    }
+                }
+                GuiPromptRequest::PromptExtras {
+                    can_use_yay,
+                    reply,
+                } => ActivePrompt::Extras {
+                    can_use_yay,
+                    pacman_text: String::new(),
+                    aur_text: String::new(),
+                    save_to_config: false,
+                    reply,
+                },
+            });
+        }
+    }
+
+    /// Render the modal for whichever prompt is in flight.  Sends the
+    /// chosen decision back via the per-request reply channel and clears
+    /// `active_prompt` on close.
+    fn show_active_prompt_modal(&mut self, ctx: &egui::Context) {
+        use crate::utils::interactive::{ExtraPackages, PacmanDecision, PacmanKind};
+
+        let Some(prompt) = self.install.active_prompt.take() else {
+            return;
+        };
+
+        let mut next_active: Option<ActivePrompt> = Some(prompt);
+        ctx.request_repaint(); // keep redrawing while modal is up
+
+        match next_active.as_mut().unwrap() {
+            ActivePrompt::Pacman {
+                inv,
+                edited_packages,
+                edited_flags,
+                reply: _,
+            } => {
+                let warn_basestrap = matches!(inv.kind, PacmanKind::Basestrap);
+                let mut close_with: Option<PacmanDecision> = None;
+                egui::Window::new(format!("Review: {}", inv.label))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(640.0)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:?}", inv.kind))
+                                .color(theme::ACCENT)
+                                .strong(),
+                        );
+                        ui.monospace(inv.render());
+                        if let Some(u) = &inv.run_as_user {
+                            ui.label(format!("Runs as user: {}", u));
+                        }
+                        ui.separator();
+                        if warn_basestrap {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 80, 80),
+                                "\u{26a0} Editing the basestrap package list can brick the install. \
+                                 Removing base / linux / the init system / the bootloader will leave \
+                                 the system unbootable.",
+                            );
+                            ui.add_space(theme::SPACING_XS);
+                        }
+                        ui.label("Packages (one per line):");
+                        ui.add(
+                            egui::TextEdit::multiline(edited_packages)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(theme::SPACING_XS);
+                        ui.label("Extra flags (one per line):");
+                        ui.add(
+                            egui::TextEdit::multiline(edited_flags)
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(theme::SPACING_SM);
+                        ui.horizontal(|ui| {
+                            if ui.button("Approve").clicked() {
+                                close_with = Some(PacmanDecision::Approve);
+                            }
+                            if ui.button("Save edits").clicked() {
+                                close_with = Some(PacmanDecision::EditedTo {
+                                    packages: parse_lines(edited_packages),
+                                    extra_flags: parse_lines(edited_flags),
+                                });
+                            }
+                            if ui.button("Skip").clicked() {
+                                close_with = Some(PacmanDecision::Skip);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button(
+                                            egui::RichText::new("Cancel install")
+                                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                                        )
+                                        .clicked()
+                                    {
+                                        close_with = Some(PacmanDecision::Cancel);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                if let Some(decision) = close_with {
+                    if let ActivePrompt::Pacman { reply, .. } = next_active.take().unwrap() {
+                        let _ = reply.send(decision);
+                    }
+                }
+            }
+
+            ActivePrompt::Extras {
+                can_use_yay,
+                pacman_text,
+                aur_text,
+                save_to_config,
+                reply: _,
+            } => {
+                let mut close_with: Option<(ExtraPackages, bool)> = None;
+                egui::Window::new("Install extra packages?")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(640.0)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.label("Repository packages (pacman -S, space-separated):");
+                        ui.add(
+                            egui::TextEdit::multiline(pacman_text)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(theme::SPACING_XS);
+                        if *can_use_yay {
+                            ui.label("AUR packages (yay -S, space-separated):");
+                            ui.add(
+                                egui::TextEdit::multiline(aur_text)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "AUR field disabled — install_yay = false.",
+                                )
+                                .italics(),
+                            );
+                        }
+                        ui.add_space(theme::SPACING_SM);
+                        ui.checkbox(
+                            save_to_config,
+                            "Save these extras to my config (~/.config/deploytix/last-install.toml)",
+                        );
+                        ui.add_space(theme::SPACING_SM);
+                        ui.horizontal(|ui| {
+                            if ui.button("Install").clicked() {
+                                let extras = ExtraPackages {
+                                    pacman: pacman_text
+                                        .split_whitespace()
+                                        .map(|s| s.to_string())
+                                        .collect(),
+                                    aur: if *can_use_yay {
+                                        aur_text
+                                            .split_whitespace()
+                                            .map(|s| s.to_string())
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                };
+                                close_with = Some((extras, *save_to_config));
+                            }
+                            if ui.button("Skip").clicked() {
+                                close_with = Some((ExtraPackages::default(), false));
+                            }
+                        });
+                    });
+                if let Some(payload) = close_with {
+                    if let ActivePrompt::Extras { reply, .. } = next_active.take().unwrap() {
+                        let _ = reply.send(payload);
+                    }
+                }
+            }
+        }
+
+        self.install.active_prompt = next_active;
+    }
 }
 
 impl eframe::App for DeploytixGui {
@@ -301,6 +534,11 @@ impl eframe::App for DeploytixGui {
             self.poll_install_messages();
             ctx.request_repaint();
         }
+
+        // Drain interactive prompts queued by the worker thread.
+        self.poll_prompt_queue();
+        // Render the modal if a prompt is in flight.
+        self.show_active_prompt_modal(ctx);
 
         // ── Header with step indicator ─────────────────────────────
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -416,4 +654,12 @@ impl eframe::App for DeploytixGui {
             }
         });
     }
+}
+
+fn parse_lines(s: &str) -> Vec<String> {
+    s.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect()
 }

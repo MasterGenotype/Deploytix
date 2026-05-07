@@ -4,6 +4,7 @@
 //! Artix Linux deployments.
 
 mod app;
+pub mod interactive;
 mod panels;
 pub mod state;
 pub mod theme;
