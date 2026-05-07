@@ -562,6 +562,44 @@ pub fn install_aur_packages(
     Ok(())
 }
 
+// ======================== iwd GUI Frontend (AUR) ========================
+
+/// Install the AUR-only iwd GUI frontend chosen by the user.
+///
+/// Only runs when the standalone iwd backend is selected and yay is
+/// installed.  Validation forces these to come together — see
+/// `DeploymentConfig::validate`.
+pub fn install_iwd_frontend(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if config.network.backend != crate::config::NetworkBackend::Iwd {
+        return Ok(());
+    }
+    if !config.packages.install_yay {
+        return Ok(());
+    }
+
+    let username = &config.user.name;
+    let pkg = config.network.iwd_frontend.aur_package();
+    info!("Installing iwd GUI frontend via yay as {}: {}", username, pkg);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would install iwd frontend via yay as {}: {}",
+            username, pkg
+        );
+        return Ok(());
+    }
+
+    let install_cmd = format!("sudo -u {} yay -S --noconfirm --needed {}", username, pkg);
+    cmd.run_in_chroot(install_root, &install_cmd)?;
+
+    info!("iwd GUI frontend installed successfully");
+    Ok(())
+}
+
 // ======================== Btrfs Snapshot Tools ========================
 
 /// Btrfs snapshot tool packages to install via yay.
@@ -667,8 +705,12 @@ pub fn install_autostart_entries(
     fs::set_permissions(&audio_desktop_path, fs::Permissions::from_mode(0o644))?;
     info!("  Installed ~/.config/autostart/audio-startup.desktop");
 
-    // Deploy nm-applet.desktop only when NetworkManager is the chosen backend
-    if config.network.backend == crate::config::NetworkBackend::NetworkManager {
+    // Deploy nm-applet.desktop for any NetworkManager-based backend
+    if matches!(
+        config.network.backend,
+        crate::config::NetworkBackend::NetworkManager
+            | crate::config::NetworkBackend::NetworkManagerWpa
+    ) {
         let nm_desktop = "[Desktop Entry]\n\
              Type=Application\n\
              Name=Network Manager Applet\n\

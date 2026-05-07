@@ -126,7 +126,9 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("python".to_string());
     }
 
-    // Network packages based on config
+    // Network packages based on config.  AUR-only frontends (iwgtk, iwdgui,
+    // iwqt) are NOT installed here — they ship via yay in install_iwd_frontend
+    // after the user account exists.
     match config.network.backend {
         NetworkBackend::Iwd => {
             packages.extend(["iwd".to_string(), "openresolv".to_string()]);
@@ -138,7 +140,6 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         NetworkBackend::NetworkManager => {
             packages.extend([
                 "networkmanager".to_string(),
-                // Default to iwd backend; wpa_supplicant can be added later if desired
                 "iwd".to_string(),
                 "openresolv".to_string(),
             ]);
@@ -149,6 +150,22 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
                 packages.push(iwd_service_pkg);
             }
             // Add nm-applet for desktop environments
+            if config.desktop.environment != DesktopEnvironment::None {
+                packages.push("network-manager-applet".to_string());
+            }
+        }
+        NetworkBackend::NetworkManagerWpa => {
+            packages.extend([
+                "networkmanager".to_string(),
+                "wpa_supplicant".to_string(),
+                "openresolv".to_string(),
+            ]);
+            if config.system.init != crate::config::InitSystem::S6 {
+                let nm_service_pkg = format!("networkmanager-{}", config.system.init);
+                let wpa_service_pkg = format!("wpa_supplicant-{}", config.system.init);
+                packages.push(nm_service_pkg);
+                packages.push(wpa_service_pkg);
+            }
             if config.desktop.environment != DesktopEnvironment::None {
                 packages.push("network-manager-applet".to_string());
             }

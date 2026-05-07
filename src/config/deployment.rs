@@ -202,6 +202,9 @@ pub struct NetworkConfig {
     /// Network backend
     #[serde(default)]
     pub backend: NetworkBackend,
+    /// AUR GUI frontend used when `backend = "iwd"`. Ignored otherwise.
+    #[serde(default)]
+    pub iwd_frontend: IwdFrontend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,16 +436,62 @@ impl std::fmt::Display for Bootloader {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkBackend {
+    /// iwd paired with an AUR GUI frontend (iwgtk / iwdgui / iwqt).
+    /// The specific frontend is selected via `NetworkConfig::iwd_frontend`.
     #[default]
     Iwd,
+    /// NetworkManager with iwd as the wifi backend.
     NetworkManager,
+    /// NetworkManager with wpa_supplicant as the wifi backend.
+    #[serde(rename = "networkmanager-wpa")]
+    NetworkManagerWpa,
 }
 
 impl std::fmt::Display for NetworkBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Iwd => write!(f, "iwd (standalone)"),
+            Self::Iwd => write!(f, "iwd + GUI frontend (AUR)"),
             Self::NetworkManager => write!(f, "NetworkManager + iwd"),
+            Self::NetworkManagerWpa => write!(f, "NetworkManager + wpa_supplicant"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IwdFrontend {
+    #[default]
+    Iwgtk,
+    Iwdgui,
+    Iwqt,
+}
+
+impl IwdFrontend {
+    /// AUR package name for this frontend.
+    pub fn aur_package(&self) -> &'static str {
+        match self {
+            Self::Iwgtk => "iwgtk",
+            Self::Iwdgui => "iwdgui",
+            Self::Iwqt => "iwqt",
+        }
+    }
+
+    /// Desktop entry name (used to autostart the tray applet).
+    pub fn desktop_entry(&self) -> &'static str {
+        match self {
+            Self::Iwgtk => "iwgtk",
+            Self::Iwdgui => "iwdgui",
+            Self::Iwqt => "iwqt",
+        }
+    }
+}
+
+impl std::fmt::Display for IwdFrontend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Iwgtk => write!(f, "iwgtk (GTK)"),
+            Self::Iwdgui => write!(f, "iwdgui (GTK)"),
+            Self::Iwqt => write!(f, "iwqt (Qt)"),
         }
     }
 }
@@ -775,9 +824,21 @@ impl DeploymentConfig {
         let username = prompt_input("Username", None)?;
         let password = prompt_password("User password", true)?;
         // Network
-        let backends = [NetworkBackend::Iwd, NetworkBackend::NetworkManager];
+        let backends = [
+            NetworkBackend::Iwd,
+            NetworkBackend::NetworkManager,
+            NetworkBackend::NetworkManagerWpa,
+        ];
         let net_idx = prompt_select("Network backend", &backends, 0)?;
         let backend = backends[net_idx].clone();
+        // Sub-choice: AUR GUI frontend when iwd is the standalone backend.
+        let iwd_frontend = if backend == NetworkBackend::Iwd {
+            let frontends = [IwdFrontend::Iwgtk, IwdFrontend::Iwdgui, IwdFrontend::Iwqt];
+            let f_idx = prompt_select("iwd GUI frontend (AUR)", &frontends, 0)?;
+            frontends[f_idx]
+        } else {
+            IwdFrontend::default()
+        };
 
         // Desktop
         let desktops = [
@@ -956,7 +1017,10 @@ impl DeploymentConfig {
                 groups: default_groups(),
                 sudoer: true,
             },
-            network: NetworkConfig { backend },
+            network: NetworkConfig {
+                backend,
+                iwd_frontend,
+            },
             desktop: DesktopConfig {
                 environment,
                 display_manager: None,
@@ -1024,6 +1088,7 @@ impl DeploymentConfig {
             },
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,
+                iwd_frontend: IwdFrontend::default(),
             },
             desktop: DesktopConfig {
                 environment: DesktopEnvironment::Kde,
@@ -1246,6 +1311,16 @@ impl DeploymentConfig {
                     "Session switching requires a desktop environment".to_string(),
                 ));
             }
+        }
+
+        // The standalone-iwd backend ships an AUR GUI frontend (iwgtk / iwdgui /
+        // iwqt) that's only reachable via yay.  Without yay there's no way to
+        // install the frontend, so refuse the combination at validation time.
+        if self.network.backend == NetworkBackend::Iwd && !self.packages.install_yay {
+            return Err(DeploytixError::ValidationError(format!(
+                "Network backend 'iwd' requires install_yay = true (AUR package: {})",
+                self.network.iwd_frontend.aur_package()
+            )));
         }
 
         // HHD requires yay (AUR)

@@ -17,7 +17,10 @@ pub fn configure_network(
     // Configure network backend
     match config.network.backend {
         NetworkBackend::Iwd => configure_iwd(cmd, install_root)?,
-        NetworkBackend::NetworkManager => configure_networkmanager(cmd, install_root)?,
+        NetworkBackend::NetworkManager => configure_nm_with_backend(cmd, install_root, "iwd")?,
+        NetworkBackend::NetworkManagerWpa => {
+            configure_nm_with_backend(cmd, install_root, "wpa_supplicant")?
+        }
     }
 
     Ok(())
@@ -55,27 +58,28 @@ DisablePeriodicScan=false
     Ok(())
 }
 
-/// Configure NetworkManager to use iwd backend
-fn configure_networkmanager(cmd: &CommandRunner, install_root: &str) -> Result<()> {
-    info!("Configuring NetworkManager with iwd backend");
+/// Configure NetworkManager with the given wifi backend ("iwd" or "wpa_supplicant").
+fn configure_nm_with_backend(
+    cmd: &CommandRunner,
+    install_root: &str,
+    wifi_backend: &str,
+) -> Result<()> {
+    info!("Configuring NetworkManager with {} backend", wifi_backend);
 
     let nm_conf_dir = format!("{}/etc/NetworkManager/conf.d", install_root);
-    let nm_conf_path = format!("{}/iwd.conf", nm_conf_dir);
+    let nm_conf_path = format!("{}/wifi-backend.conf", nm_conf_dir);
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would configure NetworkManager at {}",
-            nm_conf_path
+            "  [dry-run] Would configure NetworkManager at {} (wifi.backend={})",
+            nm_conf_path, wifi_backend
         );
         return Ok(());
     }
 
     fs::create_dir_all(&nm_conf_dir)?;
 
-    let nm_config = r#"[device]
-wifi.backend=iwd
-"#;
-
+    let nm_config = format!("[device]\nwifi.backend={}\n", wifi_backend);
     fs::write(&nm_conf_path, nm_config)?;
 
     info!("NetworkManager configuration written");

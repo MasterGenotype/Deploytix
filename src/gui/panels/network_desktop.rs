@@ -1,6 +1,6 @@
 //! Network and desktop configuration panel
 
-use crate::config::{DesktopEnvironment, Filesystem, NetworkBackend};
+use crate::config::{DesktopEnvironment, Filesystem, IwdFrontend, NetworkBackend};
 use crate::gui::{state::PackagesState, theme, widgets};
 use egui::Ui;
 
@@ -15,15 +15,54 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
                     ui.selectable_value(
                         &mut packages.network_backend,
                         NetworkBackend::Iwd,
-                        "iwd (standalone)",
+                        "iwd + GUI frontend (AUR)",
                     );
                     ui.selectable_value(
                         &mut packages.network_backend,
                         NetworkBackend::NetworkManager,
                         "NetworkManager + iwd",
                     );
+                    ui.selectable_value(
+                        &mut packages.network_backend,
+                        NetworkBackend::NetworkManagerWpa,
+                        "NetworkManager + wpa_supplicant",
+                    );
                 });
         });
+
+        // Sub-choice: iwd GUI frontend (AUR) only when standalone iwd is picked.
+        if packages.network_backend == NetworkBackend::Iwd {
+            ui.add_space(theme::SPACING_XS);
+            ui.horizontal(|ui| {
+                ui.label("Frontend:");
+                egui::ComboBox::from_id_salt("iwd_frontend")
+                    .selected_text(format!("{}", packages.iwd_frontend))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut packages.iwd_frontend,
+                            IwdFrontend::Iwgtk,
+                            "iwgtk (GTK)",
+                        );
+                        ui.selectable_value(
+                            &mut packages.iwd_frontend,
+                            IwdFrontend::Iwdgui,
+                            "iwdgui (GTK)",
+                        );
+                        ui.selectable_value(
+                            &mut packages.iwd_frontend,
+                            IwdFrontend::Iwqt,
+                            "iwqt (Qt)",
+                        );
+                    });
+            });
+            if !packages.install_yay {
+                widgets::info_text(
+                    ui,
+                    "Requires: yay AUR helper (enable in Optional Packages below). \
+                     Validation will fail without it.",
+                );
+            }
+        }
 
         ui.add_space(theme::SPACING_XS);
 

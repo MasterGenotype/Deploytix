@@ -55,6 +55,10 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
             services.push("NetworkManager".to_string());
             services.push("iwd".to_string());
         }
+        NetworkBackend::NetworkManagerWpa => {
+            services.push("NetworkManager".to_string());
+            services.push("wpa_supplicant".to_string());
+        }
     }
 
     // Display manager — greetd on all init systems.

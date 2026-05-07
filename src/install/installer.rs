@@ -284,6 +284,14 @@ impl Installer {
             self.install_aur_packages()?;
         }
 
+        // Phase 5.37: iwd GUI frontend via yay (after yay; only when iwd backend selected)
+        if self.config.network.backend == crate::config::NetworkBackend::Iwd
+            && self.config.packages.install_yay
+        {
+            self.report_progress(0.877, "Installing iwd GUI frontend (AUR)...");
+            self.install_iwd_frontend()?;
+        }
+
         // Phase 5.4: Btrfs snapshot tools via yay (after yay, requires btrfs)
         if self.config.packages.install_btrfs_tools {
             self.report_progress(
@@ -910,6 +918,12 @@ impl Installer {
     fn install_aur_packages(&self) -> Result<()> {
         info!("Installing AUR packages via yay");
         configure::packages::install_aur_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install the chosen iwd GUI frontend (iwgtk / iwdgui / iwqt) via yay
+    fn install_iwd_frontend(&self) -> Result<()> {
+        info!("Installing iwd GUI frontend via yay");
+        configure::packages::install_iwd_frontend(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay

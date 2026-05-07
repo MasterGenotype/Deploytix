@@ -112,6 +112,7 @@ impl DeploytixGui {
             },
             network: NetworkConfig {
                 backend: self.packages.network_backend.clone(),
+                iwd_frontend: self.packages.iwd_frontend,
             },
             desktop: DesktopConfig {
                 environment: self.packages.desktop_env.clone(),

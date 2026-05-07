@@ -1,7 +1,8 @@
 //! Application state types for the Deploytix GUI
 
 use crate::config::{
-    Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, NetworkBackend,
+    Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, IwdFrontend,
+    NetworkBackend,
     SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
@@ -198,6 +199,7 @@ impl Default for UserState {
 /// Package and desktop configuration state.
 pub struct PackagesState {
     pub network_backend: NetworkBackend,
+    pub iwd_frontend: IwdFrontend,
     pub desktop_env: DesktopEnvironment,
     pub install_yay: bool,
     pub install_wine: bool,
@@ -219,6 +221,7 @@ impl Default for PackagesState {
     fn default() -> Self {
         Self {
             network_backend: NetworkBackend::Iwd,
+            iwd_frontend: IwdFrontend::default(),
             desktop_env: DesktopEnvironment::None,
             install_yay: false,
             install_wine: false,
