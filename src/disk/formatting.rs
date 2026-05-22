@@ -17,6 +17,12 @@ pub fn format_partition(
 ) -> Result<()> {
     info!("Formatting {} as {}", partition, filesystem);
 
+    // Clear stale filesystem/LUKS signatures so the kernel probes the new
+    // filesystem correctly.  mkfs tools write their superblock at offsets
+    // above 0 (btrfs at 64 KiB, ext4 at 1 KiB), leaving an old LUKS2 header
+    // at byte 0 intact, which causes `mount` to see crypto_LUKS instead.
+    let _ = cmd.run("wipefs", &["-a", partition]);
+
     let label_args: Vec<&str> = match (filesystem, label) {
         (Filesystem::Ext4, Some(l)) => vec!["-L", l],
         (Filesystem::Btrfs, Some(l)) => vec!["-L", l],
@@ -83,6 +89,7 @@ pub fn format_partition(
 pub fn format_efi(cmd: &CommandRunner, partition: &str) -> Result<()> {
     info!("Formatting {} as FAT32 (EFI)", partition);
 
+    let _ = cmd.run("wipefs", &["-a", partition]);
     cmd.run("mkfs.vfat", &["-F32", "-n", "EFI", partition])
         .map(|_| ())
         .map_err(|e| {
@@ -117,6 +124,7 @@ pub fn format_boot_partition(
 pub fn format_swap(cmd: &CommandRunner, partition: &str, label: Option<&str>) -> Result<()> {
     info!("Formatting {} as swap", partition);
 
+    let _ = cmd.run("wipefs", &["-a", partition]);
     let mut args = vec![];
     if let Some(l) = label {
         args.extend(["-L", l]);
@@ -206,6 +214,12 @@ pub fn format_all_partitions(
             format_partition(cmd, &part_path, filesystem, Some(&part.name))?;
         }
     }
+
+    // Flush all pending writes and let udev update device metadata before
+    // the caller tries to mount.  On virtual block devices (NBD, loop) the
+    // kernel page-cache may not have been flushed to the backing store yet.
+    let _ = cmd.run("sync", &[]);
+    let _ = cmd.run("udevadm", &["settle"]);
 
     info!("All partitions formatted successfully");
     Ok(())
