@@ -16,19 +16,17 @@ pub fn create_user(
     let username = &config.user.name;
     let password = &config.user.password;
     let groups = &config.user.groups;
-    let preserve_home = config.disk.preserve_home;
 
     info!(
-        "Creating user '{}' with groups [{}] (preserve_home: {})",
+        "Creating user '{}' with groups [{}]",
         username,
         groups.join(", "),
-        preserve_home,
     );
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would create user {} with groups {:?} (preserve_home={})",
-            username, groups, preserve_home,
+            "  [dry-run] Would create user {} with groups {:?}",
+            username, groups,
         );
         return Ok(());
     }
@@ -38,23 +36,6 @@ pub fn create_user(
 
     let useradd_cmd = format!("useradd -m -G {} -s /bin/bash {}", groups_str, username);
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
-
-    // When preserve_home is enabled the preserved /home/<user> directory has
-    // file ownership from the old system (potentially a different UID/GID).
-    // Fix ownership so the newly created user can access their files.
-    if preserve_home {
-        let home_dir = format!("{}/home/{}", install_root, username);
-        if std::path::Path::new(&home_dir).exists() {
-            info!(
-                "preserve_home: fixing ownership of /home/{} to match new UID/GID",
-                username
-            );
-            cmd.run_in_chroot(
-                install_root,
-                &format!("chown -R {}:{} /home/{}", username, username, username),
-            )?;
-        }
-    }
 
     // Set password using chpasswd, passing credentials via a temp file to
     // avoid shell injection when the password contains single quotes or

@@ -45,36 +45,6 @@ pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
     // Auto-enable subvolumes for btrfs
     disk.use_subvolumes = disk.filesystem == Filesystem::Btrfs;
 
-    // ── Options ────────────────────────────────────────────────
-    widgets::section(ui, "Options", |ui| {
-        ui.checkbox(
-            &mut disk.preserve_home,
-            "Preserve existing /home (reinstall without overwriting user data)",
-        );
-        if disk.preserve_home {
-            widgets::info_text(
-                ui,
-                "System partitions will be erased but /home will be kept intact.",
-            );
-            if disk.filesystem == Filesystem::Zfs {
-                widgets::validation_warning(ui, "preserve_home is not supported with ZFS");
-            }
-            if disk.use_lvm_thin {
-                widgets::validation_warning(
-                    ui,
-                    "preserve_home is not supported with LVM thin provisioning",
-                );
-            }
-            let has_home = disk.partitions.iter().any(|p| p.mount_point == "/home");
-            if !has_home && !disk.use_subvolumes {
-                widgets::validation_warning(
-                    ui,
-                    "preserve_home requires a /home partition or subvolumes",
-                );
-            }
-        }
-    });
-
     // ── Partitions ─────────────────────────────────────────────
     widgets::section(ui, "Partitions", |ui| {
         partition_section(

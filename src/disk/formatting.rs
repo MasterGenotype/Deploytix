@@ -153,40 +153,17 @@ pub fn format_all_partitions(
     layout: &ComputedLayout,
     filesystem: &Filesystem,
     boot_filesystem: &Filesystem,
-    preserve_home: bool,
 ) -> Result<()> {
     info!(
-        "Formatting {} partitions on {} (data fs: {}, boot fs: {}, preserve_home: {})",
+        "Formatting {} partitions on {} (data fs: {}, boot fs: {})",
         layout.partitions.len(),
         device,
         filesystem,
         boot_filesystem,
-        preserve_home,
     );
 
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
-
-        // Skip /home partition when preserve_home is enabled
-        if preserve_home && part.mount_point.as_deref() == Some("/home") {
-            info!(
-                "Skipping {} (preserve_home: /home partition preserved)",
-                part_path
-            );
-            continue;
-        }
-
-        // When preserve_home + subvolumes, skip the ROOT partition entirely.
-        // The ROOT btrfs filesystem contains the @home subvolume; reformatting
-        // it would destroy user data.  create_btrfs_subvolumes() handles the
-        // selective refresh (delete all subvols except @home, then recreate).
-        if preserve_home && layout.uses_subvolumes() && part.name == "ROOT" {
-            info!(
-                "Skipping {} (preserve_home + subvolumes: ROOT btrfs contains @home)",
-                part_path
-            );
-            continue;
-        }
 
         if part.is_efi {
             format_efi(cmd, &part_path)?;
@@ -497,65 +474,6 @@ pub fn export_zfs_pools(cmd: &CommandRunner) -> Result<()> {
     Ok(())
 }
 
-/// Recursively delete all nested btrfs subvolumes under `path`.
-///
-/// `btrfs subvolume delete` refuses to remove a subvolume that still contains
-/// child subvolumes (e.g. snapshots, Docker layers, Flatpak data).  This
-/// helper lists children deepest-first and deletes them before the caller
-/// removes the parent.  All errors are logged but otherwise ignored so that a
-/// single stubborn subvolume doesn't abort the whole reinstall.
-fn delete_nested_subvolumes(cmd: &CommandRunner, path: &str) {
-    // `btrfs subvolume list -o` lists direct children; we need the full
-    // recursive tree sorted deepest-first so children are removed before
-    // parents.  `btrfs subvolume list` with the path gives us paths
-    // relative to the top-level volume.
-    let output = std::process::Command::new("btrfs")
-        .args(["subvolume", "list", "-o", path])
-        .output();
-
-    let lines = match output {
-        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return, // No children or command failed — nothing to do
-    };
-
-    // Each line looks like:
-    //   ID 259 gen 12 top level 5 path <subvol_path>
-    // Extract the path portion and build absolute paths.
-    let mut child_paths: Vec<String> = lines
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(9, ' ').collect();
-            if parts.len() >= 9 {
-                // The path column is relative to the filesystem root;
-                // the mounted filesystem root is the parent of `path`.
-                // However `btrfs subvolume list -o <path>` returns paths
-                // relative to the filesystem top-level, so we need to
-                // find the mount point.  For simplicity we use the
-                // absolute path returned combined with the mount point.
-                // Since we mounted the raw btrfs at fs_mount, the path
-                // part after "path" is relative to that mount.
-                let rel = parts[8];
-                // `path` itself is something like /tmp/btrfs_mount/@var
-                // The parent directory is the mount point
-                let mount_point = std::path::Path::new(path)
-                    .parent()
-                    .unwrap_or(std::path::Path::new(path));
-                Some(format!("{}/{}", mount_point.display(), rel))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Sort by path depth descending so deepest children are deleted first
-    child_paths.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
-
-    for child in &child_paths {
-        info!("preserve_home: deleting nested subvolume {}", child);
-        let _ = cmd.run("btrfs", &["subvolume", "delete", child]);
-    }
-}
-
 /// Create btrfs subvolumes on a device
 ///
 /// Follows the canonical BTRFS subvolume setup order:
@@ -567,20 +485,15 @@ pub fn create_btrfs_subvolumes(
     device: &str,
     subvolumes: &[SubvolumeDef],
     fs_mount: &str,
-    preserve_home: bool,
 ) -> Result<()> {
     info!(
-        "Creating btrfs subvolumes on {} (mounted at {}, preserve_home: {})",
-        device, fs_mount, preserve_home,
+        "Creating btrfs subvolumes on {} (mounted at {})",
+        device, fs_mount,
     );
 
     if cmd.is_dry_run() {
         println!("  [dry-run] mount -t btrfs {} {}", device, fs_mount);
         for sv in subvolumes {
-            if preserve_home && sv.mount_point == "/home" {
-                println!("  [dry-run] SKIP subvolume {} (preserve_home)", sv.name);
-                continue;
-            }
             println!(
                 "  [dry-run] btrfs subvolume create {}/{}",
                 fs_mount, sv.name
@@ -599,47 +512,8 @@ pub fn create_btrfs_subvolumes(
     // installation (common on NBD/loop devices with write-back caching).
     cmd.run("mount", &["-t", "btrfs", device, fs_mount])?;
 
-    // When preserve_home is enabled, delete all subvolumes EXCEPT @home
-    // so we get a fresh system while keeping user data.
-    if preserve_home {
-        info!("preserve_home: deleting existing subvolumes except @home");
-        for sv in subvolumes {
-            if sv.mount_point == "/home" {
-                info!("preserve_home: keeping subvolume {}", sv.name);
-                continue;
-            }
-            let subvol_path = format!("{}/{}", fs_mount, sv.name);
-            // Subvolume may not exist (first install), ignore errors
-            if std::path::Path::new(&subvol_path).exists() {
-                // Delete any nested subvolumes first (snapshots, Docker
-                // layers, etc.) — btrfs subvolume delete fails on
-                // non-empty subvolumes.
-                delete_nested_subvolumes(cmd, &subvol_path);
-                let _ = cmd.run("btrfs", &["subvolume", "delete", &subvol_path]);
-                info!("Deleted existing subvolume: {}", sv.name);
-            }
-        }
-    }
-
     // Create each subvolume inside the filesystem mountpoint
     for sv in subvolumes {
-        // Skip @home subvolume when preserve_home is enabled
-        if preserve_home && sv.mount_point == "/home" {
-            let subvol_path = format!("{}/{}", fs_mount, sv.name);
-            if std::path::Path::new(&subvol_path).exists() {
-                info!(
-                    "preserve_home: subvolume {} already exists, skipping",
-                    sv.name
-                );
-                continue;
-            }
-            // If @home doesn't exist, fall through to create it
-            info!(
-                "preserve_home: subvolume {} does not exist, creating it",
-                sv.name
-            );
-        }
-
         let subvol_path = format!("{}/{}", fs_mount, sv.name);
         cmd.run("btrfs", &["subvolume", "create", &subvol_path])
             .map_err(|e| {

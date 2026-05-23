@@ -20,26 +20,7 @@ pub fn mount_partitions(
     install_root: &str,
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
-    mount_partitions_inner(cmd, device, layout, install_root, false, boot_filesystem)
-}
-
-/// Mount all partitions with preserve_home support
-pub fn mount_partitions_preserve(
-    cmd: &CommandRunner,
-    device: &str,
-    layout: &ComputedLayout,
-    install_root: &str,
-    preserve_home: bool,
-    boot_filesystem: &Filesystem,
-) -> Result<()> {
-    mount_partitions_inner(
-        cmd,
-        device,
-        layout,
-        install_root,
-        preserve_home,
-        boot_filesystem,
-    )
+    mount_partitions_inner(cmd, device, layout, install_root, boot_filesystem)
 }
 
 fn mount_partitions_inner(
@@ -47,7 +28,6 @@ fn mount_partitions_inner(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
-    preserve_home: bool,
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
     // Check if this layout uses btrfs subvolumes
@@ -57,7 +37,6 @@ fn mount_partitions_inner(
             device,
             layout,
             install_root,
-            preserve_home,
             boot_filesystem,
         );
     }
@@ -213,7 +192,6 @@ fn mount_partitions_with_subvolumes(
     device: &str,
     layout: &ComputedLayout,
     install_root: &str,
-    preserve_home: bool,
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().unwrap();
@@ -235,7 +213,7 @@ fn mount_partitions_with_subvolumes(
     // Create subvolumes on the ROOT partition
     // This temporarily mounts the raw btrfs, creates subvolumes, then unmounts
     let temp_mount = "/tmp/deploytix_btrfs_setup";
-    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount, preserve_home)?;
+    create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount)?;
 
     // Now mount the subvolumes to their final locations
     mount_btrfs_subvolumes(cmd, &root_path, subvolumes, install_root)?;
@@ -297,8 +275,7 @@ fn mount_partitions_with_subvolumes(
                     "/tmp/deploytix_btrfs_{}",
                     subvol_name.trim_start_matches('@')
                 );
-                let skip_home = preserve_home && mount_point == "/home";
-                create_btrfs_subvolumes(cmd, &part_path, &part_subvols, &temp_mount, skip_home)?;
+                create_btrfs_subvolumes(cmd, &part_path, &part_subvols, &temp_mount)?;
                 mount_btrfs_subvolumes(cmd, &part_path, &part_subvols, install_root)?;
             } else {
                 // Non-btrfs (or plain-mount) partition.
@@ -337,7 +314,7 @@ pub fn mount_boot_btrfs_subvolume(
         mount_options: "defaults,noatime,compress=zstd".to_string(),
     }];
     let boot_temp = "/tmp/deploytix_btrfs_boot";
-    create_btrfs_subvolumes(cmd, boot_device, &boot_subvol, boot_temp, false)?;
+    create_btrfs_subvolumes(cmd, boot_device, &boot_subvol, boot_temp)?;
     mount_btrfs_subvolumes(cmd, boot_device, &boot_subvol, install_root)?;
     Ok(())
 }

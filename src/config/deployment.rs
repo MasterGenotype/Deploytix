@@ -133,13 +133,6 @@ pub struct DiskConfig {
     #[serde(default = "default_zram_algorithm")]
     pub zram_algorithm: String,
 
-    /// Preserve existing /home partition during reinstall.
-    /// When true, the installer skips repartitioning and formatting of the
-    /// /home partition/volume/subvolume, allowing a system reinstall without
-    /// overwriting user files.  Requires an existing compatible partition table.
-    #[serde(default)]
-    pub preserve_home: bool,
-
     /// User-defined data partitions (e.g. ROOT, HOME, USR, VAR).
     /// EFI + Boot are always auto-prepended; Swap is prepended when
     /// `swap_type == Partition`.
@@ -885,12 +878,6 @@ impl DeploymentConfig {
         let swap_idx = prompt_select("Swap configuration", &swap_types, 0)?;
         let swap_type = swap_types[swap_idx].clone();
 
-        // Preserve home partition (for reinstall scenarios)
-        let preserve_home = prompt_confirm(
-            "Preserve existing /home partition? (for reinstall without overwriting user files)",
-            false,
-        )?;
-
         // LVM thin provisioning (available on all layouts)
         let use_lvm_thin = prompt_confirm("Enable LVM thin provisioning?", false)?;
 
@@ -1021,7 +1008,6 @@ impl DeploymentConfig {
                 swap_type,
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_algorithm: default_zram_algorithm(),
-                preserve_home,
                 partitions,
             },
             system: SystemConfig {
@@ -1090,7 +1076,6 @@ impl DeploymentConfig {
                 swap_type: SwapType::Partition,
                 swap_file_size_mib: 0,
                 zram_algorithm: default_zram_algorithm(),
-                preserve_home: false,
                 partitions: default_partitions(),
             },
             system: SystemConfig {
@@ -1183,36 +1168,6 @@ impl DeploymentConfig {
         if self.disk.boot_encryption && self.disk.boot_filesystem == Filesystem::Zfs {
             return Err(DeploytixError::ValidationError(
                 "ZFS is not supported as the boot filesystem when boot encryption (LUKS1) is enabled".to_string(),
-            ));
-        }
-
-        // preserve_home is incompatible with ZFS (pools cannot be partially preserved)
-        if self.disk.preserve_home && self.disk.filesystem == Filesystem::Zfs {
-            return Err(DeploytixError::ValidationError(
-                "preserve_home is not supported with ZFS filesystem (pools cannot be partially preserved)".to_string(),
-            ));
-        }
-
-        // preserve_home is incompatible with LVM thin provisioning — the entire
-        // LVM PV (including the home thin volume) must be recreated from scratch.
-        if self.disk.preserve_home && self.disk.use_lvm_thin {
-            return Err(DeploytixError::ValidationError(
-                "preserve_home is not supported with LVM thin provisioning (the LVM PV cannot be partially preserved)"
-                    .to_string(),
-            ));
-        }
-
-        // preserve_home without a dedicated /home partition requires subvolumes
-        // (there must be an @home subvolume to preserve).
-        let has_home_partition = self
-            .disk
-            .partitions
-            .iter()
-            .any(|p| p.mount_point == "/home");
-        if self.disk.preserve_home && !has_home_partition && !self.disk.use_subvolumes {
-            return Err(DeploytixError::ValidationError(
-                "preserve_home requires either a /home partition or use_subvolumes = true"
-                    .to_string(),
             ));
         }
 

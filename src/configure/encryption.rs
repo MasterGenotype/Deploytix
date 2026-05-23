@@ -210,10 +210,7 @@ fn luks_format_inner(device: &str, password: &str, integrity: bool) -> Result<()
     Ok(())
 }
 
-/// Open a LUKS container
-///
-/// Public wrapper used by the installer to re-open existing LUKS containers
-/// (e.g. when `preserve_home` is enabled and the Home volume is not reformatted).
+/// Open an existing LUKS container by name.
 pub fn open_luks(
     cmd: &CommandRunner,
     device: &str,

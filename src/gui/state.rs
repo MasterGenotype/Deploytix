@@ -89,7 +89,6 @@ pub struct DiskState {
 
     // Btrfs
     pub use_subvolumes: bool,
-    pub preserve_home: bool,
 
     // LVM thin provisioning
     pub use_lvm_thin: bool,
@@ -119,7 +118,6 @@ impl Default for DiskState {
             integrity: false,
             swap_type: SwapType::Partition,
             use_subvolumes: false,
-            preserve_home: false,
             use_lvm_thin: false,
             lvm_vg_name: "vg0".to_string(),
             lvm_thin_pool_name: "thinpool".to_string(),

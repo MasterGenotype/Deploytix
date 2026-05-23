@@ -24,7 +24,7 @@ use crate::install::fstab::{
     LvmThinFstabParams, MultiVolumeFstabParams,
 };
 use crate::install::{
-    generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_preserve,
+    generate_fstab, mount_boot_btrfs_subvolume, mount_partitions,
     mount_partitions_zfs, run_basestrap, unmount_all,
 };
 use crate::utils::command::{CommandRunner, OperationRecord};
@@ -601,18 +601,10 @@ impl Installer {
         self.layout = Some(layout);
 
         // Confirm with user
-        let warning = if self.config.disk.preserve_home {
-            format!(
-                "This will ERASE system partitions on {} but PRESERVE /home. \
-                 Existing partition table will not be modified.",
-                self.config.disk.device
-            )
-        } else {
-            format!(
-                "This will ERASE ALL DATA on {}. This operation cannot be undone!",
-                self.config.disk.device
-            )
-        };
+        let warning = format!(
+            "This will ERASE ALL DATA on {}. This operation cannot be undone!",
+            self.config.disk.device
+        );
 
         if !self.cmd.is_dry_run() && !self.skip_confirm && !warn_confirm(&warning)? {
             return Err(crate::utils::error::DeploytixError::UserCancelled);
@@ -629,87 +621,12 @@ impl Installer {
     /// Partition the disk
     fn partition_disk(&self) -> Result<()> {
         let layout = self.layout.as_ref().unwrap();
-
-        if self.config.disk.preserve_home {
-            info!(
-                "[Phase 2/6] Preserving existing partition table on {} (preserve_home enabled)",
-                self.config.disk.device
-            );
-            // Verify the existing partition table has the expected number of partitions
-            self.verify_existing_partitions(layout)?;
-        } else {
-            info!(
-                "[Phase 2/6] Partitioning {} ({} data partitions)",
-                self.config.disk.device,
-                self.config.disk.partitions.len()
-            );
-            apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
-        }
-
-        Ok(())
-    }
-
-    /// Verify that the existing partition table on the device is compatible
-    /// with the expected layout.  Used when `preserve_home` is enabled to
-    /// ensure the disk already has a partition table we can work with.
-    fn verify_existing_partitions(&self, layout: &ComputedLayout) -> Result<()> {
-        use crate::disk::detection::partition_path;
-        use std::path::Path;
-
         info!(
-            "Verifying existing partition table on {} ({} expected partitions)",
+            "[Phase 2/6] Partitioning {} ({} data partitions)",
             self.config.disk.device,
-            layout.partitions.len()
+            self.config.disk.partitions.len()
         );
-
-        if self.cmd.is_dry_run() {
-            info!("[dry-run] Skipping partition table verification");
-            return Ok(());
-        }
-
-        for part in &layout.partitions {
-            let part_path = partition_path(&self.config.disk.device, part.number);
-            if !Path::new(&part_path).exists() {
-                return Err(DeploytixError::ConfigError(format!(
-                    "preserve_home: expected partition {} ({}) does not exist on {}. \
-                     The existing partition table is not compatible with the configured partitions.",
-                    part.number, part.name, self.config.disk.device
-                )));
-            }
-        }
-
-        // Verify the home partition specifically has a readable filesystem
-        let home_part = layout
-            .partitions
-            .iter()
-            .find(|p| p.mount_point.as_deref() == Some("/home"));
-
-        if let Some(home) = home_part {
-            let home_path = partition_path(&self.config.disk.device, home.number);
-            let output = std::process::Command::new("blkid").arg(&home_path).output();
-
-            match output {
-                Ok(o) if o.status.success() => {
-                    info!("Home partition {} has a readable filesystem", home_path);
-                }
-                _ => {
-                    return Err(DeploytixError::ConfigError(format!(
-                        "preserve_home: home partition {} does not have a readable filesystem. \
-                         Cannot preserve a partition that has no filesystem.",
-                        home_path
-                    )));
-                }
-            }
-        } else if !layout.uses_subvolumes() {
-            // No dedicated /home partition and not using subvolumes — nothing to preserve
-            return Err(DeploytixError::ConfigError(
-                "preserve_home: no /home partition found in the layout and subvolumes are not \
-                 enabled. There is no separate /home to preserve."
-                    .to_string(),
-            ));
-        }
-
-        info!("Existing partition table verified successfully");
+        apply_partitions(&self.cmd, &self.config.disk.device, layout)?;
         Ok(())
     }
 
@@ -727,7 +644,6 @@ impl Installer {
             layout,
             &self.config.disk.filesystem,
             &self.config.disk.boot_filesystem,
-            self.config.disk.preserve_home,
         )?;
 
         Ok(())
@@ -738,24 +654,13 @@ impl Installer {
         info!("[Phase 2/6] Mounting partitions to {}", INSTALL_ROOT);
 
         let layout = self.layout.as_ref().unwrap();
-        if self.config.disk.preserve_home {
-            mount_partitions_preserve(
-                &self.cmd,
-                &self.config.disk.device,
-                layout,
-                INSTALL_ROOT,
-                true,
-                &self.config.disk.boot_filesystem,
-            )?;
-        } else {
-            mount_partitions(
-                &self.cmd,
-                &self.config.disk.device,
-                layout,
-                INSTALL_ROOT,
-                &self.config.disk.boot_filesystem,
-            )?;
-        }
+        mount_partitions(
+            &self.cmd,
+            &self.config.disk.device,
+            layout,
+            INSTALL_ROOT,
+            &self.config.disk.boot_filesystem,
+        )?;
 
         Ok(())
     }
@@ -1154,58 +1059,12 @@ impl Installer {
             ));
         }
 
-        // When preserve_home is enabled, exclude the Home partition from LUKS setup
-        // and open the existing LUKS container instead.
-        let luks_parts: Vec<(u32, &str)> = if self.config.disk.preserve_home {
-            all_luks_parts
-                .iter()
-                .filter(|(_, name)| !name.eq_ignore_ascii_case("home"))
-                .cloned()
-                .collect()
-        } else {
-            all_luks_parts.clone()
-        };
-
-        // Setup LUKS encryption for non-preserved volumes
-        let mut containers = setup_multi_volume_encryption(
+        let containers = setup_multi_volume_encryption(
             &self.cmd,
             &self.config,
             &self.config.disk.device,
-            &luks_parts,
+            &all_luks_parts,
         )?;
-
-        // Open existing Home LUKS container when preserve_home is enabled
-        if self.config.disk.preserve_home {
-            if let Some((home_num, _)) = all_luks_parts
-                .iter()
-                .find(|(_, name)| name.eq_ignore_ascii_case("home"))
-            {
-                let home_device = partition_path(&self.config.disk.device, *home_num);
-                let password = self
-                    .config
-                    .disk
-                    .encryption_password
-                    .as_ref()
-                    .ok_or_else(|| {
-                        DeploytixError::ValidationError(
-                            "Encryption password required to open preserved Home volume"
-                                .to_string(),
-                        )
-                    })?;
-                let mapper_name = configure::encryption::resolve_mapper_name("Crypt-Home");
-                info!(
-                    "preserve_home: opening existing LUKS container {} as {}",
-                    home_device, mapper_name
-                );
-                configure::encryption::open_luks(&self.cmd, &home_device, &mapper_name, password)?;
-                containers.push(LuksContainer {
-                    device: home_device,
-                    mapper_name: mapper_name.clone(),
-                    mapped_path: format!("/dev/mapper/{}", mapper_name),
-                    volume_name: "Home".to_string(),
-                });
-            }
-        }
 
         self.luks_containers = containers;
 
@@ -1244,15 +1103,6 @@ impl Installer {
 
         // Format each LUKS-mapped device with the configured filesystem
         for container in &self.luks_containers {
-            // Skip formatting the Home container when preserve_home is enabled
-            if self.config.disk.preserve_home && container.volume_name.eq_ignore_ascii_case("home")
-            {
-                info!(
-                    "Skipping {} (preserve_home: Home volume preserved)",
-                    container.mapped_path
-                );
-                continue;
-            }
             format_partition(
                 &self.cmd,
                 &container.mapped_path,
@@ -1386,7 +1236,6 @@ impl Installer {
             &root_container.mapped_path,
             &root_svols,
             temp_mount,
-            false,
         )?;
         mount_btrfs_subvolumes(
             &self.cmd,
@@ -1401,16 +1250,12 @@ impl Installer {
                 continue;
             }
 
-            let preserve = self.config.disk.preserve_home
-                && container.volume_name.eq_ignore_ascii_case("home");
-
             let svols = multi_volume_subvolumes(&container.volume_name);
             create_btrfs_subvolumes(
                 &self.cmd,
                 &container.mapped_path,
                 &svols,
                 temp_mount,
-                preserve,
             )?;
             mount_btrfs_subvolumes(&self.cmd, &container.mapped_path, &svols, INSTALL_ROOT)?;
         }
@@ -1664,14 +1509,6 @@ impl Installer {
 
         // Format each thin volume with the configured filesystem
         for vol in &self.lvm_thin_volumes {
-            // Skip formatting the home volume when preserve_home is enabled
-            if self.config.disk.preserve_home && vol.mount_point == "/home" {
-                info!(
-                    "Skipping LV {} (preserve_home: /home volume preserved)",
-                    vol.name
-                );
-                continue;
-            }
             let lv_device = lv_path(vg_name, &vol.name);
             format_partition(
                 &self.cmd,

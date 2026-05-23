@@ -89,7 +89,6 @@ impl DeploytixGui {
                 swap_type: self.disk.swap_type.clone(),
                 swap_file_size_mib: 0,
                 zram_algorithm: "zstd".to_string(),
-                preserve_home: self.disk.preserve_home,
                 partitions: self.disk.partitions.clone(),
             },
             system: SystemConfig {
