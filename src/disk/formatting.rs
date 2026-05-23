@@ -575,7 +575,7 @@ pub fn create_btrfs_subvolumes(
     );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] mount {} {}", device, fs_mount);
+        println!("  [dry-run] mount -t btrfs {} {}", device, fs_mount);
         for sv in subvolumes {
             if preserve_home && sv.mount_point == "/home" {
                 println!("  [dry-run] SKIP subvolume {} (preserve_home)", sv.name);
@@ -593,8 +593,11 @@ pub fn create_btrfs_subvolumes(
     // Create filesystem mountpoint
     fs::create_dir_all(fs_mount)?;
 
-    // Mount the raw btrfs filesystem to its mountpoint
-    cmd.run("mount", &[device, fs_mount])?;
+    // Mount the raw btrfs filesystem to its mountpoint.  Pass -t btrfs
+    // explicitly to bypass libblkid autodetection, which may read a stale
+    // udev cache that still records the old crypto_LUKS type from a prior
+    // installation (common on NBD/loop devices with write-back caching).
+    cmd.run("mount", &["-t", "btrfs", device, fs_mount])?;
 
     // When preserve_home is enabled, delete all subvolumes EXCEPT @home
     // so we get a fresh system while keeping user data.
@@ -667,7 +670,7 @@ pub fn mount_btrfs_subvolumes(
     if cmd.is_dry_run() {
         for sv in subvolumes {
             println!(
-                "  [dry-run] mount -o subvol={},{} {} {}{}",
+                "  [dry-run] mount -t btrfs -o subvol={},{} {} {}{}",
                 sv.name, sv.mount_options, device, install_root, sv.mount_point
             );
         }
@@ -688,7 +691,9 @@ pub fn mount_btrfs_subvolumes(
         fs::create_dir_all(&target)?;
 
         let options = format!("subvol={},{}", sv.name, sv.mount_options);
-        cmd.run("mount", &["-o", &options, device, &target])
+        // Pass -t btrfs explicitly: same reason as create_btrfs_subvolumes —
+        // bypasses stale blkid/udev cache that may report crypto_LUKS.
+        cmd.run("mount", &["-t", "btrfs", "-o", &options, device, &target])
             .map_err(|e| {
                 DeploytixError::FilesystemError(format!("Failed to mount {}: {}", sv.name, e))
             })?;
