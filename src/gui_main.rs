@@ -46,9 +46,6 @@ fn main() -> eframe::Result<()> {
         .with_target(false)
         .init();
 
-    // Start looping theme music (runs in background; stops when handle drops)
-    let _audio = deploytix::resources::audio::play_theme_loop();
-
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Deploytix - Artix Linux Installer")

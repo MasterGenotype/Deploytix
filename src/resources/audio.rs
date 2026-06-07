@@ -10,7 +10,24 @@ static THEME_WAV: &[u8] = include_bytes!("../../theme.wav");
 /// Handle that keeps audio playback alive. Playback stops when dropped.
 pub struct AudioHandle {
     _stream: rodio::OutputStream,
-    _sink: rodio::Sink,
+    sink: rodio::Sink,
+}
+
+impl AudioHandle {
+    /// Whether the theme music is currently playing (i.e. not paused).
+    pub fn is_playing(&self) -> bool {
+        !self.sink.is_paused()
+    }
+
+    /// Toggle theme music playback on/off. Returns the new playing state.
+    pub fn toggle(&self) -> bool {
+        if self.sink.is_paused() {
+            self.sink.play();
+        } else {
+            self.sink.pause();
+        }
+        self.is_playing()
+    }
 }
 
 /// Install a no-op ALSA error handler to suppress PCM underrun spam.
@@ -108,6 +125,6 @@ pub fn play_theme_loop() -> Option<AudioHandle> {
 
     Some(AudioHandle {
         _stream: stream,
-        _sink: sink,
+        sink,
     })
 }

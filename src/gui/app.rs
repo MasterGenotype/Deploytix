@@ -23,6 +23,9 @@ pub struct DeploytixGui {
     /// Tracks whether the configure panel passes validation (one-frame lag
     /// is fine in immediate-mode UI).
     config_valid: bool,
+    /// Looping theme music handle. `None` if audio failed to initialize
+    /// (e.g. no audio device available).
+    audio: Option<crate::resources::audio::AudioHandle>,
 }
 
 impl Default for DeploytixGui {
@@ -35,6 +38,7 @@ impl Default for DeploytixGui {
             packages: PackagesState::default(),
             install: InstallState::default(),
             config_valid: false,
+            audio: None,
         }
     }
 }
@@ -42,7 +46,10 @@ impl Default for DeploytixGui {
 impl DeploytixGui {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        Self::default()
+        Self {
+            audio: crate::resources::audio::play_theme_loop(),
+            ..Self::default()
+        }
     }
 
     fn refresh_disks(&mut self) {
@@ -550,6 +557,27 @@ impl eframe::App for DeploytixGui {
                         .size(18.0)
                         .color(theme::ACCENT),
                 );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(theme::SPACING_MD);
+                    if let Some(audio) = &self.audio {
+                        let playing = audio.is_playing();
+                        let (icon, hover) = if playing {
+                            ("\u{1F50A}", "Mute theme music")
+                        } else {
+                            ("\u{1F507}", "Unmute theme music")
+                        };
+                        let button = egui::Button::new(
+                            egui::RichText::new(icon)
+                                .size(16.0)
+                                .color(theme::TEXT_SECONDARY),
+                        )
+                        .frame(false);
+                        if ui.add(button).on_hover_text(hover).clicked() {
+                            audio.toggle();
+                        }
+                    }
+                });
             });
             ui.add_space(theme::SPACING_XS);
             widgets::step_indicator(ui, self.step);
