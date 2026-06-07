@@ -212,6 +212,12 @@ EFI (512 MiB), Boot (2 GiB), and Swap (when `swap_type = "partition"`) are alway
 
 Default partitions when none are specified: `/` (20 GiB), `/usr` (30 GiB), `/var` (10 GiB), `/home` (remainder).
 
+> **Not sure how big your target disk should be?** See
+> [docs/DISK_SPACE_GUIDE.md](docs/DISK_SPACE_GUIDE.md) — a tutorial on sizing
+> recommendations by installation media (USB/removable, SSD/NVMe, HDD) and
+> feature set (desktop environment, gaming/handheld stack, encryption, btrfs
+> subvolumes).
+
 ## Rehearsal
 
 **Rehearsal** (`deploytix rehearse`) is the true dry-run: it executes the full installation pipeline on the real target disk with every command recorded, then wipes the disk to restore pristine state. The result is a detailed report showing exactly what happened and where it failed. This is destructive to the target device — it writes for real, then cleans up.
