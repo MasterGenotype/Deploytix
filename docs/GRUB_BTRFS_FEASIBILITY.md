@@ -12,7 +12,7 @@ SecureBoot and encryption** — is feasible. Effort varies by configuration:
 | Btrfs, no encryption | High — works almost out of the box | Low |
 | Btrfs + multi-LUKS (standard GRUB) | High — one hook change required | Medium |
 | Btrfs + LVM thin | Not applicable — LVM thin doesn't use btrfs subvolumes for data | N/A |
-| Btrfs + SecureBoot standalone GRUB (sbctl + encryption) | High — reuses existing rebuild/sign pipeline as the regen target | Medium-High |
+| Btrfs + SecureBoot standalone GRUB (sbctl + encryption) | High — existing rebuild/sign pipeline is the regen target, but needs a custom trigger (see below) | High |
 
 All four supported combinations can ship together; none require disabling
 another Deploytix feature.
@@ -143,8 +143,13 @@ initramfs does that. The only case where GRUB must unlock something is when
 - If `boot_encryption = false`: set `GRUB_BTRFS_ENABLE_CRYPTODISK=false` in
   the grub-btrfs config (GRUB reads `/boot` unencrypted, initramfs handles
   data LUKS).
-- If `boot_encryption = true`: set `GRUB_BTRFS_ENABLE_CRYPTODISK=y` (GRUB
+- If `boot_encryption = true`: set `GRUB_BTRFS_ENABLE_CRYPTODISK=true` (GRUB
   must unlock the LUKS1 `/boot` container before reading any kernel or config).
+  Upstream `41_snapshots-btrfs` lowercases this value and only takes the
+  cryptodisk branch for the literal string `true` (the man page example uses
+  `"true"` too) — `y`/`yes` fall through to the non-cryptodisk branch and
+  silently omit the `cryptodisk`/`luks`/`luks2` modules from encrypted-`/boot`
+  snapshot entries.
 
 **Net effort**: Medium. One hook change + config file generation.
 
@@ -213,57 +218,99 @@ written — only a second trigger path needs to call the existing script.**
 #### Wiring grub-btrfs to the existing script
 
 grub-btrfs's own config (`/etc/default/grub-btrfs/config`) exposes
-`GRUB_BTRFS_MKCONFIG`, the command it invokes to regenerate the boot config
-whenever it detects a snapshot change (this is the same variable distros use
-to point at `grub-mkconfig` vs. `grub2-mkconfig` vs. `update-grub`). For
-standalone-GRUB systems, Deploytix should generate:
+`GRUB_BTRFS_MKCONFIG` — the command distros use to point at `grub-mkconfig`
+vs. `grub2-mkconfig` vs. `update-grub`. However, `grub-btrfsd`'s
+`create_grub_menu()` does **not** call it unconditionally; it first checks
+whether `grub.cfg` already contains a `snapshots-btrfs` stanza:
 
-```ini
-GRUB_BTRFS_MKCONFIG=/usr/local/bin/reinstall-grub
+```bash
+if grep "snapshots-btrfs" "$GRUB_BTRFS_GRUB_DIRNAME/grub.cfg"; then
+    /etc/grub.d/41_snapshots-btrfs            # stanza exists: regen menu only
+else
+    ${GRUB_BTRFS_MKCONFIG:-grub-mkconfig} -o "$GRUB_BTRFS_GRUB_DIRNAME/grub.cfg"
+fi
 ```
 
-instead of the default `/usr/bin/grub-mkconfig`. With this in place:
+So `GRUB_BTRFS_MKCONFIG` is only consulted on the **bootstrap run**, before
+any `snapshots-btrfs` stanza exists. From the second snapshot event onward,
+the daemon takes the first branch and runs `/etc/grub.d/41_snapshots-btrfs`
+directly — which only rewrites the on-disk `/boot/grub/grub.cfg`. For the
+standalone case that's precisely the file that does **not** matter at boot
+(the signed binary's embedded copy does), so pointing `GRUB_BTRFS_MKCONFIG`
+at `/usr/local/bin/reinstall-grub` would only cover the one-time bootstrap —
+every subsequent snapshot create/delete would again drift the embedded config
+out of sync, reproducing the original problem.
 
-- Manual `grub-btrfs` CLI runs trigger the full rebuild + re-sign.
-- The `grub-btrfsd` daemon (inotify-watching `/.snapshots`) triggers the same
-  pipeline automatically whenever a snapshot is created or deleted.
-- Kernel/GRUB-package pacman updates continue to trigger it via the existing
-  `95-grub-reinstall.hook` — same script, same code path, one source of truth.
+**Fix: bypass `grub-btrfsd`'s dispatch for standalone systems entirely.**
+Rather than relying on the variable the daemon only reads once, Deploytix
+should generate a small dedicated watcher (inotify on `/.snapshots`, the same
+mechanism `grub-btrfsd` uses internally) that **unconditionally** invokes
+`/usr/local/bin/reinstall-grub` on every snapshot create/delete:
 
-For non-standalone configurations (no SecureBoot, or shim-based SecureBoot,
-or unencrypted), `GRUB_BTRFS_MKCONFIG` stays at the plain `grub-mkconfig` —
-no rebuild/re-sign is needed because the config isn't embedded.
+- This sidesteps the stanza-detection shortcut completely — `reinstall-grub`
+  always runs the full `grub-mkconfig → grub-mkstandalone → sbctl sign-all`
+  cycle, so the *embedded* config is rebuilt and re-signed every time, not
+  just the on-disk `grub.cfg`.
+- `grub-mkconfig` (step 1 of `reinstall-grub`) still invokes
+  `41_snapshots-btrfs` as a normal plugin, so snapshot entries are produced
+  exactly as upstream intends — only the *trigger* path changes, not the
+  entry-generation mechanism.
+- The stock `grub-btrfsd` service should stay **disabled** on standalone
+  systems: running it alongside the custom watcher would race two processes
+  over `grub.cfg` and waste a rebuild+resign cycle on the
+  `41_snapshots-btrfs`-only branch (which the standalone case can't use).
+- `GRUB_BTRFS_MKCONFIG=/usr/local/bin/reinstall-grub` should still be set in
+  `/etc/default/grub-btrfs/config` (it's harmless and covers the bootstrap
+  run / any manual `grub-mkconfig` invocations that consult it), but it must
+  not be treated as the mechanism that keeps the embedded config in sync —
+  that job belongs entirely to the new watcher.
+
+For non-standalone configurations (no SecureBoot, shim-based SecureBoot, or
+unencrypted), none of this applies: stock `grub-btrfsd` +
+`GRUB_BTRFS_MKCONFIG=/usr/bin/grub-mkconfig` works as designed, because the
+on-disk `grub.cfg` *is* what GRUB reads at boot — no embedded copy to track.
 
 #### Remaining work for this path specifically
 
-1. **Daemon privileges**: `grub-btrfsd` must run as root (it already needs
-   to write `/boot/grub/grub.cfg`; rebuilding + signing the standalone binary
-   is the same trust boundary the pacman hook already operates in). Ensure
-   the generated runit service runs the daemon as root.
-2. **Debounce/batching**: automated snapshot schedules (e.g. snapper hourly
-   timeline snapshots) can fire frequently. Rebuilding + re-signing costs
-   several seconds each time. grub-btrfs supports tuning (`GRUB_BTRFS_LIMIT`
-   and the daemon's inotify debounce) to coalesce bursts of snapshot events
-   into a single rebuild — these should be set to sane defaults (e.g. only
-   regenerate once per N seconds of inactivity) rather than left at upstream
-   defaults tuned for the cheap bare-`grub-mkconfig` case.
-3. **Latency window**: there is a brief gap between "snapshot taken" and
+1. **Custom watcher service**: write a small inotify-based watcher (the same
+   technique `grub-btrfsd` uses, but without its stanza-detection shortcut)
+   that watches `/.snapshots` and unconditionally calls
+   `/usr/local/bin/reinstall-grub` on create/delete events. This is genuinely
+   new code — there's no upstream component that performs an *unconditional*
+   rebuild on every snapshot event — but it's a thin wrapper (inotify loop +
+   one command), not a rebuild mechanism in its own right; the actual
+   regenerate/rebuild/sign logic is entirely delegated to `reinstall-grub`.
+2. **Watcher privileges**: like `grub-btrfsd`, the watcher must run as root
+   (it needs to rebuild and re-sign the boot binary — the same trust boundary
+   the pacman hook already operates in). Generate it as a runit (or
+   target-init) service running as root, and ensure the stock `grub-btrfsd`
+   service is *not* also enabled on standalone systems (see above — running
+   both would race over `grub.cfg`).
+3. **Debounce/batching**: automated snapshot schedules (e.g. snapper hourly
+   timeline snapshots) can fire frequently, and rebuilding + re-signing costs
+   several seconds each time. The watcher needs its own debounce (coalesce
+   bursts of snapshot events into a single rebuild, e.g. only regenerate once
+   per N seconds of inactivity) — it cannot reuse `GRUB_BTRFS_LIMIT` or the
+   daemon's inotify debounce, since those only govern `grub-btrfsd`'s own
+   (bypassed) dispatch path.
+4. **Latency window**: there is a brief gap between "snapshot taken" and
    "rebuilt + signed binary written" during which a reboot would show the
    previous menu (missing the newest snapshot, but never an inconsistent or
    broken one — `reinstall-grub` always regenerates from current state).
    This is an inherent property of *any* embedded-config approach and is not
    a regression versus today's kernel-update handling, which has the same
    characteristic.
-4. **`reinstall-grub` generalisation**: the script is currently generated
+5. **`reinstall-grub` generalisation**: the script is currently generated
    per-install based on `use_standalone`/SecureBoot settings
    (`create_grub_reinstall_script`). No structural change is needed — it
-   already does the right thing; it just needs to additionally be referenced
-   from `/etc/default/grub-btrfs/config`.
+   already does the right thing; the watcher just needs to shell out to it.
 
-**Net effort**: Medium-high. No new rebuild mechanism to design — wire an
-existing, already-tested script into a second trigger, tune daemon timing,
-and ensure the daemon runs with the right privileges under the target init
-system.
+**Net effort**: High. Unlike the original "wire an existing trigger"
+framing, the daemon's stanza-detection shortcut means `grub-btrfsd` cannot be
+reused as-is for standalone systems — a small but genuinely new watcher
+component must be written, packaged as a service, debounced, and kept from
+conflicting with the stock daemon. The regenerate/rebuild/sign logic itself
+remains fully delegated to the existing, already-tested `reinstall-grub`.
 
 ---
 
@@ -284,12 +331,17 @@ Guards:
 ### Package installation (`src/configure/packages.rs`)
 
 Add `grub-btrfs` to a new `install_grub_btrfs()` function. The package is in
-the official Artix/Arch repos — no AUR required.
+the official Artix/Arch repos — no AUR required (it ships
+`/etc/grub.d/41_snapshots-btrfs`, `grub-btrfsd`, and the config template,
+which is all that's needed regardless of standalone/standard GRUB).
 
-For the `grub-btrfsd` daemon: the official package ships systemd units. For
-Artix init systems, look for `grub-btrfs-runit` (AUR) or generate a minimal
-runit service file that runs the daemon as root (required — see "Daemon
-privileges" above).
+For non-standalone systems, enable the `grub-btrfsd` daemon: the official
+package ships systemd units; for Artix init systems, look for
+`grub-btrfs-runit` (AUR) or generate a minimal runit service file that runs
+the daemon as root.
+
+For standalone systems, do **not** enable `grub-btrfsd` — generate and enable
+the custom watcher service instead (see "Snapshot-watcher service" below).
 
 ### Config file generation (`src/configure/`)
 
@@ -299,7 +351,7 @@ whether standalone GRUB is active:
 
 ```ini
 # Generated by Deploytix
-GRUB_BTRFS_MKCONFIG_LIB=/usr/share/grub
+GRUB_BTRFS_MKCONFIG_LIB=/usr/share/grub/grub-mkconfig_lib
 GRUB_BTRFS_ENABLE_CRYPTODISK="<true if boot_encryption else false>"
 GRUB_BTRFS_SUBVOLUMES_PATHS=("@" "@home" "@usr" "@var" "@log")
 GRUB_BTRFS_IGNORE_SNAPSHOTS=()
@@ -310,6 +362,13 @@ GRUB_BTRFS_MKCONFIG=/usr/bin/grub-mkconfig
 # Standalone GRUB (secureboot=true, secureboot_method=sbctl, encryption=true):
 # GRUB_BTRFS_MKCONFIG=/usr/local/bin/reinstall-grub
 ```
+
+Note `GRUB_BTRFS_MKCONFIG_LIB` must name the helper **file**
+(`grub-mkconfig_lib`), not its containing directory — `41_snapshots-btrfs`
+sources it directly (`. "$GRUB_BTRFS_MKCONFIG_LIB"`) and errors out before
+generating any snapshot entries if the path doesn't resolve to a file. On
+Arch/Artix the GRUB package installs it at
+`/usr/share/grub/grub-mkconfig_lib`.
 
 The `use_standalone` boolean is already computed in
 `run_grub_install_with_secureboot()` / `create_grub_reinstall_hook()`
@@ -345,13 +404,25 @@ snapshot entries (via grub-btrfs's `41_snapshots-btrfs` plugin to
 needed either — `grub-mkconfig` alone is sufficient and grub-btrfs's own
 daemon handles snapshot-triggered regeneration.
 
-### Daemon → rebuild wiring (new)
+### Snapshot-watcher service (new, standalone systems only)
 
-This is the one genuinely new piece of glue: ensuring
-`/etc/default/grub-btrfs/config` points `GRUB_BTRFS_MKCONFIG` at
-`/usr/local/bin/reinstall-grub` for standalone systems (see config file
-generation above), and that the `grub-btrfsd` service runs as root with
-sane debounce timing for the target init system.
+This is the one genuinely new component: a small inotify watcher on
+`/.snapshots` that unconditionally runs `/usr/local/bin/reinstall-grub` on
+every snapshot create/delete event, generated and enabled in place of
+`grub-btrfsd` whenever `use_standalone` is true (see "Wiring grub-btrfs to
+the existing script" above for why `grub-btrfsd` itself can't be reused for
+this case). It needs:
+
+- root privileges (same trust boundary as the pacman reinstall hook),
+- its own debounce so bursts of scheduled snapshots coalesce into one
+  rebuild+resign cycle, and
+- a service file for the target init system (runit, etc.), generated
+  alongside the rest of the bootloader/service configuration.
+
+For non-standalone systems, no new component is needed: enabling the stock
+`grub-btrfsd` service (running as root, with sane debounce) is sufficient,
+since `GRUB_BTRFS_MKCONFIG=/usr/bin/grub-mkconfig` and the on-disk
+`grub.cfg` are exactly what GRUB reads at boot.
 
 ---
 
@@ -386,9 +457,12 @@ requirement.
    - standalone → `/usr/local/bin/reinstall-grub`
    - standard → `/usr/bin/grub-mkconfig`
    (Must run after `create_grub_reinstall_hook()` so the script exists when referenced.)
-6. Enable `grub-btrfsd` with the correct init service, running as root, with
-   debounce timing tuned for the standalone-rebuild cost (several seconds
-   per regeneration) when standalone GRUB is active.
+6. Branch on `use_standalone`:
+   - **standard**: enable the stock `grub-btrfsd` service, running as root,
+     with debounce timing tuned for the rebuild cost.
+   - **standalone**: generate and enable the new snapshot-watcher service
+     (running as root, debounced for the multi-second rebuild+resign cost)
+     in place of `grub-btrfsd` — see "Snapshot-watcher service" above.
 7. No changes needed to `95-grub-reinstall.hook` — it already performs the
    full regenerate → rebuild → sign cycle that snapshot entries ride along on.
 
