@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Update Gamescope
+GenericName=Gamescope Updater
+Comment=Rebuild and update gamescope (Bazzite fork) with the exact Deploytix build configuration
+Exec=deploytix-update-gamescope
+Icon=system-software-update
+Terminal=true
+Categories=System;Settings;PackageManager;
+Keywords=gamescope;steam;gamemode;update;rebuild;deploytix;

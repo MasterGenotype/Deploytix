@@ -302,6 +302,12 @@ impl Installer {
             self.install_gaming_packages()?;
         }
 
+        // Phase 5.22: Gamescope update utility (after gaming packages)
+        if self.config.packages.install_gaming {
+            self.report_progress(0.855, "Installing gamescope update utility...");
+            self.install_gamescope_update()?;
+        }
+
         // Phase 5.25: Session switching scripts (after gaming packages)
         if self.config.packages.install_session_switching {
             self.report_progress(0.86, "Installing session switching scripts...");
@@ -847,6 +853,12 @@ impl Installer {
     fn install_gaming_packages(&self) -> Result<()> {
         info!("Installing gaming packages");
         configure::packages::install_gaming_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install the gamescope update utility (canonical rebuild + AUR guard)
+    fn install_gamescope_update(&self) -> Result<()> {
+        info!("Installing gamescope update utility");
+        configure::gamescope_update::setup_gamescope_update(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install session switching scripts (gamescope ↔ desktop)

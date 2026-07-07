@@ -264,6 +264,7 @@ Cargo.toml
 | `iso/profile/deploytix/live-overlay/usr/share/grub/cfg/{defaults,kernels}.cfg` | GRUB cfg | Live-ISO bootloader configuration |
 | `iso/profile/deploytix/root-overlay/etc/mkinitcpio.conf.d/cow-persistence.conf` | mkinitcpio | COW persistence for the live ISO |
 | `iso/gamescope-pkg/PKGBUILD` | Bash | Custom gamescope build for the [deploytix] repo |
+| `src/resources/gamescope_update/PKGBUILD` | Bash | Canonical gamescope rebuild for deployed systems (`deploytix-update-gamescope`); same meson options, https source |
 | `pkg/PKGBUILD` | Bash | `deploytix-git` and `deploytix-gui-git` Arch packages |
 
 The TOML schema is exhaustively defined by serde-derive on `DeploymentConfig` and its sub-structs in `src/config/deployment.rs`; every field has a `#[serde(default = "…")]` so a minimal config is accepted.

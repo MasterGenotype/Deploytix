@@ -2,6 +2,7 @@
 
 pub mod bootloader;
 pub mod encryption;
+pub mod gamescope_update;
 pub mod greetd;
 pub mod hooks;
 pub mod keyfiles;
