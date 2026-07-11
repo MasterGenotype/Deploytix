@@ -1242,7 +1242,7 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 /// assumes that layout).  Because the AUR-shipped `decky-loader-helper`
 /// hardcodes its destination to `~/.local/var/opt/decky-loader`, we
 /// bypass it and copy `PluginLoader` into place ourselves.
-/// ```
+/// ```text
 /// /usr/lib/decky-loader/PluginLoader               (AUR package file)
 /// /home/{user}/homebrew/
 ///   services/
