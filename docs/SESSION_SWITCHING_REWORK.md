@@ -173,12 +173,83 @@ compiled into the binary via `include_str!` in `src/configure/session_switching.
 | `return-to-gamemode.sh` | `/usr/bin/return-to-gamemode` | Desktop shortcut to switch back to game mode |
 | `steamos-select-branch.sh` | `/usr/bin/steamos-select-branch` | Stub for Steam compatibility |
 | `gamescope-session.desktop` | `/usr/share/wayland-sessions/gamescope-session.desktop` | Wayland session .desktop entry |
+| `deploytix-restart-greetd.sh` | `/usr/bin/deploytix-restart-greetd` | Init-agnostic greetd restart (runit `sv`, OpenRC `rc-service`, s6 `s6-svc`/`s6-rc`, dinit `dinitctl`) |
+| `steam-login-check.sh` | `/usr/bin/steam-login-check` | Exit 0 when a remembered Steam login exists in loginusers.vdf |
+| `steam-first-login.sh` | `/usr/bin/steam-first-login` | Desktop autostart helper: windowed Steam sign-in + auto return-to-gamemode |
+| `deploytix-steam-first-login.desktop` | `/etc/xdg/autostart/deploytix-steam-first-login.desktop` | XDG autostart entry that runs steam-first-login in desktop sessions |
 | `greetd.pam` | `/etc/pam.d/greetd` | PAM service for IPC-created Class=user sessions (passwordless auth, full session chain via system-local-login) |
 | `greetd-greeter.pam` | `/etc/pam.d/greetd-greeter` | PAM service for greetd's default_session (the greeter itself); required so pam_start("greetd-greeter") does not fall through to `/etc/pam.d/other` (deny-all) |
 
 Additionally, `session_switching.rs` creates a symlink:
 `/usr/bin/steamos-session-select` -> `session-select`
 (Steam internally calls `steamos-session-select` for "Switch to Desktop")
+
+---
+
+## First-Boot Steam Sign-In
+
+On a fresh install there are no Steam credentials, so booting straight into
+gamescope + `steam -steamos3 -gamepadui` lands on Steam's login screen, where
+on-screen-keyboard/text input is not fully reliable pre-login. The sign-in
+flow handles this with a gamescope-first, desktop-fallback design:
+
+```
+boot
+ └─ greetd → deploytix-session-manager → gamescope + steam -gamepadui
+      │
+      ├─ user signs in via gamepad-UI login (QR code / OSK)
+      │    └─ Steam continues into the gamepad UI — done, no restart needed
+      │
+      └─ Steam exits while still logged out (input failed / user quit)
+           └─ steam-gamescope-session writes "desktop" sentinel
+                └─ next session: desktop
+                     └─ /etc/xdg/autostart runs steam-first-login
+                          ├─ already signed in?  exit immediately
+                          └─ notify + launch windowed Steam for sign-in
+                               └─ poll loginusers.vdf; on login:
+                                    notify, wait 15 s, return-to-gamemode
+```
+
+Key pieces:
+
+- **`steam-login-check`** — shared predicate. Greps `loginusers.vdf`
+  (both `~/.local/share/Steam` and `~/.steam/steam` locations) for
+  `"RememberPassword" "1"` or `"AllowAutoLogin" "1"`. A login without
+  "Remember me" intentionally does not count: it would not survive the
+  session restart into gamemode.
+- **`steam-gamescope-session`** — after Steam exits, if `steam-login-check`
+  fails it writes `desktop` to the session sentinel so the session manager
+  boots the desktop escape hatch instead of looping on the gamescope login.
+- **`steam-first-login`** — runs from XDG autostart in every desktop
+  session and exits immediately when already signed in, so it costs nothing
+  in normal desktop use. When logged out it launches the regular windowed
+  Steam client (real keyboard + QR available), polls for credentials, and
+  automatically switches back to gamemode 15 seconds after sign-in (via
+  `return-to-gamemode`, which requires the passwordless-sudo wheel rule the
+  installer already configures). If the user quits Steam without signing
+  in, the watcher stops and the desktop session continues normally.
+
+---
+
+## Init-Agnostic greetd Restart
+
+Session switching works by bouncing greetd (desktop → gamescope, and
+`return-to-gamemode`). This was originally hardcoded as `sv restart greetd`,
+which only worked on runit. `session-select` and `return-to-gamemode` now
+invoke `/usr/bin/deploytix-restart-greetd` instead, which detects the
+*running* init system from its runtime state directory (installed binaries
+are not a reliable signal, since supervision tools from several init
+systems can coexist on disk):
+
+| Detection | Init | Restart command |
+|-----------|------|-----------------|
+| `/run/runit` exists | runit | `sv restart greetd` |
+| `/run/openrc` exists | OpenRC | `rc-service greetd restart` |
+| `/run/s6-rc` exists | s6 | `s6-svc -t /run/service/greetd-srv` (fallback: `s6-rc -d/-u change greetd-srv`) |
+| `/run/dinitctl` socket or dinit running | dinit | `dinitctl restart greetd` |
+
+If none of the runtime markers match, it falls back to trying whichever
+tool is installed, in the same order.
 
 ---
 

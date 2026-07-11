@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Steam First Login
+Comment=Sign in to Steam before entering Game Mode
+Exec=/usr/bin/steam-first-login
+Icon=steam
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

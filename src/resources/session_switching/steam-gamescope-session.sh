@@ -211,8 +211,23 @@ echo "[steam-session] Starting Steam (-steamos3 -gamepadui)..."
 steam -steamos3 -gamepadui &
 steam_pid=$!
 
-wait "$steam_pid" 2>/dev/null || true
-steam_ret=$?
+steam_ret=0
+wait "$steam_pid" 2>/dev/null || steam_ret=$?
 echo "[steam-session] Steam exited ($steam_ret)"
+
+# --------- 14. First-login fallback ---------
+# Steam's gamepad-UI login screen (QR code + on-screen keyboard) is the
+# primary sign-in path and runs right here in gamescope. But if Steam
+# exited while there is still no remembered account, the user could not
+# (or chose not to) sign in under gamescope — OSK/text input is not
+# fully reliable there pre-login. Route the next session to the
+# desktop, where the steam-first-login autostart entry offers a
+# windowed sign-in and automatically returns to gamemode afterward.
+if ! /usr/bin/steam-login-check; then
+    SENTINEL="${XDG_CONFIG_HOME:-$HOME/.config}/deploytix-session"
+    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
+    echo "desktop" > "$SENTINEL"
+    echo "[steam-session] No Steam login on exit; next session -> desktop (first-login fallback)"
+fi
 
 exit "$steam_ret"

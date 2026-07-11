@@ -6,7 +6,7 @@
 # the desktop session and relaunches the session manager in gamescope
 # mode (the default).
 #
-# Requires: passwordless sudo for `sv restart greetd`.
+# Requires: passwordless sudo for `deploytix-restart-greetd`.
 
 set -eu
 
@@ -21,7 +21,7 @@ echo "Next session set to gamescope"
 # Fork a detached root process to handle the restart.  When greetd stops
 # it kills this desktop session (and this script), so the sequence must
 # run in a process that survives the teardown.  sudo is on the outside so
-# the detached shell is already root (no TTY needed).
-sudo setsid sh -c '
-    sv restart greetd
-' </dev/null &>/dev/null &
+# the detached process is already root (no TTY needed).
+# deploytix-restart-greetd picks the right service command for the
+# running init system (runit, OpenRC, s6, dinit).
+sudo setsid /usr/bin/deploytix-restart-greetd </dev/null &>/dev/null &
