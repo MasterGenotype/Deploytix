@@ -80,8 +80,6 @@ impl InteractivePolicy for GuiPolicy {
                 return (ExtraPackages::default(), false);
             }
         }
-        reply_rx
-            .recv()
-            .unwrap_or((ExtraPackages::default(), false))
+        reply_rx.recv().unwrap_or((ExtraPackages::default(), false))
     }
 }

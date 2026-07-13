@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+    # Pushing a release/vX.Y.Z branch cuts release vX.Y.Z at that commit,
+    # for environments that cannot push tags directly.
+    branches:
+      - "release/v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v1.4.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -21,28 +31,30 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt -- --check
       - run: cargo clippy --all-features -- -D warnings
 
   build-cli:
-    name: Build portable CLI binary
+    name: Build CLI binary
     needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build static binary
-        run: cargo build --release --target x86_64-unknown-linux-musl --bin deploytix
+      # The CLI links libasound (theme audio), which has no static musl
+      # build on the runners, so a fully static musl binary is not possible.
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Build CLI binary
+        run: cargo build --release --bin deploytix
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deploytix-x86_64-linux-musl
-          path: target/x86_64-unknown-linux-musl/release/deploytix
+          name: deploytix-x86_64-linux-gnu
+          path: target/release/deploytix
 
   build-gui:
     name: Build GUI binary
@@ -56,6 +68,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libasound2-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libgl-dev
       - name: Build GUI binary
@@ -75,7 +88,7 @@ jobs:
       - name: Download CLI artifact
         uses: actions/download-artifact@v4
         with:
-          name: deploytix-x86_64-linux-musl
+          name: deploytix-x86_64-linux-gnu
           path: artifacts/
       - name: Download GUI artifact
         uses: actions/download-artifact@v4
@@ -84,9 +97,31 @@ jobs:
           path: artifacts/
       - name: Prepare release assets
         run: chmod +x artifacts/deploytix artifacts/deploytix-gui
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME#release/}" >> "$GITHUB_OUTPUT"
+          fi
+      # action-gh-release never moves an existing tag, so force the tag to
+      # the built commit ourselves. No-op for tag-push runs (same commit);
+      # for release-branch runs this keeps tag, source, and binaries in sync.
+      - name: Point tag at built commit
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$TAG:refs/tags/$TAG"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # Tag pushes release ref_name as-is; release/vX.Y.Z branch pushes
+          # and workflow_dispatch create the tag at the built commit.
+          # Without target_commitish a new tag lands on the default branch
+          # HEAD instead of the commit the binaries were built from.
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             artifacts/deploytix

@@ -44,7 +44,7 @@ pub fn step_indicator(ui: &mut Ui, current: WizardStep) {
                     egui::pos2(prev_x + radius + 3.0, y_circle),
                     egui::pos2(x - radius - 3.0, y_circle),
                 ],
-                Stroke::new(2.0, color),
+                Stroke::new(2.0_f32, color),
             );
         }
 
@@ -55,7 +55,7 @@ pub fn step_indicator(ui: &mut Ui, current: WizardStep) {
         } else if is_past {
             painter.circle_filled(center, radius, theme::SUCCESS);
         } else {
-            painter.circle_stroke(center, radius, Stroke::new(2.0, theme::TEXT_MUTED));
+            painter.circle_stroke(center, radius, Stroke::new(2.0_f32, theme::TEXT_MUTED));
         }
 
         // Number / checkmark
@@ -103,7 +103,7 @@ pub fn section(ui: &mut Ui, title: &str, add_body: impl FnOnce(&mut Ui)) {
         .fill(theme::BG_SECTION)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(14))
-        .stroke(Stroke::new(1.0, theme::BG_HOVER))
+        .stroke(Stroke::new(1.0_f32, theme::BG_HOVER))
         .show(ui, |ui| {
             ui.label(
                 RichText::new(title)

@@ -2,8 +2,7 @@
 
 use crate::config::{
     Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, IwdFrontend,
-    NetworkBackend,
-    SecureBootMethod, SwapType,
+    NetworkBackend, SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
 use std::sync::mpsc::Receiver;
@@ -284,10 +283,7 @@ pub enum ActivePrompt {
         pacman_text: String,
         aur_text: String,
         save_to_config: bool,
-        reply: std::sync::mpsc::SyncSender<(
-            crate::utils::interactive::ExtraPackages,
-            bool,
-        )>,
+        reply: std::sync::mpsc::SyncSender<(crate::utils::interactive::ExtraPackages, bool)>,
     },
 }
 

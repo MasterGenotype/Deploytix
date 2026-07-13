@@ -63,7 +63,12 @@ fn prompt_pacman_confirm(inv: &PacmanInvocation) -> Result<PacmanDecision> {
             writeln!(out, "  (run as user {})", u)?;
         }
     }
-    writeln!(out, "  packages: {} ({})", inv.packages.len(), inv.packages.join(" "))?;
+    writeln!(
+        out,
+        "  packages: {} ({})",
+        inv.packages.len(),
+        inv.packages.join(" ")
+    )?;
     write!(out, "[A]pprove · [E]dit · [S]kip · [C]ancel ▸ ")?;
     out.flush()?;
     drop(out);
@@ -238,7 +243,9 @@ fn open_editor(path: &std::path::Path) -> Result<()> {
 
 fn shell_escape(p: &std::path::Path) -> String {
     let s = p.display().to_string();
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+    {
         s
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -253,25 +260,20 @@ fn prompt_extras_loop(can_use_yay: bool) -> Result<(ExtraPackages, bool)> {
     let mut extras = ExtraPackages::default();
 
     loop {
-        let pacman_pkgs = read_line(
-            "Repository packages (pacman -S). Space-separated, empty to skip:\n  > ",
-        )?;
+        let pacman_pkgs =
+            read_line("Repository packages (pacman -S). Space-separated, empty to skip:\n  > ")?;
         if !pacman_pkgs.trim().is_empty() {
-            extras.pacman.extend(
-                pacman_pkgs
-                    .split_whitespace()
-                    .map(|s| s.to_string()),
-            );
+            extras
+                .pacman
+                .extend(pacman_pkgs.split_whitespace().map(|s| s.to_string()));
         }
         if can_use_yay {
             let aur_pkgs =
                 read_line("AUR packages (yay -S). Space-separated, empty to skip:\n  > ")?;
             if !aur_pkgs.trim().is_empty() {
-                extras.aur.extend(
-                    aur_pkgs
-                        .split_whitespace()
-                        .map(|s| s.to_string()),
-                );
+                extras
+                    .aur
+                    .extend(aur_pkgs.split_whitespace().map(|s| s.to_string()));
             }
         }
         if extras.is_empty() || !prompt_confirm("Add more extras?", false).unwrap_or(false) {

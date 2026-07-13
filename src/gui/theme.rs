@@ -47,34 +47,34 @@ pub fn apply(ctx: &egui::Context) {
 
     // Selection
     visuals.selection.bg_fill = ACCENT_BG;
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
 
     // Non-interactive widgets (labels, separators)
     visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_SECONDARY);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_SECONDARY);
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(6);
 
     // Inactive widgets (buttons, checkboxes at rest)
     visuals.widgets.inactive.bg_fill = BG_SECTION;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
     visuals.widgets.inactive.weak_bg_fill = BG_SECTION;
 
     // Hovered
     visuals.widgets.hovered.bg_fill = BG_HOVER;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, TEXT_PRIMARY);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, TEXT_PRIMARY);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
     visuals.widgets.hovered.weak_bg_fill = BG_HOVER;
 
     // Active (pressed)
     visuals.widgets.active.bg_fill = ACCENT_BG;
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, ACCENT);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, ACCENT);
     visuals.widgets.active.corner_radius = CornerRadius::same(6);
     visuals.widgets.active.weak_bg_fill = ACCENT_BG;
 
     // Open (e.g., ComboBox dropdown)
     visuals.widgets.open.bg_fill = BG_SECTION;
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, ACCENT);
     visuals.widgets.open.corner_radius = CornerRadius::same(6);
 
     // Miscellaneous

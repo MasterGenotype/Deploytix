@@ -14,7 +14,9 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser)]
 #[command(name = "deploytix-rehearsal")]
-#[command(about = "Run a rehearsal installation: execute the full install, record every command, then wipe the disk")]
+#[command(
+    about = "Run a rehearsal installation: execute the full install, record every command, then wipe the disk"
+)]
 #[command(version)]
 struct Args {
     /// Path to configuration file
