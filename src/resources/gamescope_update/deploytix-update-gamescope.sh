@@ -144,12 +144,23 @@ if [[ -z "$pkgfile" ]]; then
 fi
 
 # ── Install — raise the guard flag so the pacman hook lets this through ──────
+# The flag must never outlive this script: if it lingered (e.g. Ctrl-C while
+# pacman -U is waiting or running), the guard hook would wave through the AUR
+# gamescope installs it exists to block.  The EXIT trap removes it on every
+# exit path; the INT/TERM traps convert those signals into an exit so the
+# EXIT trap is guaranteed to run.  (/run is tmpfs, so even an unkillable
+# SIGKILL leaves the flag behind only until reboot.)
+remove_guard_flag() { sudo rm -f "$GUARD_FLAG"; }
 msg "Installing $(basename "$pkgfile")..."
 sudo mkdir -p "$(dirname "$GUARD_FLAG")"
+trap remove_guard_flag EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 sudo touch "$GUARD_FLAG"
 rc=0
 sudo pacman -U --noconfirm "$pkgfile" || rc=$?
-sudo rm -f "$GUARD_FLAG"
+remove_guard_flag
+trap - EXIT INT TERM
 if (( rc != 0 )); then
     err "pacman -U failed (exit $rc); the previous gamescope remains installed."
     exit "$rc"
