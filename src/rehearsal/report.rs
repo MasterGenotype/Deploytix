@@ -51,9 +51,12 @@ impl RehearsalReport {
     /// Print a colored table to stdout.
     #[allow(clippy::print_literal)]
     pub fn print_table(&self) {
-        let top    = "┌─────────┬────────────┬──────────────────────────────────────────────────────────┐";
-        let mid    = "├─────────┼────────────┼──────────────────────────────────────────────────────────┤";
-        let bottom = "└─────────┴────────────┴──────────────────────────────────────────────────────────┘";
+        let top =
+            "┌─────────┬────────────┬──────────────────────────────────────────────────────────┐";
+        let mid =
+            "├─────────┼────────────┼──────────────────────────────────────────────────────────┤";
+        let bottom =
+            "└─────────┴────────────┴──────────────────────────────────────────────────────────┘";
 
         println!();
         println!("{}", top);
@@ -98,10 +101,7 @@ impl RehearsalReport {
         }
 
         if let Some(ref err) = self.short_circuited_at {
-            println!(
-                "{}",
-                format!("Short-circuited at: {}", err).yellow().bold()
-            );
+            println!("{}", format!("Short-circuited at: {}", err).yellow().bold());
         }
 
         if self.disk_wiped {
@@ -246,7 +246,10 @@ pub fn print_live_record(index: usize, rec: &OperationRecord) {
     let _ = writeln!(
         std::io::stderr(),
         "  [{}] {}  {:>10}  {}",
-        index, status, dur, cmd
+        index,
+        status,
+        dur,
+        cmd
     );
 
     // Show first line of stderr for failures

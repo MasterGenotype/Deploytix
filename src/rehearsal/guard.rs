@@ -27,10 +27,7 @@ pub struct DiskWipeGuard {
 impl DiskWipeGuard {
     /// Create a new armed guard for the given device.
     pub fn new(device: &str) -> Self {
-        info!(
-            "DiskWipeGuard: armed for {} (will wipe on drop)",
-            device
-        );
+        info!("DiskWipeGuard: armed for {} (will wipe on drop)", device);
         Self {
             device: device.to_string(),
             armed: true,
@@ -62,10 +59,7 @@ impl DiskWipeGuard {
     /// Best-effort cleanup and wipe.  Errors are logged but never
     /// propagated — this runs in a Drop impl where panicking is UB.
     fn do_cleanup_and_wipe(device: &str) -> bool {
-        info!(
-            "DiskWipeGuard: starting cleanup + wipe for {}",
-            device
-        );
+        info!("DiskWipeGuard: starting cleanup + wipe for {}", device);
 
         // 1. Unmount everything under INSTALL_ROOT (deepest first)
         Self::unmount_all();
@@ -112,10 +106,7 @@ impl DiskWipeGuard {
             }
         }
 
-        info!(
-            "DiskWipeGuard: wipe complete for {}",
-            device
-        );
+        info!("DiskWipeGuard: wipe complete for {}", device);
         true
     }
 
@@ -186,13 +177,7 @@ impl DiskWipeGuard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|s| {
-                if s.success() {
-                    Ok(())
-                } else {
-                    Err(())
-                }
-            })
+            .map(|s| if s.success() { Ok(()) } else { Err(()) })
             .unwrap_or(Err(()))
     }
 }

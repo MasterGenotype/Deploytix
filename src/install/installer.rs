@@ -24,8 +24,8 @@ use crate::install::fstab::{
     LvmThinFstabParams, MultiVolumeFstabParams,
 };
 use crate::install::{
-    generate_fstab, mount_boot_btrfs_subvolume, mount_partitions,
-    mount_partitions_zfs, run_basestrap, unmount_all,
+    generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_zfs,
+    run_basestrap, unmount_all,
 };
 use crate::utils::command::{CommandRunner, OperationRecord};
 use crate::utils::deps::ensure_dependencies;
@@ -1263,12 +1263,7 @@ impl Installer {
             }
 
             let svols = multi_volume_subvolumes(&container.volume_name);
-            create_btrfs_subvolumes(
-                &self.cmd,
-                &container.mapped_path,
-                &svols,
-                temp_mount,
-            )?;
+            create_btrfs_subvolumes(&self.cmd, &container.mapped_path, &svols, temp_mount)?;
             mount_btrfs_subvolumes(&self.cmd, &container.mapped_path, &svols, INSTALL_ROOT)?;
         }
 

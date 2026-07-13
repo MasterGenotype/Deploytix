@@ -297,12 +297,7 @@ pub fn install_gpu_drivers(
     }
 
     let pkg_strings: Vec<String> = packages.iter().map(|s| s.to_string()).collect();
-    pacman_install_chroot_reviewed(
-        cmd,
-        install_root,
-        "GPU drivers",
-        pkg_strings,
-    )?;
+    pacman_install_chroot_reviewed(cmd, install_root, "GPU drivers", pkg_strings)?;
 
     info!("GPU driver installation complete");
     Ok(())
@@ -504,14 +499,12 @@ pub fn install_gaming_packages(
 
     // Step 2: Install lib32 Vulkan driver(s) for selected GPU vendor(s)
     if !lib32_vulkan.is_empty() {
-        info!("Installing lib32 Vulkan drivers: {}", lib32_vulkan.join(" "));
+        info!(
+            "Installing lib32 Vulkan drivers: {}",
+            lib32_vulkan.join(" ")
+        );
         let pkgs: Vec<String> = lib32_vulkan.iter().map(|s| s.to_string()).collect();
-        pacman_install_chroot_reviewed(
-            cmd,
-            install_root,
-            "lib32 Vulkan drivers",
-            pkgs,
-        )?;
+        pacman_install_chroot_reviewed(cmd, install_root, "lib32 Vulkan drivers", pkgs)?;
     }
 
     // Step 3: Install Steam
@@ -557,7 +550,11 @@ pub fn install_yay(
         cmd,
         install_root,
         "yay build deps (go, git, base-devel)",
-        vec!["go".to_string(), "git".to_string(), "base-devel".to_string()],
+        vec![
+            "go".to_string(),
+            "git".to_string(),
+            "base-devel".to_string(),
+        ],
     )?;
 
     // Create build dir, clone, build, and clean up in a single chroot
@@ -643,12 +640,7 @@ pub fn install_extras_pacman(
         println!("  [dry-run] Would install pacman extras: {:?}", packages);
         return Ok(());
     }
-    pacman_install_chroot_reviewed(
-        cmd,
-        install_root,
-        "Extras (pacman)",
-        packages.to_vec(),
-    )
+    pacman_install_chroot_reviewed(cmd, install_root, "Extras (pacman)", packages.to_vec())
 }
 
 /// Install AUR (`yay -S`) extras provided by the user via the
@@ -713,7 +705,10 @@ pub fn install_iwd_frontend(
 
     let username = &config.user.name;
     let pkg = config.network.iwd_frontend.aur_package();
-    info!("Installing iwd GUI frontend via yay as {}: {}", username, pkg);
+    info!(
+        "Installing iwd GUI frontend via yay as {}: {}",
+        username, pkg
+    );
 
     if cmd.is_dry_run() {
         println!(
@@ -1621,14 +1616,11 @@ pub fn install_evdevhook2(
     }
 
     // Step 1: Install AUR package via yay
-    let pkgs: Vec<String> = EVDEVHOOK2_AUR_PACKAGES.iter().map(|s| s.to_string()).collect();
-    yay_install_chroot_reviewed(
-        cmd,
-        install_root,
-        username,
-        "AUR: evdevhook2-git",
-        pkgs,
-    )?;
+    let pkgs: Vec<String> = EVDEVHOOK2_AUR_PACKAGES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    yay_install_chroot_reviewed(cmd, install_root, username, "AUR: evdevhook2-git", pkgs)?;
     info!("  evdevhook2 AUR package installed");
 
     // Step 2: Write the udev rule (GROUP=input, uaccess tag) that grants

@@ -331,10 +331,7 @@ impl DeploytixGui {
                         reply,
                     }
                 }
-                GuiPromptRequest::PromptExtras {
-                    can_use_yay,
-                    reply,
-                } => ActivePrompt::Extras {
+                GuiPromptRequest::PromptExtras { can_use_yay, reply } => ActivePrompt::Extras {
                     can_use_yay,
                     pacman_text: String::new(),
                     aur_text: String::new(),

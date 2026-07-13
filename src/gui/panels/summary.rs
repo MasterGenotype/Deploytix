@@ -216,25 +216,26 @@ pub fn show(
                 ui.add_space(theme::SPACING_XS);
 
                 // Summary line
-                let (pass, fail) = results.iter().fold((0, 0), |(p, f), line| {
-                    if line.success {
-                        (p + 1, f)
-                    } else {
-                        (p, f + 1)
-                    }
-                });
+                let (pass, fail) =
+                    results.iter().fold(
+                        (0, 0),
+                        |(p, f), line| {
+                            if line.success {
+                                (p + 1, f)
+                            } else {
+                                (p, f + 1)
+                            }
+                        },
+                    );
                 let summary_color = if fail > 0 {
                     theme::ERROR
                 } else {
                     theme::SUCCESS
                 };
                 ui.label(
-                    RichText::new(format!(
-                        "Rehearsal: {} passed, {} failed",
-                        pass, fail
-                    ))
-                    .color(summary_color)
-                    .strong(),
+                    RichText::new(format!("Rehearsal: {} passed, {} failed", pass, fail))
+                        .color(summary_color)
+                        .strong(),
                 );
 
                 // Scrollable results
