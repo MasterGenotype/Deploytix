@@ -1183,7 +1183,9 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
         }
 
         InitSystem::S6 => {
-            let sv_dir = format!("{}/etc/s6/sv/hhd", install_root);
+            // Admin-defined s6-rc services live in /etc/s6/adminsv
+            // (package-provided ones ship in /etc/s6/sv).
+            let sv_dir = format!("{}/etc/s6/adminsv/hhd", install_root);
             fs::create_dir_all(&sv_dir)?;
 
             // type file declares this a long-running service
@@ -1199,7 +1201,7 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
             fs::write(&run_path, &run_script)?;
             fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
 
-            info!("  Written s6 service: /etc/s6/sv/hhd/");
+            info!("  Written s6 service: /etc/s6/adminsv/hhd/");
         }
 
         InitSystem::Dinit => {
@@ -1237,7 +1239,7 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 /// assumes that layout).  Because the AUR-shipped `decky-loader-helper`
 /// hardcodes its destination to `~/.local/var/opt/decky-loader`, we
 /// bypass it and copy `PluginLoader` into place ourselves.
-/// ```
+/// ```text
 /// /usr/lib/decky-loader/PluginLoader               (AUR package file)
 /// /home/{user}/homebrew/
 ///   services/
@@ -1463,7 +1465,7 @@ fn write_decky_service(
         }
 
         InitSystem::S6 => {
-            let sv_dir = format!("{}/etc/s6/sv/plugin_loader", install_root);
+            let sv_dir = format!("{}/etc/s6/adminsv/plugin_loader", install_root);
             fs::create_dir_all(&sv_dir)?;
 
             fs::write(format!("{}/type", sv_dir), "longrun\n")?;
@@ -1487,7 +1489,7 @@ fn write_decky_service(
             fs::write(&run_path, &run_script)?;
             fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
 
-            info!("  Written s6 service: /etc/s6/sv/plugin_loader/");
+            info!("  Written s6 service: /etc/s6/adminsv/plugin_loader/");
         }
 
         InitSystem::Dinit => {
@@ -1723,7 +1725,7 @@ fn write_evdevhook2_service(
         }
 
         InitSystem::S6 => {
-            let sv_dir = format!("{}/etc/s6/sv/evdevhook2", install_root);
+            let sv_dir = format!("{}/etc/s6/adminsv/evdevhook2", install_root);
             fs::create_dir_all(&sv_dir)?;
 
             // type file declares this a long-running service
@@ -1739,7 +1741,7 @@ fn write_evdevhook2_service(
             fs::write(&run_path, &run_script)?;
             fs::set_permissions(&run_path, fs::Permissions::from_mode(0o755))?;
 
-            info!("  Written s6 service: /etc/s6/sv/evdevhook2/");
+            info!("  Written s6 service: /etc/s6/adminsv/evdevhook2/");
         }
 
         InitSystem::Dinit => {

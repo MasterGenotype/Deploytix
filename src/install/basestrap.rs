@@ -23,6 +23,9 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 
     // For s6, pre-select providers to avoid interactive prompts
     if config.system.init == crate::config::InitSystem::S6 {
+        // s6-frontend ships the `s6` one-stop CLI the installer uses to
+        // enable services in the chroot (`s6 set enable` / `s6 set commit`).
+        packages.push("s6-frontend".to_string());
         // D-Bus provider for s6; no elogind, use seatd for seats
         packages.push("dbus-s6".to_string());
         // no elogind-s6

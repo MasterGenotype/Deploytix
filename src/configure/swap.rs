@@ -42,7 +42,7 @@ pub fn setup_zram(
     match config.system.init {
         InitSystem::Runit => setup_zram_runit(install_root, algorithm)?,
         InitSystem::OpenRC => setup_zram_openrc(install_root, algorithm)?,
-        InitSystem::S6 => setup_zram_s6(install_root, algorithm)?,
+        InitSystem::S6 => setup_zram_s6(cmd, install_root, algorithm)?,
         InitSystem::Dinit => setup_zram_dinit(install_root, algorithm)?,
     }
 
@@ -165,17 +165,18 @@ stop() {{
 /// Follows the structure used by the `zram-s6` AUR package
 /// (upstream: github.com/Senderman/s6-services).  The service is an s6-rc
 /// oneshot, so the startup script lives in `up` (not `run`, which is for
-/// longruns).  Configuration is stored in `/etc/s6/config/zram.conf` and
-/// read at boot via `envfile`.
-fn setup_zram_s6(install_root: &str, algorithm: &str) -> Result<()> {
-    let sv_dir = format!("{}/etc/s6/sv/zram", install_root);
+/// longruns).  It is written to `/etc/s6/adminsv`, the directory Artix
+/// reserves for admin-defined s6-rc services.  Configuration is stored in
+/// `/etc/s6/config/zram.conf` and read at boot via `envfile`.
+///
+/// No `dependencies.d` entries are declared — like the runit/dinit
+/// variants, modprobe and /sys are available by the time the default
+/// bundle starts (s6-linux-init mounts the core pseudo-filesystems in
+/// stage 1), and the in-house Artix oneshot names previously referenced
+/// here are not stable under the upstream-matching s6-scripts.
+fn setup_zram_s6(cmd: &CommandRunner, install_root: &str, algorithm: &str) -> Result<()> {
+    let sv_dir = format!("{}/etc/s6/adminsv/zram", install_root);
     fs::create_dir_all(&sv_dir)?;
-
-    // dependencies.d/ — declare that devfs and sysfs must be mounted first
-    let deps_dir = format!("{}/dependencies.d", sv_dir);
-    fs::create_dir_all(&deps_dir)?;
-    fs::write(format!("{}/mount-devfs", deps_dir), "")?;
-    fs::write(format!("{}/mount-sysfs", deps_dir), "")?;
 
     // /etc/s6/config/zram.conf — configuration read by the up script at boot
     let config_dir = format!("{}/etc/s6/config", install_root);
@@ -223,12 +224,12 @@ redirfd -w 1 /sys/block/zram0/reset echo 1
     // type — declares this as an s6-rc oneshot (runs once, not supervised)
     fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
 
-    // Enable the service by adding it to the default bundle
-    let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
-    fs::create_dir_all(&enabled_dir)?;
-    fs::write(format!("{}/zram", enabled_dir), "")?;
+    // Add the service to the default bundle via the s6-frontend CLI; the
+    // change is committed to the boot database by `s6 set commit` in the
+    // finalize phase.
+    cmd.run_in_chroot(install_root, "s6 set enable zram")?;
 
-    info!("Created s6 ZRAM service at {}", sv_dir);
+    info!("Created and enabled s6 ZRAM service at {}", sv_dir);
     Ok(())
 }
 

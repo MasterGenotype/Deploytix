@@ -419,11 +419,16 @@ impl InitSystem {
     }
 
     /// Get the enabled service directory path
+    ///
+    /// For s6 this is the default bundle's contents directory.  Do not
+    /// write to it directly: since Artix moved to the upstream s6-frontend,
+    /// services are enabled with `s6 set enable <name>` and persisted with
+    /// `s6 set commit` (see `configure::services::enable_s6_service`).
     pub fn enabled_dir(&self) -> &str {
         match self {
             Self::Runit => "/run/runit/service",
             Self::OpenRC => "/etc/runlevels/default",
-            Self::S6 => "/etc/s6/rc/compiled",
+            Self::S6 => "/etc/s6/adminsv/default/contents.d",
             Self::Dinit => "/etc/dinit.d/boot.d",
         }
     }
@@ -1469,7 +1474,10 @@ mod tests {
     fn init_system_enabled_dir_returns_correct_path() {
         assert_eq!(InitSystem::Runit.enabled_dir(), "/run/runit/service");
         assert_eq!(InitSystem::OpenRC.enabled_dir(), "/etc/runlevels/default");
-        assert_eq!(InitSystem::S6.enabled_dir(), "/etc/s6/rc/compiled");
+        assert_eq!(
+            InitSystem::S6.enabled_dir(),
+            "/etc/s6/adminsv/default/contents.d"
+        );
         assert_eq!(InitSystem::Dinit.enabled_dir(), "/etc/dinit.d/boot.d");
     }
 
