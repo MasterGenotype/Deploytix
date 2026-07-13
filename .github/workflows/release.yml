@@ -110,7 +110,10 @@ jobs:
         with:
           # Tag pushes release ref_name as-is; release/vX.Y.Z branch pushes
           # and workflow_dispatch create the tag at the built commit.
+          # Without target_commitish a new tag lands on the default branch
+          # HEAD instead of the commit the binaries were built from.
           tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             artifacts/deploytix
