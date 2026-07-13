@@ -1,0 +1,17 @@
+# Abort any gamescope install/upgrade that was not initiated by
+# deploytix-update-gamescope.  The AUR gamescope (upstream Valve source,
+# different meson options) breaks the Steam gamescope session on Deploytix
+# systems, so gamescope may only be replaced by the canonical rebuild.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = gamescope
+Target = gamescope-git
+
+[Action]
+Description = Checking gamescope update source (Deploytix guard)...
+When = PreTransaction
+Exec = /usr/share/deploytix/gamescope/gamescope-guard.sh
+AbortOnFail
