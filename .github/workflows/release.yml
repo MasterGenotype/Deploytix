@@ -105,6 +105,14 @@ jobs:
           else
             echo "tag=${GITHUB_REF_NAME#release/}" >> "$GITHUB_OUTPUT"
           fi
+      # action-gh-release never moves an existing tag, so force the tag to
+      # the built commit ourselves. No-op for tag-push runs (same commit);
+      # for release-branch runs this keeps tag, source, and binaries in sync.
+      - name: Point tag at built commit
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$TAG:refs/tags/$TAG"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
