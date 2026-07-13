@@ -242,9 +242,9 @@ fn map_s6_service_name(service: &str) -> String {
 /// corresponding package was not installed and we skip with a warning.
 fn enable_s6_service(service: &str, install_root: &str) -> Result<()> {
     let s6_service_name = map_s6_service_name(service);
-    let service_dir = format!("{}/etc/s6/sv/{}", install_root, &s6_service_name);
+    let service_dir = format!("{}/etc/s6/sv/{}", install_root, s6_service_name);
     let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
-    let link_path = format!("{}/{}", enabled_dir, &s6_service_name);
+    let link_path = format!("{}/{}", enabled_dir, s6_service_name);
 
     // Service directories come from official *-s6 packages; skip if missing
     if !Path::new(&service_dir).exists() {

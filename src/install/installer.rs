@@ -1592,7 +1592,7 @@ impl Installer {
             }
 
             let lv_device = lv_path(vg_name, &vol.name);
-            let mount_point = format!("{}{}", INSTALL_ROOT, &vol.mount_point);
+            let mount_point = format!("{}{}", INSTALL_ROOT, vol.mount_point);
 
             if !self.cmd.is_dry_run() {
                 fs::create_dir_all(&mount_point)?;
