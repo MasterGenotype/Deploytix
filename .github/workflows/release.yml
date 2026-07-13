@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+    # Pushing a release/vX.Y.Z branch cuts release vX.Y.Z at that commit,
+    # for environments that cannot push tags directly.
+    branches:
+      - "release/v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -93,12 +97,20 @@ jobs:
           path: artifacts/
       - name: Prepare release assets
         run: chmod +x artifacts/deploytix artifacts/deploytix-gui
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME#release/}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          # On tag pushes inputs.tag is empty and ref_name is the tag; on
-          # workflow_dispatch the tag is created at the built commit.
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          # Tag pushes release ref_name as-is; release/vX.Y.Z branch pushes
+          # and workflow_dispatch create the tag at the built commit.
+          tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
           files: |
             artifacts/deploytix
