@@ -231,7 +231,7 @@ Run with the baseline config and `device` pointing at the test disk.
 | **T12b** | NetworkManager + iwd | `backend = "networkmanager"`; observe `/install/etc/NetworkManager/conf.d/wifi_backend.conf` | Backend set to iwd | Inspect `src/configure/network.rs` |
 | **T12c** | greetd config | DE selected; `cat /install/etc/greetd/config.toml` | Has `[terminal]`, `[default_session]`, default user matches `user.name` | Inspect `src/configure/greetd.rs` |
 | **T12d** | Service enabled (runit) | `init = "runit"`; check `ls -l /install/etc/runit/runsvdir/default/` | Symlinks for selected services (seatd, iwd or NetworkManager+iwd, greetd if DE) pointing to `/etc/runit/sv/<svc>` | Inspect `enable_runit_service` in `src/configure/services.rs:178-206` |
-| **T12e** | Service enabled (s6) | `init = "s6"`; check `ls /install/etc/s6/adminsv/default/contents.d/` | Touch files for `seatd-srv`, `iwd-srv`, etc. | Inspect `enable_s6_service` in `src/configure/services.rs:239-261` |
+| **T12e** | Service enabled (s6) | `init = "s6"`; run `artix-chroot /install s6 set list` (or inspect the default bundle) | Selected services (`seatd`, `iwd` or `NetworkManager`+`iwd`, `greetd` if DE) enabled and committed to the boot database | Inspect `enable_s6_service` / `commit_service_database` in `src/configure/services.rs` |
 | **T12f** | elogind blacklist | DE + any init; `pacman -Q --root=/install elogind-runit 2>&1` (or per-init equivalent) | Returns `error: package 'elogind-runit' was not found` (only base elogind installed) | Inspect `build_service_packages` in `src/configure/services.rs:93-116` and the explicit skip at `:33-35` |
 
 ### T13 — Optional package collections
@@ -246,7 +246,7 @@ Run each package test with that flag enabled and all others disabled.
 | **T13d** | Session switching | `install_gaming = true, install_session_switching = true, environment = "kde"`; verify scripts in `/install/usr/local/bin/` | `deploytix-session-manager.sh`, `return-to-gamemode.sh`, `session-select.sh`, `steam-gamescope-session.sh` all present | Inspect `setup_session_switching` in `src/configure/session_switching.rs` |
 | **T13e** | yay AUR | `install_yay = true`; verify `pacman -Q --root=/install yay` | Installed (built from source) | Inspect `install_yay` |
 | **T13f** | btrfs tools | `install_btrfs_tools = true, install_yay = true, filesystem = "btrfs"`; verify | `snapper`, `btrfs-assistant` installed | Inspect `install_btrfs_tools` |
-| **T13g** | HHD | `install_hhd = true, install_yay = true`; verify | `hhd` package + init-specific service file at `/etc/{runit/sv,init.d,s6/sv,dinit.d}/hhd` | Inspect `install_hhd` |
+| **T13g** | HHD | `install_hhd = true, install_yay = true`; verify | `hhd` package + init-specific service file at `/etc/{runit/sv,init.d,s6/adminsv,dinit.d}/hhd` | Inspect `install_hhd` |
 | **T13h** | Decky Loader | `install_decky_loader = true, install_yay = true, install_gaming = true`; verify | `plugin_loader` service + binary; service enabled in init | Inspect `install_decky_loader` |
 | **T13i** | evdevhook2 | `install_evdevhook2 = true, install_yay = true`; verify | `evdevhook2` package + udev rule + service; user added to `input` group | Inspect `install_evdevhook2` |
 | **T13j** | sysctl gaming | `sysctl_gaming_tweaks = true`; verify `cat /install/etc/sysctl.d/99-gaming.conf` | Contains `vm.max_map_count`, `vm.swappiness` | Inspect `install_sysctl_gaming` |

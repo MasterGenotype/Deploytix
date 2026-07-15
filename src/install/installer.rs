@@ -1014,6 +1014,15 @@ impl Installer {
     fn finalize(&self) -> Result<()> {
         info!("[Phase 6/6] Finalizing installation (regenerating initramfs, unmounting)");
 
+        // Commit the s6 service database: every `s6 set enable` staged in
+        // the earlier phases is compiled into the boot database in one go
+        // (no-op for the other init systems).
+        configure::services::commit_service_database(
+            &self.cmd,
+            &self.config.system.init,
+            INSTALL_ROOT,
+        )?;
+
         // Regenerate initramfs
         self.cmd.run_in_chroot(INSTALL_ROOT, "mkinitcpio -P")?;
 
