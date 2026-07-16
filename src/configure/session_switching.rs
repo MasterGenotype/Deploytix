@@ -20,6 +20,11 @@ const GAMESCOPE_SESSION_DESKTOP: &str =
     include_str!("../resources/session_switching/gamescope-session.desktop");
 const STEAMOS_SELECT_BRANCH: &str =
     include_str!("../resources/session_switching/steamos-select-branch.sh");
+const STEAMOS_UPDATE: &str = include_str!("../resources/session_switching/steamos-update.sh");
+const JUPITER_BIOSUPDATE: &str =
+    include_str!("../resources/session_switching/jupiter-biosupdate.sh");
+const NETWORKMANAGER_POLKIT_RULES: &str =
+    include_str!("../resources/session_switching/50-deploytix-networkmanager.rules");
 const GREETD_IPC: &str = include_str!("../resources/session_switching/greetd-ipc.py");
 const GREETD_PAM: &str = include_str!("../resources/session_switching/greetd.pam");
 const GREETD_GREETER_PAM: &str = include_str!("../resources/session_switching/greetd-greeter.pam");
@@ -62,6 +67,18 @@ const DEPLOY_FILES: &[DeployFile] = &[
         content: STEAMOS_SELECT_BRANCH,
         mode: 0o755,
     },
+    // SteamOS tooling stubs probed by Steam when launched with -steamdeck
+    // (required for the first-boot Deck OOBE / login screen in gamescope).
+    DeployFile {
+        dest: "usr/bin/steamos-update",
+        content: STEAMOS_UPDATE,
+        mode: 0o755,
+    },
+    DeployFile {
+        dest: "usr/bin/jupiter-biosupdate",
+        content: JUPITER_BIOSUPDATE,
+        mode: 0o755,
+    },
     DeployFile {
         dest: "usr/bin/greetd-ipc",
         content: GREETD_IPC,
@@ -102,7 +119,7 @@ const DEPLOY_FILES: &[DeployFile] = &[
 /// source in `configure::packages::install_gaming_packages`.
 pub fn setup_session_switching(
     _cmd: &CommandRunner,
-    _config: &DeploymentConfig,
+    config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
     info!("Deploying session switching scripts to {}", install_root);
@@ -120,6 +137,21 @@ pub fn setup_session_switching(
 
         info!("  Installed {} (mode {:o})", file.dest, file.mode);
     }
+
+    // Polkit rule granting the gamescope session user passwordless control of
+    // NetworkManager, so Wi-Fi can be configured from Steam's Deck OOBE and
+    // Settings > Internet (both drive NetworkManager over D-Bus). The rule is
+    // templated on the username, so it can't live in DEPLOY_FILES.
+    let polkit_dir = format!("{}/etc/polkit-1/rules.d", install_root);
+    fs::create_dir_all(&polkit_dir)?;
+    let polkit_path = format!("{}/50-deploytix-networkmanager.rules", polkit_dir);
+    let polkit_rules = NETWORKMANAGER_POLKIT_RULES.replace("@DEPLOYTIX_USER@", &config.user.name);
+    fs::write(&polkit_path, polkit_rules)?;
+    fs::set_permissions(&polkit_path, fs::Permissions::from_mode(0o644))?;
+    info!(
+        "  Installed etc/polkit-1/rules.d/50-deploytix-networkmanager.rules (user '{}')",
+        config.user.name
+    );
 
     // Create steamos-session-select symlink so Steam's "Switch to Desktop" works.
     // Steam calls `steamos-session-select <session>` internally.

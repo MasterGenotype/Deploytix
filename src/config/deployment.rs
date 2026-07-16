@@ -198,6 +198,16 @@ pub struct NetworkConfig {
     /// AUR GUI frontend used when `backend = "iwd"`. Ignored otherwise.
     #[serde(default)]
     pub iwd_frontend: IwdFrontend,
+    /// Optional Wi-Fi network to pre-seed on the installed system so it has
+    /// connectivity from the very first boot (required for Steam's first-run
+    /// client bootstrap in the gamescope session, which happens before the
+    /// OOBE network page exists). Written as a NetworkManager system
+    /// connection or an iwd network file depending on `backend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi_ssid: Option<String>,
+    /// WPA-PSK passphrase for `wifi_ssid`. Omit for an open network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -853,7 +863,7 @@ impl DeploymentConfig {
             NetworkBackend::NetworkManagerWpa,
         ];
         let net_idx = prompt_select("Network backend", &backends, 0)?;
-        let backend = backends[net_idx].clone();
+        let mut backend = backends[net_idx].clone();
         // Sub-choice: AUR GUI frontend when iwd is the standalone backend.
         let iwd_frontend = if backend == NetworkBackend::Iwd {
             let frontends = [IwdFrontend::Iwgtk, IwdFrontend::Iwdgui, IwdFrontend::Iwqt];
@@ -861,6 +871,24 @@ impl DeploymentConfig {
             frontends[f_idx]
         } else {
             IwdFrontend::default()
+        };
+
+        // Optional Wi-Fi pre-seeding so the installed system has connectivity
+        // on first boot (needed for Steam's first-run bootstrap in Game Mode).
+        let (wifi_ssid, wifi_password) = if prompt_confirm(
+            "Pre-configure a Wi-Fi network on the installed system?",
+            false,
+        )? {
+            let ssid = prompt_input("Wi-Fi SSID", None)?;
+            let password = if prompt_confirm("Is the network password-protected (WPA-PSK)?", true)?
+            {
+                Some(prompt_password("Wi-Fi passphrase", true)?)
+            } else {
+                None
+            };
+            (Some(ssid), password)
+        } else {
+            (None, None)
         };
 
         // Desktop
@@ -931,6 +959,17 @@ impl DeploymentConfig {
         } else {
             false
         };
+
+        // Steam's gamepad UI configures Wi-Fi through NetworkManager; the
+        // standalone iwd backend would leave first-boot network setup broken
+        // in Game Mode (and fail validation), so coerce it here.
+        if install_session_switching && backend == NetworkBackend::Iwd {
+            println!(
+                "  Note: Game Mode session switching requires NetworkManager. \
+                 Switching network backend to NetworkManager + iwd."
+            );
+            backend = NetworkBackend::NetworkManager;
+        }
 
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
@@ -1031,6 +1070,8 @@ impl DeploymentConfig {
             network: NetworkConfig {
                 backend,
                 iwd_frontend,
+                wifi_ssid,
+                wifi_password,
             },
             desktop: DesktopConfig {
                 environment,
@@ -1099,6 +1140,8 @@ impl DeploymentConfig {
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,
                 iwd_frontend: IwdFrontend::default(),
+                wifi_ssid: None,
+                wifi_password: None,
             },
             desktop: DesktopConfig {
                 environment: DesktopEnvironment::Kde,
@@ -1291,6 +1334,43 @@ impl DeploymentConfig {
                     "Session switching requires a desktop environment".to_string(),
                 ));
             }
+            // Steam's gamepad UI (Deck OOBE network page, Settings > Internet)
+            // configures Wi-Fi via NetworkManager over D-Bus; the standalone
+            // iwd backend leaves it non-functional in the gamescope session.
+            if self.network.backend == NetworkBackend::Iwd {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching (gamescope Game Mode) requires a NetworkManager backend \
+                     (backend = \"networkmanager\" or \"networkmanager-wpa\"); Steam's gamepad UI \
+                     configures Wi-Fi through NetworkManager"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Wi-Fi pre-seeding sanity checks
+        if let Some(ssid) = &self.network.wifi_ssid {
+            if ssid.is_empty() || ssid.len() > 32 {
+                return Err(DeploytixError::ValidationError(
+                    "wifi_ssid must be 1-32 characters".to_string(),
+                ));
+            }
+            // The SSID is used as a filename on the target system.
+            if ssid.contains('/') || ssid.chars().any(|c| c.is_control()) {
+                return Err(DeploytixError::ValidationError(
+                    "wifi_ssid must not contain '/' or control characters".to_string(),
+                ));
+            }
+            if let Some(pw) = &self.network.wifi_password {
+                if pw.len() < 8 || pw.len() > 63 {
+                    return Err(DeploytixError::ValidationError(
+                        "wifi_password must be a WPA-PSK passphrase of 8-63 characters".to_string(),
+                    ));
+                }
+            }
+        } else if self.network.wifi_password.is_some() {
+            return Err(DeploytixError::ValidationError(
+                "wifi_password is set but wifi_ssid is missing".to_string(),
+            ));
         }
 
         // The standalone-iwd backend ships an AUR GUI frontend (iwgtk / iwdgui /

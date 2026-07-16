@@ -207,8 +207,18 @@ trap cleanup EXIT HUP TERM
 # immediately instead of being deferred until the foreground child exits.
 # Without this, a hung Steam process blocks the cleanup trap indefinitely,
 # preventing greetd from restarting the session manager on logout.
-echo "[steam-session] Starting Steam (-steamos3 -gamepadui)..."
-steam -steamos3 -gamepadui &
+#
+# Flags match the upstream ChimeraOS/Bazzite gamescope-session launch line.
+# -steampal -steamdeck are required in addition to -steamos3 -gamepadui so
+# that a fresh install (no cached credentials) presents the Steam Deck OOBE:
+# language -> network setup -> controller-navigable login with on-screen
+# keyboard and QR-code sign-in. Without them, Steam falls back to the legacy
+# X11 login dialog, which is unreachable under gamescope's forced-fullscreen
+# base layer. -steamdeck makes Steam probe SteamOS update tooling; the
+# steamos-update / jupiter-biosupdate / steamos-select-branch stubs in
+# /usr/bin satisfy those probes.
+echo "[steam-session] Starting Steam (-gamepadui -steamos3 -steampal -steamdeck)..."
+steam -gamepadui -steamos3 -steampal -steamdeck &
 steam_pid=$!
 
 wait "$steam_pid" 2>/dev/null || true

@@ -29,7 +29,9 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
                 if packages.install_session_switching {
                     widgets::info_text(
                         ui,
-                        "Boots into gamescope Game Mode; switch to desktop and back on demand.",
+                        "Boots into gamescope Game Mode; switch to desktop and back on demand. \
+                         First boot shows Steam's Deck-style setup (network + QR/on-screen \
+                         keyboard login). Sets the network backend to NetworkManager.",
                     );
                 }
             });

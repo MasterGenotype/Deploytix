@@ -157,6 +157,53 @@ the zombie daemons were technically still running, it skipped starting new ones.
 - `audio-startup` is not in the Deploytix repo (lives at `~/.local/bin/audio-startup`
   on the target system)
 
+### 5. First Boot Unusable -- No Way to Log In to Steam
+
+**Problem**: On a fresh install booting straight into the gamescope session, Steam
+had no cached credentials and no usable login UI. The user had to attach a keyboard,
+switch to desktop mode, and sign in to Steam there before Game Mode worked.
+
+**Root cause**: `steam -steamos3 -gamepadui` without cached credentials falls back
+to the legacy desktop-style X11 login dialog instead of the Deck first-run
+experience. Under gamescope's `--force-windows-fullscreen` with the base layer
+pinned to app ID 769, that dialog is effectively invisible and unreachable without
+a mouse.
+
+**Solution** (three parts):
+
+1. **Launch flags**: Steam is now launched as
+   `steam -gamepadui -steamos3 -steampal -steamdeck` (the upstream
+   ChimeraOS/Bazzite gamescope-session launch line). `-steampal -steamdeck`
+   activate the Steam Deck OOBE on first run: language → network setup →
+   controller-navigable login with on-screen keyboard and QR-code sign-in via the
+   Steam mobile app.
+2. **SteamOS tooling stubs**: with `-steamdeck`, Steam probes SteamOS update
+   tooling. New stubs `/usr/bin/steamos-update` (exit 7 = "no update available")
+   and `/usr/bin/jupiter-biosupdate` (exit 0) join the existing
+   `steamos-select-branch` stub so the OOBE update checks complete instead of
+   hanging.
+3. **NetworkManager access**: the OOBE network page (and Settings > Internet)
+   drives NetworkManager over D-Bus. A polkit rule
+   (`/etc/polkit-1/rules.d/50-deploytix-networkmanager.rules`, templated on the
+   autologin username) grants that user passwordless NetworkManager control.
+   Validation now requires a NetworkManager backend when session switching is
+   enabled; the wizard and GUI coerce the backend automatically.
+
+**Remaining first-boot dependency**: Steam's first-run client bootstrap downloads
+a large update *before* the OOBE (and its network page) exists, so the device needs
+connectivity from the very first boot. For Wi-Fi-only devices, the deployment
+config now accepts `network.wifi_ssid` / `network.wifi_password`, which deploytix
+pre-seeds as a NetworkManager system connection (or an iwd network file for
+non-gaming iwd installs) so the system auto-connects immediately on boot.
+
+**Files changed**:
+- `steam-gamescope-session.sh` -- launch flags
+- `steamos-update.sh`, `jupiter-biosupdate.sh` -- new stubs
+- `50-deploytix-networkmanager.rules` -- new polkit rule template
+- `session_switching.rs` -- deploys the above
+- `network.rs` -- Wi-Fi pre-seeding
+- `deployment.rs` -- `wifi_ssid`/`wifi_password` config fields, validation, wizard
+
 ---
 
 ## File Inventory
@@ -172,6 +219,9 @@ compiled into the binary via `include_str!` in `src/configure/session_switching.
 | `session-select.sh` | `/usr/bin/session-select` | Write sentinel file and kill current session |
 | `return-to-gamemode.sh` | `/usr/bin/return-to-gamemode` | Desktop shortcut to switch back to game mode |
 | `steamos-select-branch.sh` | `/usr/bin/steamos-select-branch` | Stub for Steam compatibility |
+| `steamos-update.sh` | `/usr/bin/steamos-update` | Stub: "no update available" (exit 7) for Steam's `-steamdeck` update checks |
+| `jupiter-biosupdate.sh` | `/usr/bin/jupiter-biosupdate` | Stub: no-op BIOS update for Steam's `-steamdeck` mode |
+| `50-deploytix-networkmanager.rules` | `/etc/polkit-1/rules.d/50-deploytix-networkmanager.rules` | Polkit rule (templated on username): passwordless NetworkManager control from Steam's UI |
 | `gamescope-session.desktop` | `/usr/share/wayland-sessions/gamescope-session.desktop` | Wayland session .desktop entry |
 | `greetd.pam` | `/etc/pam.d/greetd` | PAM service for IPC-created Class=user sessions (passwordless auth, full session chain via system-local-login) |
 | `greetd-greeter.pam` | `/etc/pam.d/greetd-greeter` | PAM service for greetd's default_session (the greeter itself); required so pam_start("greetd-greeter") does not fall through to `/etc/pam.d/other` (deny-all) |

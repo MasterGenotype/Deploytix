@@ -197,6 +197,10 @@ impl Default for UserState {
 pub struct PackagesState {
     pub network_backend: NetworkBackend,
     pub iwd_frontend: IwdFrontend,
+    /// Optional Wi-Fi network pre-seeded on the target (empty = none).
+    pub wifi_ssid: String,
+    /// WPA-PSK passphrase for `wifi_ssid` (empty = open network).
+    pub wifi_password: String,
     pub desktop_env: DesktopEnvironment,
     pub install_yay: bool,
     pub install_wine: bool,
@@ -218,6 +222,8 @@ impl Default for PackagesState {
         Self {
             network_backend: NetworkBackend::Iwd,
             iwd_frontend: IwdFrontend::default(),
+            wifi_ssid: String::new(),
+            wifi_password: String::new(),
             desktop_env: DesktopEnvironment::None,
             install_yay: false,
             install_wine: false,

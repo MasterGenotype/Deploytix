@@ -112,6 +112,18 @@ impl DeploytixGui {
             network: NetworkConfig {
                 backend: self.packages.network_backend.clone(),
                 iwd_frontend: self.packages.iwd_frontend,
+                wifi_ssid: if self.packages.wifi_ssid.is_empty() {
+                    None
+                } else {
+                    Some(self.packages.wifi_ssid.clone())
+                },
+                wifi_password: if self.packages.wifi_ssid.is_empty()
+                    || self.packages.wifi_password.is_empty()
+                {
+                    None
+                } else {
+                    Some(self.packages.wifi_password.clone())
+                },
             },
             desktop: DesktopConfig {
                 environment: self.packages.desktop_env.clone(),

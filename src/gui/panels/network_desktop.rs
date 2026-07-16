@@ -7,6 +7,12 @@ use egui::Ui;
 /// Render network & desktop sections.
 pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesystem: &Filesystem) {
     widgets::section(ui, "Network", |ui| {
+        // Steam's gamepad UI configures Wi-Fi through NetworkManager; the
+        // standalone iwd backend would leave Game Mode network setup broken
+        // (and fail validation), so coerce it while session switching is on.
+        if packages.install_session_switching && packages.network_backend == NetworkBackend::Iwd {
+            packages.network_backend = NetworkBackend::NetworkManager;
+        }
         ui.horizontal(|ui| {
             ui.label("Backend:");
             egui::ComboBox::from_id_salt("network")
@@ -29,6 +35,13 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
                     );
                 });
         });
+        if packages.install_session_switching {
+            widgets::info_text(
+                ui,
+                "Game Mode session switching requires a NetworkManager backend \
+                 (Steam's gamepad UI configures Wi-Fi through NetworkManager).",
+            );
+        }
 
         // Sub-choice: iwd GUI frontend (AUR) only when standalone iwd is picked.
         if packages.network_backend == NetworkBackend::Iwd {
@@ -62,6 +75,28 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
                      Validation will fail without it.",
                 );
             }
+        }
+
+        ui.add_space(theme::SPACING_XS);
+
+        // Optional Wi-Fi pre-seeding — gives the installed system connectivity
+        // from the very first boot (Steam's first-run bootstrap in Game Mode
+        // needs network before its own OOBE network page exists).
+        ui.label("Pre-seed Wi-Fi network (optional):");
+        ui.horizontal(|ui| {
+            ui.label("SSID:");
+            ui.text_edit_singleline(&mut packages.wifi_ssid);
+        });
+        if !packages.wifi_ssid.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Passphrase:");
+                ui.add(egui::TextEdit::singleline(&mut packages.wifi_password).password(true));
+            });
+            widgets::info_text(
+                ui,
+                "Credentials are written to the installed system so it auto-connects \
+                 on first boot. Leave the passphrase empty for an open network.",
+            );
         }
 
         ui.add_space(theme::SPACING_XS);
