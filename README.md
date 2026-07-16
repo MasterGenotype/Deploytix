@@ -30,6 +30,8 @@ cargo build --release --features gui
 
 GUI build requires system libraries: `libxcb`, `libxkbcommon`, `libwayland`, `libGL`.
 
+Running the GUI on an X11 session additionally requires `libX11` and `libXcursor` at runtime (winit loads them dynamically): `pacman -S libx11 libxcursor`.
+
 ### Static Binary (Portable)
 
 Builds a fully statically-linked binary with musl — zero runtime dependencies, runs on any x86_64 Linux:
