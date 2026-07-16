@@ -1,8 +1,8 @@
 //! Application state types for the Deploytix GUI
 
 use crate::config::{
-    Bootloader, CustomPartitionEntry, DesktopEnvironment, Filesystem, InitSystem, IwdFrontend,
-    NetworkBackend, SecureBootMethod, SwapType,
+    Bootloader, CustomPartitionEntry, DesktopEnvironment, DisplayManager, Filesystem, InitSystem,
+    IwdFrontend, NetworkBackend, SecureBootMethod, SwapType,
 };
 use crate::disk::detection::BlockDevice;
 use std::sync::mpsc::Receiver;
@@ -202,6 +202,7 @@ pub struct PackagesState {
     /// WPA-PSK passphrase for `wifi_ssid` (empty = open network).
     pub wifi_password: String,
     pub desktop_env: DesktopEnvironment,
+    pub display_manager: DisplayManager,
     pub install_yay: bool,
     pub install_wine: bool,
     pub install_gaming: bool,
@@ -225,6 +226,7 @@ impl Default for PackagesState {
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             desktop_env: DesktopEnvironment::None,
+            display_manager: DisplayManager::default(),
             install_yay: false,
             install_wine: false,
             install_gaming: false,

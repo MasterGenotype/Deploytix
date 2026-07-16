@@ -190,9 +190,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         if config.system.init == crate::config::InitSystem::S6 {
             // Official s6 service packages from Artix repos
             packages.push("alsa-utils-s6".to_string());
-        } else {
-            let greetd_service = format!("greetd-{}", config.system.init);
-            packages.push(greetd_service);
+        } else if let Some(dm) = config.desktop.display_manager.service_name() {
+            // Init service package for the selected display manager
+            // (greetd-runit, sddm-dinit, …). The base DM package and the
+            // s6 variants are handled by configure::services.
+            let dm_service = format!("{}-{}", dm, config.system.init);
+            packages.push(dm_service);
         }
     }
 

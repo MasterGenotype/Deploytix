@@ -801,8 +801,13 @@ impl Installer {
         // Network
         configure::network::configure_network(&self.cmd, &self.config, INSTALL_ROOT)?;
 
-        // greetd configuration (if desktop environment selected)
-        configure::greetd::configure_greetd(&self.cmd, &self.config, INSTALL_ROOT)?;
+        // Display manager configuration (if desktop environment selected);
+        // dispatches on desktop.display_manager (greetd auto-login default)
+        configure::display_manager::configure_display_manager(
+            &self.cmd,
+            &self.config,
+            INSTALL_ROOT,
+        )?;
 
         // Services
         configure::services::enable_services(&self.cmd, &self.config, INSTALL_ROOT)?;

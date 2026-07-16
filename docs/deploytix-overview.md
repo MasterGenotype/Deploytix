@@ -55,6 +55,7 @@ All modules under `src/configure/` operate on the chroot at `/install`:
 - **`users.rs`** — useradd inside chroot, sets sudoer status by appending to `/etc/sudoers.d/wheel`.
 - **`network.rs`** — writes iwd or NetworkManager configs; iwd needs `EnableNetworkConfiguration=true`; NetworkManager wraps iwd as backend.
 - **`services.rs`** — `enable_service()` per init: runit creates `runsvdir/default/<svc>` symlink; openrc runs `rc-update add <svc> default` in chroot; s6 writes a touch file in `adminsv/default/contents.d` to a `<svc>-srv` directory; dinit creates `boot.d/<svc>` symlink. Notably blacklists installation of `elogind-<init>` (conflicts with `seatd-<init>`) and skips enabling `elogind` (only the base PAM module is needed). `pacman -S --needed` installs the `<svc>-<init>` packages before enabling.
+- **`display_manager.rs`** — dispatches on `desktop.display_manager` (greetd auto-login default; sddm/gdm/lightdm login screens; none = TTY).
 - **`greetd.rs`** — writes `/etc/greetd/config.toml`, autologin tweaks, S6 directory layout (no `greetd-s6` package exists in Artix repos).
 - **`session_switching.rs`** — installs gamescope ↔ desktop session manager scripts from `src/resources/session_switching/` into the chroot (greetd-greeter PAM, deploytix-session-manager.sh, return-to-gamemode.sh, etc.).
 - **`packages.rs`** (largest, ~1500 lines) — Wine, gaming (Steam + gamescope), yay (built from source), AUR packages (zen-browser), btrfs tools (snapper, btrfs-assistant), HHD, Decky Loader, evdevhook2, sysctl gaming/network tweaks, GPU drivers (NVIDIA/AMD/Intel), user autostart entries, and a chroot-aware `pacman_install_chroot()` helper.
@@ -182,7 +183,7 @@ Installer::run()
       │   ├─ configure::bootloader::install_bootloader[_with_layout]
       │   ├─ configure::bootloader::create_grub_reinstall_hook (encrypted only)
       │   ├─ configure::network::configure_network
-      │   ├─ configure::greetd::configure_greetd
+      │   ├─ configure::display_manager::configure_display_manager
       │   └─ configure::services::enable_services
       ├─ if encryption → configure::hooks::install_custom_hooks
       ├─ if secureboot → configure::secureboot::setup_secureboot
@@ -399,7 +400,7 @@ The installation is the dominant data-transformation pipeline. Each stage transf
 | 14 | Locale + user + mkinitcpio | chroot, config | `/etc/{locale.conf,locale.gen,vconsole.conf,passwd,sudoers.d/wheel,mkinitcpio.conf}` | `src/configure/{locale,users,mkinitcpio}.rs` |
 | 15 | Bootloader | chroot, layout, encryption flags | `/boot/efi/EFI/Artix/grubx64.efi`, `/boot/grub/grub.cfg`, `/etc/default/grub` | `src/configure/bootloader.rs install_bootloader[_with_layout]`, `create_grub_reinstall_hook` |
 | 16 | Network | chroot | iwd or NetworkManager configs + service files | `src/configure/network.rs configure_network` |
-| 17 | greetd + services | chroot | `/etc/greetd/config.toml` + per-init service enables | `src/configure/{greetd,services}.rs` |
+| 17 | display manager + services | chroot | selected DM config (greetd auto-login default) + per-init service enables | `src/configure/{display_manager,greetd,services}.rs` |
 | 18 | Custom initcpio hooks | chroot, encryption flags | `/usr/lib/initcpio/{hooks,install}/{crypttab-unlock,mountcrypt}` | `src/configure/hooks.rs install_custom_hooks` |
 | 19 | SecureBoot (optional) | chroot, secureboot_method | enrolled keys + signed shim/grub | `src/configure/secureboot.rs setup_secureboot` |
 | 20 | Optional packages | chroot, packages config | GPU drivers / DE / Wine / gaming / yay / AUR / btrfs-tools / sysctl / HHD / Decky / evdevhook2 | `src/configure/packages.rs` (~1500 LOC) |
