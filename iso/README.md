@@ -21,6 +21,19 @@ The `loop` kernel module must be loaded:
 sudo modprobe loop
 ```
 
+### Environment requirements
+
+The build script refuses to run in environments that would silently break:
+
+- **Do not run as root.** `makepkg` refuses to build as root and paths shift to
+  `/root/`, detaching from your `~/artools-workspace`. Individual privileged
+  steps (`repo-add`, `buildiso`) escalate with `sudo` internally.
+- **`$HOME` must be on a real filesystem** — `ext4`, `btrfs`, or `xfs`. The
+  script refuses `vfat`, `iso9660`, `overlay`, `tmpfs`, and `squashfs` because
+  buildiso needs POSIX perms, xattrs, and case-sensitive filenames.
+- **`profile.yaml` is validated up-front** — empty files, tab indentation, and
+  missing `rootfs`/`livefs` sections are rejected before any packages build.
+
 ## Quick Start
 
 From the repository root:
@@ -80,6 +93,21 @@ Place files in `iso/profile/deploytix/live-overlay/` to overlay them onto the li
 ```
 iso/profile/deploytix/live-overlay/etc/skel/.config/deploytix/config.toml
 ```
+
+### Display manager
+
+When `-g` is set, the merged desktop profile has `artix-breeze-sddm` (a
+Manjaro-flavoured meta package Artix doesn't ship) stripped and a
+DE-appropriate display manager added back in:
+
+| Desktop | Display manager |
+|---------|-----------------|
+| plasma | `sddm` + `sddm-<init>` |
+| gnome | `gdm` + `gdm-<init>` |
+| xfce, lxqt, mate, cinnamon, budgie | `lightdm` + `lightdm-<init>` |
+
+If your desktop isn't in the table, no DM is added — set one in
+`iso/profile/deploytix/profile.yaml` (or the base DE profile) yourself.
 
 ### Using a custom pacman mirror
 

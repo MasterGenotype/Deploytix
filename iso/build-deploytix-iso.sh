@@ -100,6 +100,39 @@ EOF
     exit 0
 }
 
+# ── Root-user guard ──────────────────────────────────────────────────────────
+# The script itself must NOT run as root: makepkg refuses to run as root, and
+# HOME shifts to /root/, silently detaching from the user's artools-workspace.
+# Individual privileged steps escalate with sudo internally.
+check_not_root() {
+    if [[ $EUID -eq 0 ]]; then
+        die "Do not run this script with sudo/root.
+  makepkg refuses to build as root, and paths shift to /root/ (detaching
+  from ~/artools-workspace). Run as your normal user; individual steps that
+  need privileges will invoke sudo themselves.
+  If you started this via 'sudo ./build-deploytix-iso.sh', re-run without sudo."
+    fi
+}
+
+# ── Filesystem sanity ────────────────────────────────────────────────────────
+# buildiso/makepkg need POSIX perms, xattrs, and case-sensitive names — none of
+# vfat / iso9660 / overlay / tmpfs / squashfs meet all three. Refuse early
+# instead of failing three steps in when the chroot cannot be assembled.
+check_writable_filesystem() {
+    local fstype
+    fstype="$(stat -f -c %T "$HOME" 2>/dev/null || true)"
+    case "$fstype" in
+        ext2/ext3|ext4|xfs|btrfs|reiserfs|f2fs|zfs|jfs) ;;
+        vfat|msdos|iso9660|isofs|overlay|overlayfs|tmpfs|squashfs)
+            die "HOME (${HOME}) is on '${fstype}' — buildiso needs a real filesystem.
+  Move ~/artools-workspace and the Deploytix clone onto ext4/btrfs/xfs and re-run.
+  (Live-USB / overlay / tmpfs / vfat cannot host the buildiso chroot.)"
+            ;;
+        "") warn "Could not detect filesystem type at ${HOME}; continuing anyway." ;;
+        *)  warn "Unusual filesystem '${fstype}' at ${HOME}; buildiso may misbehave." ;;
+    esac
+}
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 while getopts ":i:b:gscxrnhCK" opt; do
     case "$opt" in
@@ -182,10 +215,41 @@ check_prerequisites() {
     [[ -f "${PROFILE_SRC}/profile.yaml" ]] || die "Profile not found at ${PROFILE_SRC}/profile.yaml"
     [[ -f "${SYSTEM_PACMAN_CONF}" ]] || die "System pacman.conf not found at ${SYSTEM_PACMAN_CONF}"
 
+    validate_profile_yaml "${PROFILE_SRC}/profile.yaml"
+
     ensure_submodules
 
     msg2 "All prerequisites satisfied"
     msg2 "Build source: ${BUILD_SOURCE}"
+}
+
+# ── profile.yaml sanity ──────────────────────────────────────────────────────
+# Empty / tab-indented / missing-section profile.yaml files fail in obscure
+# places later in buildiso.  yq will parse (catches YAML syntax + tab-indent
+# errors) and we check the required top-level sections are present and
+# non-null.
+validate_profile_yaml() {
+    local yaml="$1"
+
+    [[ -s "$yaml" ]] || die "profile.yaml is empty: ${yaml}"
+
+    if grep -Pq '^\t' "$yaml"; then
+        die "profile.yaml uses tab indentation (YAML requires spaces): ${yaml}"
+    fi
+
+    yq eval '.' "$yaml" >/dev/null 2>&1 \
+        || die "profile.yaml is not valid YAML: ${yaml}
+  Run: yq eval '.' '${yaml}' to see the parser error."
+
+    local section
+    for section in rootfs livefs; do
+        local kind
+        kind="$(yq eval ".${section} | type" "$yaml" 2>/dev/null || echo "!!null")"
+        case "$kind" in
+            "!!map"|"!!seq") ;;
+            *) die "profile.yaml missing required section '${section}': ${yaml}" ;;
+        esac
+    done
 }
 
 # ── Overlay helpers ──────────────────────────────────────────────────────────
@@ -507,6 +571,19 @@ create_local_repo() {
     fi
 
     sudo mkdir -p "${LOCAL_REPO_DIR}"
+
+    # If a prior root-invoked run left this directory owned by root, the
+    # non-sudo repo-add call below would still work (we sudo it) but any
+    # later `pacman -Sy` from the user account would trip on stale caches.
+    # Normalise ownership so subsequent runs behave identically whether the
+    # first run was fresh or resumed.
+    local repo_owner
+    repo_owner="$(stat -c '%U' "${LOCAL_REPO_DIR}" 2>/dev/null || echo "")"
+    if [[ "$repo_owner" == "root" ]]; then
+        msg2 "Fixing ownership of ${LOCAL_REPO_DIR} (root → ${USER})"
+        sudo chown -R "${USER}:${USER}" "${LOCAL_REPO_DIR}"
+    fi
+
     sudo rm -f "${LOCAL_REPO_DIR}"/*.db* "${LOCAL_REPO_DIR}"/*.files*
     sudo rm -f "${LOCAL_REPO_DIR}"/*.pkg.tar.zst
 
@@ -670,6 +747,18 @@ install_profile() {
 }
 
 # ── GUI profile generation ───────────────────────────────────────────────────
+# Display-manager map: which DM package + which init-flavoured DM package
+# ships each desktop's session.  Empty DM means the DE doesn't ship a
+# graphical login (user chooses lightdm/sddm themselves).
+_gui_dm_for_de() {
+    case "$1" in
+        plasma) echo "sddm" ;;
+        gnome)  echo "gdm" ;;
+        xfce|lxqt|lxde|mate|cinnamon|budgie) echo "lightdm" ;;
+        *)      echo "" ;;
+    esac
+}
+
 generate_gui_profile() {
     local dest="$1"
     local de_profile="$2"
@@ -680,10 +769,51 @@ generate_gui_profile() {
 
     yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git", "alsa-utils"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
-    # Remove packages from the base DE profile that are unavailable in Artix repos
+    # Remove packages from the base DE profile that are unavailable in Artix repos.
+    # artix-breeze-sddm was a Manjaro-style meta that Artix does not ship.
     yq -i '.rootfs.packages -= ["artix-breeze-sddm"]' "$dest/profile.yaml"
 
+    ensure_display_manager "$dest/profile.yaml"
+
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
+}
+
+# ── Ensure a compatible display manager is present ───────────────────────────
+# After stripping unavailable DM meta packages (e.g. artix-breeze-sddm) a DE
+# profile can end up with no display manager at all, causing the live session
+# to boot to a TTY. Add the DE's canonical DM (sddm/gdm/lightdm) to rootfs
+# packages and the init-flavoured variant to every init's packages-init list
+# so the live GUI actually starts.
+ensure_display_manager() {
+    local yaml="$1"
+    local dm
+    dm="$(_gui_dm_for_de "$BASE_DE_PROFILE")"
+
+    if [[ -z "$dm" ]]; then
+        msg2 "No canonical display manager for '${BASE_DE_PROFILE}'; leaving profile untouched"
+        return 0
+    fi
+
+    # rootfs.packages: add DM if not already present. Guard against a null or
+    # missing rootfs.packages block from an odd base profile.
+    yq -i '.rootfs.packages = (.rootfs.packages // [])' "$yaml"
+    if ! yq eval ".rootfs.packages | contains([\"${dm}\"])" "$yaml" | grep -qx true; then
+        yq -i ".rootfs.packages += [\"${dm}\"]" "$yaml"
+        msg2 "Added display manager: ${dm}"
+    fi
+
+    # packages-init.<init>: add ${dm}-${init} so the DM has a service unit for
+    # every init the profile supports. Skip inits the profile doesn't declare.
+    local init
+    for init in openrc runit dinit s6; do
+        local has_init
+        has_init="$(yq eval ".rootfs.\"packages-init\".${init} | type" "$yaml" 2>/dev/null || echo "!!null")"
+        [[ "$has_init" == "!!seq" ]] || continue
+        if ! yq eval ".rootfs.\"packages-init\".${init} | contains([\"${dm}-${init}\"])" "$yaml" | grep -qx true; then
+            yq -i ".rootfs.\"packages-init\".${init} += [\"${dm}-${init}\"]" "$yaml"
+            msg2 "Added ${dm}-${init} to packages-init.${init}"
+        fi
+    done
 }
 
 # ── Step F: Embed built packages in the live-overlay ─────────────────────────
@@ -777,6 +907,8 @@ cleanup_built_packages() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
+    check_not_root
+    check_writable_filesystem
     resolve_paths
 
     # Install a global handler that restores any modified PKGBUILDs and removes
