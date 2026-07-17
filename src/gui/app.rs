@@ -127,7 +127,7 @@ impl DeploytixGui {
             },
             desktop: DesktopConfig {
                 environment: self.packages.desktop_env.clone(),
-                display_manager: None,
+                display_manager: self.packages.display_manager,
             },
             packages: PackagesConfig {
                 install_yay: self.packages.install_yay,

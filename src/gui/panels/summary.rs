@@ -101,6 +101,13 @@ pub fn show(
                     row(ui, "Username", &user.username);
                     row(ui, "Network", &format!("{}", packages.network_backend));
                     row(ui, "Desktop", &format!("{}", packages.desktop_env));
+                    if packages.desktop_env != crate::config::DesktopEnvironment::None {
+                        row(
+                            ui,
+                            "Display Manager",
+                            &format!("{}", packages.display_manager),
+                        );
+                    }
                     row(ui, "GPU Drivers", &gpu_str);
                     row(
                         ui,

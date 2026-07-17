@@ -1,6 +1,7 @@
 //! System configuration modules
 
 pub mod bootloader;
+pub mod display_manager;
 pub mod encryption;
 pub mod gamescope_update;
 pub mod greetd;

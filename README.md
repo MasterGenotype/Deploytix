@@ -188,6 +188,7 @@ backend = "networkmanager"     # iwd, networkmanager
 
 [desktop]
 environment = "kde"            # kde, gnome, xfce, none
+display_manager = "greetd"     # greetd (auto-login), sddm, gdm, lightdm, none
 
 [packages]
 install_yay = true             # AUR helper (built from source)

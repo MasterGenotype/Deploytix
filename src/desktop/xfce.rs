@@ -6,33 +6,24 @@ use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
 
-/// XFCE packages
-const XFCE_PACKAGES: &[&str] = &["xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter"];
+/// XFCE packages (display manager handled centrally via desktop.display_manager)
+const XFCE_PACKAGES: &[&str] = &["xfce4", "xfce4-goodies"];
 
 /// Install XFCE desktop environment
 pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing XFCE desktop environment");
-
-    // Get init-specific lightdm package
-    let lightdm_service = format!("lightdm-{}", config.system.init);
 
     if cmd.is_dry_run() {
         println!(
             "  [dry-run] Would install XFCE packages: {:?}",
             XFCE_PACKAGES
         );
-        println!(
-            "  [dry-run] Would install lightdm service: {}",
-            lightdm_service
-        );
         return Ok(());
     }
 
     // Install packages
     let pkg_list = XFCE_PACKAGES.join(" ");
-    let mut all_pkgs: Vec<String> = XFCE_PACKAGES.iter().map(|s| (*s).to_string()).collect();
-    all_pkgs.push(lightdm_service.clone());
-    let install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, lightdm_service);
+    let install_cmd = format!("pacman -S --noconfirm {}", pkg_list);
     crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     // Create .xinitrc for startx fallback

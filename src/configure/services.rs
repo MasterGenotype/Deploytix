@@ -61,12 +61,15 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // Display manager — greetd on all init systems.
+    // Display manager — selected via desktop.display_manager (greetd is the
+    // default; DisplayManager::None boots to a TTY login with no DM service).
     // No official greetd-s6 package exists, so for S6 we write the service
     // directory ourselves in configure_greetd(); enable_s6_service() will
     // then find greetd-srv and touch the bundle entry as usual.
     if config.desktop.environment != DesktopEnvironment::None {
-        services.push("greetd".to_string());
+        if let Some(dm_service) = config.desktop.display_manager.service_name() {
+            services.push(dm_service.to_string());
+        }
     }
 
     // elogind — must be running before greetd so PAM pam_elogind can
@@ -99,6 +102,11 @@ fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String>
     for service in services {
         let base = service_base_package(service);
         packages.push(base.to_string());
+        // LightDM needs a greeter; lightdm-gtk-greeter is its compiled-in
+        // default on Artix and is not pulled in as a hard dependency.
+        if base == "lightdm" {
+            packages.push("lightdm-gtk-greeter".to_string());
+        }
         // No greetd-s6 package exists in Artix repos; we write the service
         // directory ourselves in configure_greetd().  All other services
         // (including elogind-s6) have proper Artix packages.
@@ -288,4 +296,70 @@ fn enable_dinit_service(service: &str, install_root: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DisplayManager;
+
+    fn config() -> DeploymentConfig {
+        // sample(): KDE desktop, greetd display manager (default), runit,
+        // iwd network backend
+        DeploymentConfig::sample()
+    }
+
+    #[test]
+    fn greetd_default_enables_greetd_service() {
+        let services = build_service_list(&config());
+        assert!(services.contains(&"greetd".to_string()));
+        assert!(services.contains(&"seatd".to_string()));
+    }
+
+    #[test]
+    fn sddm_replaces_greetd_service() {
+        let mut cfg = config();
+        cfg.desktop.display_manager = DisplayManager::Sddm;
+        let services = build_service_list(&cfg);
+        assert!(services.contains(&"sddm".to_string()));
+        assert!(!services.contains(&"greetd".to_string()));
+    }
+
+    #[test]
+    fn display_manager_none_enables_no_dm_service() {
+        let mut cfg = config();
+        cfg.desktop.display_manager = DisplayManager::None;
+        let services = build_service_list(&cfg);
+        for dm in ["greetd", "sddm", "gdm", "lightdm"] {
+            assert!(!services.contains(&dm.to_string()));
+        }
+    }
+
+    #[test]
+    fn headless_config_enables_no_dm_service() {
+        let mut cfg = config();
+        cfg.desktop.environment = DesktopEnvironment::None;
+        let services = build_service_list(&cfg);
+        assert!(!services.contains(&"greetd".to_string()));
+        assert!(!services.contains(&"seatd".to_string()));
+    }
+
+    #[test]
+    fn lightdm_packages_include_greeter_and_init_service() {
+        let services = vec!["lightdm".to_string()];
+        let packages = build_service_packages(&services, &InitSystem::Runit);
+        assert!(packages.contains(&"lightdm".to_string()));
+        assert!(packages.contains(&"lightdm-gtk-greeter".to_string()));
+        assert!(packages.contains(&"lightdm-runit".to_string()));
+    }
+
+    #[test]
+    fn greetd_s6_service_package_is_skipped() {
+        // No official greetd-s6 package exists; the service directory is
+        // written by hand in configure_greetd().
+        let services = vec!["greetd".to_string()];
+        let packages = build_service_packages(&services, &InitSystem::S6);
+        assert!(packages.contains(&"greetd".to_string()));
+        assert!(!packages.contains(&"greetd-s6".to_string()));
+    }
 }

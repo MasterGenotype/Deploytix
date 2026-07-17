@@ -215,9 +215,10 @@ pub struct DesktopConfig {
     /// Desktop environment
     #[serde(default)]
     pub environment: DesktopEnvironment,
-    /// Display manager
+    /// Display manager (defaults to greetd auto-login; ignored when
+    /// `environment = "none"`)
     #[serde(default)]
-    pub display_manager: Option<String>,
+    pub display_manager: DisplayManager,
 }
 
 /// Optional package collections
@@ -534,6 +535,53 @@ impl std::fmt::Display for DesktopEnvironment {
             Self::Kde => write!(f, "KDE Plasma"),
             Self::Gnome => write!(f, "GNOME"),
             Self::Xfce => write!(f, "XFCE"),
+        }
+    }
+}
+
+/// Display manager selection for desktop installs.
+///
+/// `Greetd` is the deploytix default and keeps the original behavior:
+/// greetd auto-logins the created user straight into the desktop session
+/// (no greeter). The other variants install a conventional display manager
+/// with its normal login screen. `None` boots to a TTY login; the desktop
+/// can be started manually via `startx` (~/.xinitrc is written per DE).
+///
+/// Ignored when `environment = "none"`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayManager {
+    #[default]
+    Greetd,
+    Sddm,
+    Gdm,
+    Lightdm,
+    None,
+}
+
+impl DisplayManager {
+    /// Service name as registered with the init system. This is also the
+    /// base package name (the Artix service package is `{name}-{init}`).
+    /// `None` for the TTY-login variant, which has no service.
+    pub fn service_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Greetd => Some("greetd"),
+            Self::Sddm => Some("sddm"),
+            Self::Gdm => Some("gdm"),
+            Self::Lightdm => Some("lightdm"),
+            Self::None => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DisplayManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Greetd => write!(f, "greetd (auto-login, deploytix default)"),
+            Self::Sddm => write!(f, "SDDM (login screen)"),
+            Self::Gdm => write!(f, "GDM (login screen)"),
+            Self::Lightdm => write!(f, "LightDM (login screen)"),
+            Self::None => write!(f, "None (TTY login, startx)"),
         }
     }
 }
@@ -901,6 +949,21 @@ impl DeploymentConfig {
         let de_idx = prompt_select("Desktop environment", &desktops, 0)?;
         let environment = desktops[de_idx].clone();
 
+        // Display manager (only meaningful with a desktop environment)
+        let mut display_manager = if environment != DesktopEnvironment::None {
+            let dms = [
+                DisplayManager::Greetd,
+                DisplayManager::Sddm,
+                DisplayManager::Gdm,
+                DisplayManager::Lightdm,
+                DisplayManager::None,
+            ];
+            let dm_idx = prompt_select("Display manager", &dms, 0)?;
+            dms[dm_idx]
+        } else {
+            DisplayManager::None
+        };
+
         // Swap type selection
         let swap_types = [SwapType::Partition, SwapType::FileZram, SwapType::ZramOnly];
         let swap_idx = prompt_select("Swap configuration", &swap_types, 0)?;
@@ -969,6 +1032,16 @@ impl DeploymentConfig {
                  Switching network backend to NetworkManager + iwd."
             );
             backend = NetworkBackend::NetworkManager;
+        }
+
+        // The gamescope ↔ desktop loop (session manager, IPC helper, PAM
+        // files) is built on greetd, so coerce the display manager as well.
+        if install_session_switching && display_manager != DisplayManager::Greetd {
+            println!(
+                "  Note: Game Mode session switching is driven through greetd. \
+                 Switching display manager to greetd."
+            );
+            display_manager = DisplayManager::Greetd;
         }
 
         // yay AUR helper
@@ -1075,7 +1148,7 @@ impl DeploymentConfig {
             },
             desktop: DesktopConfig {
                 environment,
-                display_manager: None,
+                display_manager,
             },
             packages: PackagesConfig {
                 install_yay,
@@ -1145,7 +1218,7 @@ impl DeploymentConfig {
             },
             desktop: DesktopConfig {
                 environment: DesktopEnvironment::Kde,
-                display_manager: Some("sddm".to_string()),
+                display_manager: DisplayManager::default(),
             },
             packages: PackagesConfig::default(),
         }
@@ -1332,6 +1405,16 @@ impl DeploymentConfig {
             if self.desktop.environment == DesktopEnvironment::None {
                 return Err(DeploytixError::ValidationError(
                     "Session switching requires a desktop environment".to_string(),
+                ));
+            }
+            // The gamescope ↔ desktop loop (deploytix-session-manager, the
+            // greetd-ipc helper, the PAM files, and the switch scripts'
+            // `sv restart greetd`) is built on greetd.
+            if self.desktop.display_manager != DisplayManager::Greetd {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching requires display_manager = \"greetd\" \
+                     (the Game Mode ↔ Desktop loop is driven through greetd IPC)"
+                        .to_string(),
                 ));
             }
             // Steam's gamepad UI (Deck OOBE network page, Settings > Internet)
