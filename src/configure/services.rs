@@ -24,6 +24,12 @@ pub fn enable_services(
     // Install required packages for the services before enabling them
     install_service_packages(cmd, config, install_root, &services)?;
 
+    // The service stores just changed: `-s6` packages were installed above
+    // and the greetd definition was written into /etc/s6/adminsv earlier in
+    // the configure phase.  Rebuild the reference database so the enables
+    // below can see every definition (s6-only; no-op otherwise).
+    sync_s6_repository(cmd, &config.system.init, install_root)?;
+
     for service in services {
         // The init-specific elogind service package is blacklisted in
         // build_service_packages() because it conflicts with seatd-<init>,
@@ -178,14 +184,46 @@ pub(crate) fn enable_service(
     }
 }
 
-/// Persist pending s6 service changes by committing the service database.
+/// Rebuild the s6-frontend reference database from the service stores.
+///
+/// `s6 repository sync` must run every time the service definition stores
+/// change (services added, removed, or replaced) — otherwise a following
+/// `s6 set enable` cannot see the new definition and fails or silently
+/// leaves the service out of the set.  Deploytix changes the stores in two
+/// ways: pacman installs `-s6` packages into `/etc/s6/sv`, and custom
+/// definitions (greetd, zram, hhd, plugin_loader, evdevhook2) are written
+/// by hand into `/etc/s6/adminsv`.  Call this after any such change,
+/// before the corresponding `s6 set enable`.
+///
+/// No-op for the other init systems so call sites don't need to guard.
+pub(crate) fn sync_s6_repository(
+    cmd: &CommandRunner,
+    init: &InitSystem,
+    install_root: &str,
+) -> Result<()> {
+    if *init != InitSystem::S6 {
+        return Ok(());
+    }
+
+    info!("Syncing s6 repository (s6 repository sync)");
+    cmd.run_in_chroot(install_root, "s6 repository sync")?;
+
+    Ok(())
+}
+
+/// Persist pending s6 service changes as the boot database.
 ///
 /// With the s6-frontend tooling, `s6 set enable <service>` stages a change
-/// to the default bundle; the boot database is only recompiled once
-/// `s6 set commit` runs.  Call this once after all services have been
-/// enabled — the installer does so in the finalize phase.  `s6 live
-/// install` is deliberately not run: the chroot has no live s6 state, and
-/// the freshly committed database is picked up on first boot.
+/// to the default bundle and `s6 set commit` compiles the set — but the
+/// compiled database still has to be installed as the boot database, or
+/// the installed system boots with whatever the packages shipped instead
+/// of the services staged here.  `s6 live install --init` copies the
+/// compiled database of the current set to the boot location without
+/// touching live s6-rc state (the chroot has none); that is exactly the
+/// first-installation case the `--init` flag exists for.
+///
+/// Call this once after all services have been enabled — the installer
+/// does so in the finalize phase.
 ///
 /// No-op for the other init systems, whose enable operations (symlinks,
 /// `rc-update`) are immediately persistent.
@@ -200,6 +238,9 @@ pub(crate) fn commit_service_database(
 
     info!("Committing s6 service database (s6 set commit)");
     cmd.run_in_chroot(install_root, "s6 set commit")?;
+
+    info!("Installing committed set as the boot database (s6 live install --init)");
+    cmd.run_in_chroot(install_root, "s6 live install --init")?;
 
     Ok(())
 }

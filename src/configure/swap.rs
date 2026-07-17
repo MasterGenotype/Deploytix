@@ -224,9 +224,16 @@ redirfd -w 1 /sys/block/zram0/reset echo 1
     // type — declares this as an s6-rc oneshot (runs once, not supervised)
     fs::write(format!("{}/type", sv_dir), "oneshot\n")?;
 
-    // Add the service to the default bundle via the s6-frontend CLI; the
-    // change is committed to the boot database by `s6 set commit` in the
-    // finalize phase.
+    // The zram definition was just written into /etc/s6/adminsv — rebuild
+    // the reference database so `s6 set enable` can see it, then add the
+    // service to the default bundle.  The staged change is compiled and
+    // installed as the boot database (`s6 set commit` + `s6 live install
+    // --init`) in the finalize phase.
+    crate::configure::services::sync_s6_repository(
+        cmd,
+        &crate::config::InitSystem::S6,
+        install_root,
+    )?;
     cmd.run_in_chroot(install_root, "s6 set enable zram")?;
 
     info!("Created and enabled s6 ZRAM service at {}", sv_dir);

@@ -423,7 +423,8 @@ impl InitSystem {
     /// For s6 this is the default bundle's contents directory.  Do not
     /// write to it directly: since Artix moved to the upstream s6-frontend,
     /// services are enabled with `s6 set enable <name>` and persisted with
-    /// `s6 set commit` (see `configure::services::enable_s6_service`).
+    /// `s6 set commit` + `s6 live install --init` (see
+    /// `configure::services::{enable_s6_service, commit_service_database}`).
     pub fn enabled_dir(&self) -> &str {
         match self {
             Self::Runit => "/run/runit/service",

@@ -363,6 +363,14 @@ impl Installer {
         if self.config.packages.install_hhd {
             self.report_progress(0.910, "Installing Handheld Daemon (HHD)...");
             self.install_hhd()?;
+            // install_hhd() writes the service definition (for s6, into
+            // /etc/s6/adminsv) — sync the s6 repository so the enable can
+            // see it (no-op for other init systems).
+            configure::services::sync_s6_repository(
+                &self.cmd,
+                &self.config.system.init,
+                INSTALL_ROOT,
+            )?;
             configure::services::enable_service(
                 &self.cmd,
                 &self.config.system.init,
@@ -375,6 +383,12 @@ impl Installer {
         if self.config.packages.install_decky_loader {
             self.report_progress(0.925, "Installing Decky Loader...");
             self.install_decky_loader()?;
+            // Fresh plugin_loader definition — sync before enabling (s6-only).
+            configure::services::sync_s6_repository(
+                &self.cmd,
+                &self.config.system.init,
+                INSTALL_ROOT,
+            )?;
             configure::services::enable_service(
                 &self.cmd,
                 &self.config.system.init,
@@ -387,6 +401,12 @@ impl Installer {
         if self.config.packages.install_evdevhook2 {
             self.report_progress(0.935, "Installing evdevhook2...");
             self.install_evdevhook2()?;
+            // Fresh evdevhook2 definition — sync before enabling (s6-only).
+            configure::services::sync_s6_repository(
+                &self.cmd,
+                &self.config.system.init,
+                INSTALL_ROOT,
+            )?;
             configure::services::enable_service(
                 &self.cmd,
                 &self.config.system.init,
@@ -1015,8 +1035,9 @@ impl Installer {
         info!("[Phase 6/6] Finalizing installation (regenerating initramfs, unmounting)");
 
         // Commit the s6 service database: every `s6 set enable` staged in
-        // the earlier phases is compiled into the boot database in one go
-        // (no-op for the other init systems).
+        // the earlier phases is compiled (`s6 set commit`) and installed as
+        // the boot database (`s6 live install --init`) in one go (no-op for
+        // the other init systems).
         configure::services::commit_service_database(
             &self.cmd,
             &self.config.system.init,
