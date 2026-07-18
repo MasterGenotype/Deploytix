@@ -419,22 +419,9 @@ fn home_dir_for_uid(uid: u32) -> Option<PathBuf> {
 fn locate_prebuilt_packages() -> Vec<PathBuf> {
     let mut search_dirs: Vec<PathBuf> = Vec::new();
 
-    // 1. Relative to the running binary (repo_root/target/release/deploytix).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(repo_root) = exe
-            .parent() // target/release/
-            .and_then(|p| p.parent()) // target/
-            .and_then(|p| p.parent())
-        // repo root
-        {
-            search_dirs.push(repo_root.join("pkg"));
-            // Vendored submodules inside the deploytix repo.
-            search_dirs.push(repo_root.join("vendor/gamescope/pkg"));
-            search_dirs.push(repo_root.join("vendor/tkg-gui/pkg"));
-        }
-    }
-
-    // 2. Invoking user's home (works for both sudo and pkexec/polkit).
+    // Everything is anchored to the invoking user's deploytix repo clone:
+    // pkg/ holds deploytix's own PKGBUILD/packages, vendor/ the vendored
+    // submodules. No binary- or CWD-relative guessing.
     let invoking_home = resolve_invoking_user_home();
     if let Some(ref home) = invoking_home {
         info!("Resolved invoking user home: {}", home.display());
@@ -448,11 +435,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             std::env::var("PKEXEC_UID").ok(),
         );
     }
-
-    // 3. Current working directory (might be repo root).
-    search_dirs.push(PathBuf::from("pkg"));
-    search_dirs.push(PathBuf::from("vendor/gamescope/pkg"));
-    search_dirs.push(PathBuf::from("vendor/tkg-gui/pkg"));
 
     info!(
         "Package search directories: {:?}",
@@ -517,43 +499,18 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
         return None;
     }
 
+    // Anchored to the invoking user's deploytix repo clone: pkg/ for
+    // deploytix's own PKGBUILD, vendor/<repo> for the vendored submodules
+    // (whose PKGBUILD may live at the submodule root or in its pkg/
+    // subdirectory).
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let is_deploytix = repo_name == "deploytix";
-
-    // Relative to running binary.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(repo_root) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            if is_deploytix {
-                candidates.push(repo_root.join("pkg"));
-            } else {
-                // Vendored submodule inside the deploytix repo (PKGBUILD may
-                // live at the submodule root or in its pkg/ subdirectory).
-                candidates.push(repo_root.join("vendor").join(repo_name).join("pkg"));
-                candidates.push(repo_root.join("vendor").join(repo_name));
-            }
-        }
-    }
-
-    // Invoking user's home.
     if let Some(home) = resolve_invoking_user_home() {
-        if is_deploytix {
+        if repo_name == "deploytix" {
             candidates.push(home.join(".gitrepos/deploytix/pkg"));
         } else {
             candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}/pkg", repo_name)));
             candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}", repo_name)));
         }
-    }
-
-    // CWD may be the deploytix repo root (with checked-out submodules).
-    if is_deploytix {
-        candidates.push(PathBuf::from("pkg"));
-    } else {
-        candidates.push(PathBuf::from(format!("vendor/{}/pkg", repo_name)));
-        candidates.push(PathBuf::from(format!("vendor/{}", repo_name)));
     }
 
     candidates.into_iter().find(|d| d.join("PKGBUILD").exists())
