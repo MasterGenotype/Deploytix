@@ -385,7 +385,7 @@ fn resolve_invoking_user_home() -> Option<PathBuf> {
     }
 
     // 3. Scan /home for a directory containing a deploytix checkout.
-    let scan_markers = [".gitrepos/deploytix-2/pkg", ".gitrepos/gamescope/pkg"];
+    let scan_markers = [".gitrepos/deploytix/pkg"];
     if let Ok(entries) = std::fs::read_dir("/home") {
         for entry in entries.flatten() {
             let candidate = entry.path();
@@ -422,31 +422,15 @@ fn home_dir_for_uid(uid: u32) -> Option<PathBuf> {
 fn locate_prebuilt_packages() -> Vec<PathBuf> {
     let mut search_dirs: Vec<PathBuf> = Vec::new();
 
-    // 1. Relative to the running binary (repo_root/target/release/deploytix).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(repo_root) = exe
-            .parent() // target/release/
-            .and_then(|p| p.parent()) // target/
-            .and_then(|p| p.parent())
-        // repo root
-        {
-            search_dirs.push(repo_root.join("pkg"));
-            // Sibling repos.
-            if let Some(parent) = repo_root.parent() {
-                search_dirs.push(parent.join("gamescope/pkg"));
-                search_dirs.push(parent.join("tkg-gui/pkg"));
-            }
-        }
-    }
-
-    // 2. Invoking user's home (works for both sudo and pkexec/polkit).
+    // Everything is anchored to the invoking user's deploytix repo clone:
+    // pkg/ holds deploytix's own PKGBUILD/packages, vendor/ the vendored
+    // submodules. No binary- or CWD-relative guessing.
     let invoking_home = resolve_invoking_user_home();
     if let Some(ref home) = invoking_home {
         info!("Resolved invoking user home: {}", home.display());
-        search_dirs.push(home.join(".gitrepos/deploytix-2/pkg"));
-        search_dirs.push(home.join(".gitrepos/gamescope/pkg"));
-        search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
-        search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
+        search_dirs.push(home.join(".gitrepos/deploytix/pkg"));
+        search_dirs.push(home.join(".gitrepos/deploytix/vendor/gamescope/pkg"));
+        search_dirs.push(home.join(".gitrepos/deploytix/vendor/tkg-gui/pkg"));
     } else {
         warn!(
             "Could not resolve invoking user home (SUDO_USER={:?}, PKEXEC_UID={:?})",
@@ -454,16 +438,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
             std::env::var("PKEXEC_UID").ok(),
         );
     }
-
-    // 3. Current working directory (might be repo root).
-    search_dirs.push(PathBuf::from("pkg"));
-
-    // 4. System pacman cache — packages previously installed via pacman
-    //    will have their archive here.
-    search_dirs.push(PathBuf::from("/var/cache/pacman/pkg"));
-
-    // 5. Local artools repo that build-deploytix-iso.sh creates.
-    search_dirs.push(PathBuf::from("/var/lib/artools/repos/deploytix"));
 
     info!(
         "Package search directories: {:?}",
@@ -513,7 +487,7 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
 /// contains its PKGBUILD.
 fn repo_dir_for_package(pkg_name: &str) -> &'static str {
     match pkg_name {
-        "deploytix-git" | "deploytix-gui-git" => "deploytix-2",
+        "deploytix-git" | "deploytix-gui-git" => "deploytix",
         "gamescope-git" => "gamescope",
         "tkg-gui-git" => "tkg-gui",
         _ => "",
@@ -528,34 +502,18 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
         return None;
     }
 
+    // Anchored to the invoking user's deploytix repo clone: pkg/ for
+    // deploytix's own PKGBUILD, vendor/<repo> for the vendored submodules
+    // (whose PKGBUILD may live at the submodule root or in its pkg/
+    // subdirectory).
     let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Relative to running binary.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(repo_root) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            if repo_name == "deploytix-2" {
-                candidates.push(repo_root.join("pkg"));
-            } else if let Some(parent) = repo_root.parent() {
-                candidates.push(parent.join(repo_name).join("pkg"));
-            }
-        }
-    }
-
-    // Invoking user's home.
     if let Some(home) = resolve_invoking_user_home() {
-        candidates.push(home.join(format!(".gitrepos/{}/pkg", repo_name)));
-        if repo_name == "tkg-gui" {
-            candidates.push(home.join("artools-workspace/tkg-gui-src/pkg"));
+        if repo_name == "deploytix" {
+            candidates.push(home.join(".gitrepos/deploytix/pkg"));
+        } else {
+            candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}/pkg", repo_name)));
+            candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}", repo_name)));
         }
-    }
-
-    // CWD for deploytix itself.
-    if repo_name == "deploytix-2" {
-        candidates.push(PathBuf::from("pkg"));
     }
 
     candidates.into_iter().find(|d| d.join("PKGBUILD").exists())
@@ -869,7 +827,7 @@ pub fn prepare_deploytix_repo(
              To fix, try one of:\n\
              - Run from the Deploytix live ISO (has all packages embedded)\n\
              - Build packages first: cd pkg && makepkg -s\n\
-             - Clone sibling repos (tkg-gui) and build their PKGBUILDs\n\
+             - Initialize vendored submodules: git submodule update --init --recursive\n\
              - Run iso/build-deploytix-iso.sh to build everything at once",
             missing_str
         )));

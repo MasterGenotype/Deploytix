@@ -39,8 +39,10 @@ pub fn format_partition(
             cmd.run("mkfs.ext4", &args)
         }
         Filesystem::Btrfs => {
+            let compat_args = btrfs_runtime_compat_args();
             let mut args = vec!["-f"];
             args.extend(&label_args);
+            args.extend(compat_args.iter().map(|s| s.as_str()));
             args.push(partition);
             cmd.run("mkfs.btrfs", &args)
         }
@@ -83,6 +85,57 @@ pub fn format_partition(
     result.map(|_| ()).map_err(|e| {
         DeploytixError::FilesystemError(format!("Failed to format {}: {}", partition, e))
     })
+}
+
+/// Extra `mkfs.btrfs -O` arguments that keep the new filesystem mountable by
+/// the running kernel.  btrfs-progs >= 6.7 enables `block-group-tree` by
+/// default, but kernels older than 6.1 cannot mount such a filesystem
+/// ("cannot mount read-write because of unsupported optional features (0x8)").
+/// The installer must mount what it formats, so the feature is disabled when
+/// the running kernel lacks it (e.g. installing from an older host or live
+/// environment).  The installed system's own kernel is newer and unaffected.
+fn btrfs_runtime_compat_args() -> Vec<String> {
+    let mkfs_knows_feature = std::process::Command::new("mkfs.btrfs")
+        .args(["-O", "list-all"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).contains("block-group-tree")
+                || String::from_utf8_lossy(&o.stderr).contains("block-group-tree")
+        })
+        .unwrap_or(false);
+    if !mkfs_knows_feature {
+        return Vec::new();
+    }
+
+    // Once the btrfs module is loaded the kernel advertises its mountable
+    // features under /sys/fs/btrfs/features; fall back to a version check
+    // when the directory is absent.
+    let features_dir = std::path::Path::new("/sys/fs/btrfs/features");
+    let kernel_supports = if features_dir.is_dir() {
+        features_dir.join("block_group_tree").exists()
+    } else {
+        kernel_at_least(6, 1)
+    };
+
+    if kernel_supports {
+        Vec::new()
+    } else {
+        info!("Running kernel lacks btrfs block-group-tree support; disabling it for mkfs.btrfs");
+        vec!["-O".into(), "^block-group-tree".into()]
+    }
+}
+
+/// Whether the running kernel version is at least `major.minor`.
+/// Returns true when the version cannot be determined (keep mkfs defaults).
+fn kernel_at_least(major: u32, minor: u32) -> bool {
+    let release = match fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(r) => r,
+        Err(_) => return true,
+    };
+    let mut parts = release.trim().split(['.', '-']);
+    let maj: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let min: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (maj, min) >= (major, minor)
 }
 
 /// Format the EFI partition as FAT32

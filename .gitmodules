@@ -4,5 +4,5 @@
 	branch = main
 [submodule "vendor/gamescope"]
 	path = vendor/gamescope
-	url = git@github.com:MasterGenotype/gamescope.git
+	url = https://github.com/MasterGenotype/gamescope.git
 	branch = gamescope-ba
