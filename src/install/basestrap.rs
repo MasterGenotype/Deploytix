@@ -454,13 +454,6 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     search_dirs.push(PathBuf::from("vendor/gamescope/pkg"));
     search_dirs.push(PathBuf::from("vendor/tkg-gui/pkg"));
 
-    // 4. System pacman cache — packages previously installed via pacman
-    //    will have their archive here.
-    search_dirs.push(PathBuf::from("/var/cache/pacman/pkg"));
-
-    // 5. Local artools repo that build-deploytix-iso.sh creates.
-    search_dirs.push(PathBuf::from("/var/lib/artools/repos/deploytix"));
-
     info!(
         "Package search directories: {:?}",
         search_dirs
@@ -874,8 +867,7 @@ pub fn prepare_deploytix_repo(
              To fix, try one of:\n\
              - Run from the Deploytix live ISO (has all packages embedded)\n\
              - Build packages first: cd pkg && makepkg -s\n\
-             - Initialize vendored submodules: git submodule update --init --recursive \
-             (or run scripts/bootstrap.sh)\n\
+             - Initialize vendored submodules: git submodule update --init --recursive\n\
              - Run iso/build-deploytix-iso.sh to build everything at once",
             missing_str
         )));
