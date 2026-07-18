@@ -10,7 +10,7 @@ use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use tracing::info;
+use tracing::{info, warn};
 
 /// GRUB modules to embed for standalone EFI binary
 /// Includes crypto modules for LUKS encryption support
@@ -342,6 +342,25 @@ pub fn create_efi_boot_entry(
     if cmd.is_dry_run() {
         println!("  [dry-run] efibootmgr --create --disk {} --part {} --loader /EFI/BOOT/BOOTX64.EFI --label '{}'",
             device, efi_partition, label);
+        return Ok(());
+    }
+
+    // NVRAM entries require EFI variables, which are absent when the
+    // installing host is BIOS-booted (common on VPSes) or the chroot has no
+    // efivarfs. The loader sits at the removable fallback path
+    // /EFI/BOOT/BOOTX64.EFI, which UEFI firmware boots without an NVRAM
+    // entry, so the target stays bootable — skip registration instead of
+    // failing the install.
+    let efivars = std::path::Path::new("/sys/firmware/efi/efivars");
+    let efivars_usable = fs::read_dir(efivars)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !efivars_usable {
+        warn!(
+            "EFI variables unavailable on this host; skipping efibootmgr registration for '{}' \
+             (the removable-path loader /EFI/BOOT/BOOTX64.EFI boots without an NVRAM entry)",
+            label
+        );
         return Ok(());
     }
 
