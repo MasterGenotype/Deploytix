@@ -428,6 +428,9 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
         // repo root
         {
             search_dirs.push(repo_root.join("pkg"));
+            // Vendored submodules inside the deploytix repo.
+            search_dirs.push(repo_root.join("vendor/gamescope/pkg"));
+            search_dirs.push(repo_root.join("vendor/tkg-gui/pkg"));
             // Sibling repos.
             if let Some(parent) = repo_root.parent() {
                 search_dirs.push(parent.join("gamescope/pkg"));
@@ -441,6 +444,8 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
     if let Some(ref home) = invoking_home {
         info!("Resolved invoking user home: {}", home.display());
         search_dirs.push(home.join(".gitrepos/deploytix-2/pkg"));
+        search_dirs.push(home.join(".gitrepos/deploytix/vendor/gamescope/pkg"));
+        search_dirs.push(home.join(".gitrepos/deploytix/vendor/tkg-gui/pkg"));
         search_dirs.push(home.join(".gitrepos/gamescope/pkg"));
         search_dirs.push(home.join(".gitrepos/tkg-gui/pkg"));
         search_dirs.push(home.join("artools-workspace/tkg-gui-src/pkg"));
@@ -536,8 +541,14 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
         {
             if repo_name == "deploytix-2" {
                 candidates.push(repo_root.join("pkg"));
-            } else if let Some(parent) = repo_root.parent() {
-                candidates.push(parent.join(repo_name).join("pkg"));
+            } else {
+                // Vendored submodule inside the deploytix repo (PKGBUILD may
+                // live at the submodule root or in its pkg/ subdirectory).
+                candidates.push(repo_root.join("vendor").join(repo_name).join("pkg"));
+                candidates.push(repo_root.join("vendor").join(repo_name));
+                if let Some(parent) = repo_root.parent() {
+                    candidates.push(parent.join(repo_name).join("pkg"));
+                }
             }
         }
     }
@@ -545,6 +556,10 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
     // Invoking user's home.
     if let Some(home) = resolve_invoking_user_home() {
         candidates.push(home.join(format!(".gitrepos/{}/pkg", repo_name)));
+        if repo_name != "deploytix-2" {
+            candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}/pkg", repo_name)));
+            candidates.push(home.join(format!(".gitrepos/deploytix/vendor/{}", repo_name)));
+        }
         if repo_name == "tkg-gui" {
             candidates.push(home.join("artools-workspace/tkg-gui-src/pkg"));
         }
@@ -553,6 +568,10 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
     // CWD for deploytix itself.
     if repo_name == "deploytix-2" {
         candidates.push(PathBuf::from("pkg"));
+    } else {
+        // CWD may be the deploytix repo root with checked-out submodules.
+        candidates.push(PathBuf::from(format!("vendor/{}/pkg", repo_name)));
+        candidates.push(PathBuf::from(format!("vendor/{}", repo_name)));
     }
 
     candidates.into_iter().find(|d| d.join("PKGBUILD").exists())
