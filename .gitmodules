@@ -1,7 +1,7 @@
 [submodule "vendor/tkg-gui"]
 	path = vendor/tkg-gui
 	url = https://github.com/MasterGenotype/tkg-gui.git
-	branch = main
+	branch = claude/pkgbuild-https
 [submodule "vendor/gamescope"]
 	path = vendor/gamescope
 	url = https://github.com/MasterGenotype/gamescope.git
