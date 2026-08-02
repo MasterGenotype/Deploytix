@@ -24,6 +24,12 @@ pub fn enable_services(
     // Install required packages for the services before enabling them
     install_service_packages(cmd, config, install_root, &services)?;
 
+    // The service stores just changed: `-s6` packages were installed above
+    // and the greetd definition was written into /etc/s6/adminsv earlier in
+    // the configure phase.  Rebuild the reference database so the enables
+    // below can see every definition (s6-only; no-op otherwise).
+    sync_s6_repository(cmd, &config.system.init, install_root)?;
+
     for service in services {
         // The init-specific elogind service package is blacklisted in
         // build_service_packages() because it conflicts with seatd-<init>,
@@ -65,7 +71,7 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
     // default; DisplayManager::None boots to a TTY login with no DM service).
     // No official greetd-s6 package exists, so for S6 we write the service
     // directory ourselves in configure_greetd(); enable_s6_service() will
-    // then find greetd-srv and touch the bundle entry as usual.
+    // then find it and add it to the default bundle via `s6 set enable`.
     if config.desktop.environment != DesktopEnvironment::None {
         if let Some(dm_service) = config.desktop.display_manager.service_name() {
             services.push(dm_service.to_string());
@@ -181,9 +187,70 @@ pub(crate) fn enable_service(
     match init {
         InitSystem::Runit => enable_runit_service(service, install_root),
         InitSystem::OpenRC => enable_openrc_service(cmd, service, install_root),
-        InitSystem::S6 => enable_s6_service(service, install_root),
+        InitSystem::S6 => enable_s6_service(cmd, service, install_root),
         InitSystem::Dinit => enable_dinit_service(service, install_root),
     }
+}
+
+/// Rebuild the s6-frontend reference database from the service stores.
+///
+/// `s6 repository sync` must run every time the service definition stores
+/// change (services added, removed, or replaced) — otherwise a following
+/// `s6 set enable` cannot see the new definition and fails or silently
+/// leaves the service out of the set.  Deploytix changes the stores in two
+/// ways: pacman installs `-s6` packages into `/etc/s6/sv`, and custom
+/// definitions (greetd, zram, hhd, plugin_loader, evdevhook2) are written
+/// by hand into `/etc/s6/adminsv`.  Call this after any such change,
+/// before the corresponding `s6 set enable`.
+///
+/// No-op for the other init systems so call sites don't need to guard.
+pub(crate) fn sync_s6_repository(
+    cmd: &CommandRunner,
+    init: &InitSystem,
+    install_root: &str,
+) -> Result<()> {
+    if *init != InitSystem::S6 {
+        return Ok(());
+    }
+
+    info!("Syncing s6 repository (s6 repository sync)");
+    cmd.run_in_chroot(install_root, "s6 repository sync")?;
+
+    Ok(())
+}
+
+/// Persist pending s6 service changes as the boot database.
+///
+/// With the s6-frontend tooling, `s6 set enable <service>` stages a change
+/// to the default bundle and `s6 set commit` compiles the set — but the
+/// compiled database still has to be installed as the boot database, or
+/// the installed system boots with whatever the packages shipped instead
+/// of the services staged here.  `s6 live install --init` copies the
+/// compiled database of the current set to the boot location without
+/// touching live s6-rc state (the chroot has none); that is exactly the
+/// first-installation case the `--init` flag exists for.
+///
+/// Call this once after all services have been enabled — the installer
+/// does so in the finalize phase.
+///
+/// No-op for the other init systems, whose enable operations (symlinks,
+/// `rc-update`) are immediately persistent.
+pub(crate) fn commit_service_database(
+    cmd: &CommandRunner,
+    init: &InitSystem,
+    install_root: &str,
+) -> Result<()> {
+    if *init != InitSystem::S6 {
+        return Ok(());
+    }
+
+    info!("Committing s6 service database (s6 set commit)");
+    cmd.run_in_chroot(install_root, "s6 set commit")?;
+
+    info!("Installing committed set as the boot database (s6 live install --init)");
+    cmd.run_in_chroot(install_root, "s6 live install --init")?;
+
+    Ok(())
 }
 
 /// Enable a runit service by creating symlink from runsvdir/default to sv/
@@ -235,38 +302,52 @@ fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str)
     Ok(())
 }
 
-/// Map service names to their s6 service directory names.
+/// Locate the s6 service definition for `service` on the target system.
 ///
-/// Artix s6 packages use a `-srv` suffix for service directories.
-/// For example, NetworkManager's s6 service directory is 'NetworkManager-srv'.
-fn map_s6_service_name(service: &str) -> String {
-    format!("{}-srv", service)
+/// Definitions from official `-s6` packages live in `/etc/s6/sv`; custom
+/// services written by deploytix live in `/etc/s6/adminsv` (the directory
+/// reserved for admin-defined s6-rc services).  Since the move to
+/// s6-frontend, Artix packages ship service directories under the plain
+/// service name; the legacy in-house `{name}-srv` layout is still checked
+/// as a fallback for transition-era packages.
+///
+/// Returns the name to pass to `s6 set enable`, or `None` when no
+/// definition exists.
+fn resolve_s6_service_name(service: &str, install_root: &str) -> Option<String> {
+    let legacy = format!("{}-srv", service);
+    for name in [service, legacy.as_str()] {
+        for base in ["etc/s6/sv", "etc/s6/adminsv"] {
+            if Path::new(&format!("{}/{}/{}", install_root, base, name)).exists() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
-/// Enable an s6 service
+/// Enable an s6 service via the s6-frontend CLI.
 ///
-/// Service directories are provided by official `-s6` packages from the Artix
-/// repositories (e.g. `seatd-s6`, `iwd-s6`).  If the directory is missing the
-/// corresponding package was not installed and we skip with a warning.
-fn enable_s6_service(service: &str, install_root: &str) -> Result<()> {
-    let s6_service_name = map_s6_service_name(service);
-    let service_dir = format!("{}/etc/s6/sv/{}", install_root, s6_service_name);
-    let enabled_dir = format!("{}/etc/s6/adminsv/default/contents.d", install_root);
-    let link_path = format!("{}/{}", enabled_dir, s6_service_name);
-
-    // Service directories come from official *-s6 packages; skip if missing
-    if !Path::new(&service_dir).exists() {
+/// Artix manages s6 with upstream's s6-frontend: `s6 set enable <service>`
+/// adds the service to the default bundle, replacing the old in-house
+/// scheme of touching empty files in `/etc/s6/adminsv/default/contents.d/`.
+/// The staged change is made persistent by a single `s6 set commit` in the
+/// finalize phase (see [`commit_service_database`]).
+///
+/// Service definitions come from official `-s6` packages (e.g. `seatd-s6`,
+/// `iwd-s6`) or are written by deploytix into `/etc/s6/adminsv`.  If no
+/// definition is found the corresponding package was not installed and we
+/// skip with a warning.
+fn enable_s6_service(cmd: &CommandRunner, service: &str, install_root: &str) -> Result<()> {
+    let Some(s6_service_name) = resolve_s6_service_name(service, install_root) else {
         warn!(
-            "Service {} not found at {} (is the corresponding -s6 package installed?), skipping",
-            service, service_dir
+            "Service {} not found under /etc/s6/sv or /etc/s6/adminsv \
+             (is the corresponding -s6 package installed?), skipping",
+            service
         );
         return Ok(());
-    }
+    };
 
-    fs::create_dir_all(&enabled_dir)?;
-
-    // s6 uses touch files to declare wanted services in a bundle
-    fs::write(&link_path, "")?;
+    cmd.run_in_chroot(install_root, &format!("s6 set enable {}", s6_service_name))?;
     info!("Enabled s6 service {}", service);
 
     Ok(())
