@@ -100,7 +100,7 @@ user = "{user}"
 /// entry in `/etc/s6/adminsv/default/contents.d/greetd-srv`.
 ///
 /// Structure created:
-/// ```
+/// ```text
 /// /etc/s6/sv/greetd-srv/
 ///   type        — "longrun" (required by s6-rc)
 ///   run         — exec /usr/bin/greetd
