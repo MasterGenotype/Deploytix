@@ -807,6 +807,20 @@ impl Installer {
                 &self.config.disk.device,
                 INSTALL_ROOT,
             )?;
+
+            // grub-btrfs (if the user later installs it) aborts grub-mkconfig
+            // on encrypted btrfs layouts, silently breaking GRUB regeneration
+            // on every kernel update. Ship the compat patch + pacman hook now;
+            // both are inert until grub-btrfs appears.
+            if self.config.disk.encryption
+                && self.config.disk.filesystem == crate::config::Filesystem::Btrfs
+            {
+                configure::bootloader::create_grub_btrfs_compat(
+                    &self.cmd,
+                    &self.config,
+                    INSTALL_ROOT,
+                )?;
+            }
         } else {
             let layout = self.layout.as_ref().unwrap();
             configure::bootloader::install_bootloader(
@@ -821,8 +835,13 @@ impl Installer {
         // Network
         configure::network::configure_network(&self.cmd, &self.config, INSTALL_ROOT)?;
 
-        // greetd configuration (if desktop environment selected)
-        configure::greetd::configure_greetd(&self.cmd, &self.config, INSTALL_ROOT)?;
+        // Display manager configuration (if desktop environment selected);
+        // dispatches on desktop.display_manager (greetd auto-login default)
+        configure::display_manager::configure_display_manager(
+            &self.cmd,
+            &self.config,
+            INSTALL_ROOT,
+        )?;
 
         // Services
         configure::services::enable_services(&self.cmd, &self.config, INSTALL_ROOT)?;

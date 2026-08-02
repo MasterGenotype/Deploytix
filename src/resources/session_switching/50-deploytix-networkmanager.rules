@@ -1,0 +1,12 @@
+// Deployed by deploytix (session switching / gamescope Game Mode).
+//
+// Steam's gamepad UI (Deck OOBE network page and Settings > Internet)
+// configures Wi-Fi by driving NetworkManager over D-Bus. The gamescope
+// session user has no way to answer a polkit password prompt from inside
+// Steam, so grant that user NetworkManager control without authentication.
+polkit.addRule(function (action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+        subject.user === "@DEPLOYTIX_USER@") {
+        return polkit.Result.YES;
+    }
+});

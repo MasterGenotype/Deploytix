@@ -12,7 +12,6 @@ const KDE_PACKAGES: &[&str] = &[
     "plasma-workspace",
     "konsole",
     "dolphin",
-    "sddm",
     // KDE audio integration
     "plasma-pa",
     "kpipewire",
@@ -40,14 +39,10 @@ const KDE_S6_PACKAGES: &[&str] = &["bluez-s6", "power-profiles-daemon-s6"];
 pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing KDE Plasma desktop environment");
 
-    let use_session_switching = config.packages.install_session_switching;
-
-    // Build package list, excluding sddm when session switching is active (greetd replaces it)
-    let mut packages: Vec<&str> = KDE_PACKAGES
-        .iter()
-        .filter(|&&pkg| !(use_session_switching && pkg == "sddm"))
-        .copied()
-        .collect();
+    // Display manager packages and configuration are handled centrally
+    // (configure::services / configure::display_manager) based on
+    // desktop.display_manager.
+    let mut packages: Vec<&str> = KDE_PACKAGES.to_vec();
 
     // Add s6-specific service packages
     if config.system.init == InitSystem::S6 {
@@ -56,12 +51,6 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
 
     if cmd.is_dry_run() {
         println!("  [dry-run] Would install KDE packages: {:?}", packages);
-        if !use_session_switching {
-            let sddm_service = format!("sddm-{}", config.system.init);
-            println!("  [dry-run] Would install sddm service: {}", sddm_service);
-        } else {
-            println!("  [dry-run] Skipping SDDM (session switching uses greetd)");
-        }
         if config.system.init == InitSystem::S6 {
             println!(
                 "  [dry-run] Would install s6 service packages: {:?}",
@@ -74,9 +63,6 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
     // Build the full package list (including init-specific service
     // pkgs) up front so we can preflight resolution before pacman runs.
     let mut all_pkgs: Vec<String> = packages.iter().map(|s| (*s).to_string()).collect();
-    if !use_session_switching {
-        all_pkgs.push(format!("sddm-{}", config.system.init));
-    }
     if config.system.init != InitSystem::S6 {
         all_pkgs.push(format!("bluez-{}", config.system.init));
         all_pkgs.push(format!("power-profiles-daemon-{}", config.system.init));
@@ -84,11 +70,6 @@ pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &st
 
     let install_cmd = format!("pacman -S --noconfirm {}", all_pkgs.join(" "));
     crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
-
-    // Configure SDDM (skip when session switching uses greetd instead)
-    if !use_session_switching {
-        configure_sddm(cmd, install_root)?;
-    }
 
     // Create .xinitrc for startx fallback
     let username = &config.user.name;
@@ -120,25 +101,4 @@ X-KDE-StartupNotify=true
 "#,
         bindir
     )
-}
-
-/// Configure SDDM display manager
-fn configure_sddm(_cmd: &CommandRunner, install_root: &str) -> Result<()> {
-    info!("Configuring SDDM");
-
-    let sddm_conf_dir = format!("{}/etc/sddm.conf.d", install_root);
-    fs::create_dir_all(&sddm_conf_dir)?;
-
-    // Basic SDDM configuration
-    let sddm_conf = r#"[Theme]
-Current=breeze
-
-[Users]
-MaximumUid=60000
-MinimumUid=1000
-"#;
-
-    fs::write(format!("{}/kde_settings.conf", sddm_conf_dir), sddm_conf)?;
-
-    Ok(())
 }

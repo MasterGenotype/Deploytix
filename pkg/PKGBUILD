@@ -1,13 +1,13 @@
 # Maintainer: superphenotype
 pkgbase=deploytix-git
 pkgname=('deploytix-git' 'deploytix-gui-git')
-pkgver=1.2.6.rr9.ge34a93c.9.gfb8e963.38.g8958dc3
+pkgver=1.2.6.rr9.ge34a93c.9.gfb8e963.39.g3c3451e.11.gd3120d1
 pkgrel=1
 pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
 arch=('x86_64')
 url="https://github.com/MasterGenotype/Deploytix"
 license=('GPL-3.0-or-later')
-makedepends=('cargo' 'git' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+makedepends=('cargo' 'git' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'libx11' 'libxcursor' 'wayland' 'mesa')
 source=()
 sha256sums=()
 
@@ -59,7 +59,7 @@ package_deploytix-git() {
 
 package_deploytix-gui-git() {
     pkgdesc="Automated Artix Linux deployment installer (GUI)"
-    depends=('deploytix-git' 'alsa-lib' 'libxkbcommon' 'libxcb' 'wayland' 'mesa')
+    depends=('deploytix-git' 'alsa-lib' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'libx11' 'libxcursor' 'wayland' 'mesa')
     provides=('deploytix-gui')
     conflicts=('deploytix-gui')
 

@@ -6,30 +6,24 @@ use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
 
-/// GNOME packages
-const GNOME_PACKAGES: &[&str] = &["gnome", "gnome-extra", "gdm"];
+/// GNOME packages (display manager handled centrally via desktop.display_manager)
+const GNOME_PACKAGES: &[&str] = &["gnome", "gnome-extra"];
 
 /// Install GNOME desktop environment
 pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
     info!("Installing GNOME desktop environment");
-
-    // Get init-specific gdm package
-    let gdm_service = format!("gdm-{}", config.system.init);
 
     if cmd.is_dry_run() {
         println!(
             "  [dry-run] Would install GNOME packages: {:?}",
             GNOME_PACKAGES
         );
-        println!("  [dry-run] Would install gdm service: {}", gdm_service);
         return Ok(());
     }
 
     // Install packages
     let pkg_list = GNOME_PACKAGES.join(" ");
-    let mut all_pkgs: Vec<String> = GNOME_PACKAGES.iter().map(|s| (*s).to_string()).collect();
-    all_pkgs.push(gdm_service.clone());
-    let install_cmd = format!("pacman -S --noconfirm {} {}", pkg_list, gdm_service);
+    let install_cmd = format!("pacman -S --noconfirm {}", pkg_list);
     crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
 
     // Create .xinitrc for startx fallback

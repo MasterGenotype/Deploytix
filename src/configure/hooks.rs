@@ -413,13 +413,27 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
         .any(|p| p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT"));
     if has_root {
         if use_subvolumes {
-            // Mount root with @ subvolume
+            // Root subvolume comes from the kernel cmdline: grub-btrfs snapshot
+            // menu entries override rootflags=...,subvol=<path>, and honouring
+            // it here is what makes those entries boot the selected snapshot
+            // instead of the live subvolume.
             let root_svols = multi_volume_subvolumes("Root");
             volume_mounts.push_str(&format!(
-                r#"    # Mount root first (required) — subvol={sv_name}
-    echo "[mountcrypt] === Mounting root (subvol={sv_name}) ==="
-    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol={sv_name},{sv_opts}"; then
-        echo "[mountcrypt] FATAL: Cannot mount root filesystem" >&2
+                r#"    # Resolve root subvol from cmdline (snapshot booting support)
+    local root_subvol
+    root_subvol=$(resolve_root_subvol)
+    echo "[mountcrypt] Root subvol resolved from cmdline: $root_subvol"
+
+    # Mount root first (required)
+    echo "[mountcrypt] === Mounting root (subvol=$root_subvol) ==="
+    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol=${{root_subvol}},{sv_opts}"; then
+        echo "[mountcrypt] FATAL: Cannot mount root filesystem (subvol=$root_subvol)" >&2
+        if [ "$root_subvol" != "{sv_name}" ]; then
+            echo "[mountcrypt] HINT: snapper snapshots are read-only by default; this mount tried rw." >&2
+            echo "[mountcrypt]       To boot a RO snapshot, make it writable from the live system first:" >&2
+            echo "[mountcrypt]         snapper -c root modify <num> --read-write" >&2
+            echo "[mountcrypt]       Or set the property directly: btrfs property set <path> ro false" >&2
+        fi
         return 1
     fi
 "#,
@@ -516,6 +530,50 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
         }
     }
 
+    // resolve_root_subvol is only emitted (and used) when root is mounted from
+    // a btrfs subvolume; plain-filesystem roots ignore rootflags entirely.
+    let resolve_fn = if use_subvolumes && has_root {
+        let root_svols = multi_volume_subvolumes("Root");
+        format!(
+            r#"# Resolve the root subvolume from /proc/cmdline.
+# Honours rootflags=subvol=<path>; last occurrence wins (matching kernel
+# behaviour for repeated parameters). Defaults to {default} when nothing matches.
+# Strips surrounding double-quotes from the value (grub-btrfs emits them).
+resolve_root_subvol() {{
+    local subvol="{default}"
+    local arg rf f v
+    local old_ifs="$IFS"
+
+    for arg in $(cat /proc/cmdline 2>/dev/null); do
+        case "$arg" in
+            rootflags=*)
+                rf="${{arg#rootflags=}}"
+                IFS=','
+                for f in $rf; do
+                    case "$f" in
+                        subvol=*)
+                            v="${{f#subvol=}}"
+                            v="${{v#\"}}"
+                            v="${{v%\"}}"
+                            [ -n "$v" ] && subvol="$v"
+                            ;;
+                    esac
+                done
+                IFS="$old_ifs"
+                ;;
+        esac
+    done
+
+    echo "$subvol"
+}}
+
+"#,
+            default = root_svols[0].name,
+        )
+    } else {
+        String::new()
+    };
+
     // Build description comment listing actual volumes
     let volume_list: Vec<String> = luks_data_parts
         .iter()
@@ -600,7 +658,7 @@ mount_volume() {{
     fi
 }}
 
-# run_hook is called during the hooks phase
+{resolve_fn}# run_hook is called during the hooks phase
 # We set the mount_handler variable to point to our custom mount function
 run_hook() {{
     echo "[mountcrypt] Setting mount_handler to mountcrypt_handler"
@@ -677,7 +735,8 @@ mountcrypt_handler() {{
 "#,
         volume_comment = volume_comment,
         volume_mounts = volume_mounts,
-        boot_mount = boot_mount_section
+        boot_mount = boot_mount_section,
+        resolve_fn = resolve_fn,
     );
 
     let help_volumes: Vec<String> = luks_data_parts
@@ -1018,6 +1077,66 @@ mod tests {
         assert!(
             !hook.hook_content.contains("/dev/mapper/Crypt-Boot"),
             "Without boot_encryption, mountcrypt must not reference Crypt-Boot"
+        );
+    }
+
+    #[test]
+    fn mountcrypt_hook_resolves_root_subvol_from_cmdline() {
+        let cfg = config_encrypted(true);
+        let mut layout = standard_encrypted_layout();
+        layout.subvolumes = Some(multi_volume_subvolumes("Root"));
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+        assert!(
+            hook.hook_content.contains("resolve_root_subvol()"),
+            "Subvolume layouts must define resolve_root_subvol"
+        );
+        assert!(
+            hook.hook_content
+                .contains(r#"mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol=${root_subvol},"#),
+            "Root mount must use the cmdline-resolved subvolume, not a literal"
+        );
+        assert!(
+            hook.hook_content.contains("rootflags=*)"),
+            "resolve_root_subvol must parse rootflags= from the cmdline"
+        );
+        // Non-root volumes stay pinned to their layout subvolumes: they live on
+        // separate LUKS containers that a root snapshot does not cover.
+        assert!(hook.hook_content.contains("subvol=@usr,"));
+    }
+
+    #[test]
+    fn mountcrypt_hook_is_valid_shell_syntax() {
+        let cfg = config_encrypted(true);
+        let mut layout = standard_encrypted_layout();
+        layout.subvolumes = Some(multi_volume_subvolumes("Root"));
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+
+        let path = std::env::temp_dir().join(format!(
+            "deploytix-mountcrypt-syntax-{}",
+            std::process::id()
+        ));
+        fs::write(&path, &hook.hook_content).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&path)
+            .status();
+        let _ = fs::remove_file(&path);
+        // Skip silently when no sh is available (syntax check is best-effort)
+        if let Ok(status) = status {
+            assert!(
+                status.success(),
+                "generated mountcrypt hook fails sh -n syntax check"
+            );
+        }
+    }
+
+    #[test]
+    fn mountcrypt_hook_without_subvolumes_has_no_cmdline_parsing() {
+        let cfg = config_encrypted(true);
+        let hook = generate_mountcrypt_hook(&cfg, &standard_encrypted_layout());
+        assert!(
+            !hook.hook_content.contains("resolve_root_subvol"),
+            "Plain-filesystem layouts must not parse rootflags"
         );
     }
 

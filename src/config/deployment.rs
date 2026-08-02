@@ -198,6 +198,16 @@ pub struct NetworkConfig {
     /// AUR GUI frontend used when `backend = "iwd"`. Ignored otherwise.
     #[serde(default)]
     pub iwd_frontend: IwdFrontend,
+    /// Optional Wi-Fi network to pre-seed on the installed system so it has
+    /// connectivity from the very first boot (required for Steam's first-run
+    /// client bootstrap in the gamescope session, which happens before the
+    /// OOBE network page exists). Written as a NetworkManager system
+    /// connection or an iwd network file depending on `backend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi_ssid: Option<String>,
+    /// WPA-PSK passphrase for `wifi_ssid`. Omit for an open network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,9 +215,10 @@ pub struct DesktopConfig {
     /// Desktop environment
     #[serde(default)]
     pub environment: DesktopEnvironment,
-    /// Display manager
+    /// Display manager (defaults to greetd auto-login; ignored when
+    /// `environment = "none"`)
     #[serde(default)]
-    pub display_manager: Option<String>,
+    pub display_manager: DisplayManager,
 }
 
 /// Optional package collections
@@ -530,6 +541,53 @@ impl std::fmt::Display for DesktopEnvironment {
             Self::Kde => write!(f, "KDE Plasma"),
             Self::Gnome => write!(f, "GNOME"),
             Self::Xfce => write!(f, "XFCE"),
+        }
+    }
+}
+
+/// Display manager selection for desktop installs.
+///
+/// `Greetd` is the deploytix default and keeps the original behavior:
+/// greetd auto-logins the created user straight into the desktop session
+/// (no greeter). The other variants install a conventional display manager
+/// with its normal login screen. `None` boots to a TTY login; the desktop
+/// can be started manually via `startx` (~/.xinitrc is written per DE).
+///
+/// Ignored when `environment = "none"`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayManager {
+    #[default]
+    Greetd,
+    Sddm,
+    Gdm,
+    Lightdm,
+    None,
+}
+
+impl DisplayManager {
+    /// Service name as registered with the init system. This is also the
+    /// base package name (the Artix service package is `{name}-{init}`).
+    /// `None` for the TTY-login variant, which has no service.
+    pub fn service_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Greetd => Some("greetd"),
+            Self::Sddm => Some("sddm"),
+            Self::Gdm => Some("gdm"),
+            Self::Lightdm => Some("lightdm"),
+            Self::None => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DisplayManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Greetd => write!(f, "greetd (auto-login, deploytix default)"),
+            Self::Sddm => write!(f, "SDDM (login screen)"),
+            Self::Gdm => write!(f, "GDM (login screen)"),
+            Self::Lightdm => write!(f, "LightDM (login screen)"),
+            Self::None => write!(f, "None (TTY login, startx)"),
         }
     }
 }
@@ -859,7 +917,7 @@ impl DeploymentConfig {
             NetworkBackend::NetworkManagerWpa,
         ];
         let net_idx = prompt_select("Network backend", &backends, 0)?;
-        let backend = backends[net_idx].clone();
+        let mut backend = backends[net_idx].clone();
         // Sub-choice: AUR GUI frontend when iwd is the standalone backend.
         let iwd_frontend = if backend == NetworkBackend::Iwd {
             let frontends = [IwdFrontend::Iwgtk, IwdFrontend::Iwdgui, IwdFrontend::Iwqt];
@@ -867,6 +925,24 @@ impl DeploymentConfig {
             frontends[f_idx]
         } else {
             IwdFrontend::default()
+        };
+
+        // Optional Wi-Fi pre-seeding so the installed system has connectivity
+        // on first boot (needed for Steam's first-run bootstrap in Game Mode).
+        let (wifi_ssid, wifi_password) = if prompt_confirm(
+            "Pre-configure a Wi-Fi network on the installed system?",
+            false,
+        )? {
+            let ssid = prompt_input("Wi-Fi SSID", None)?;
+            let password = if prompt_confirm("Is the network password-protected (WPA-PSK)?", true)?
+            {
+                Some(prompt_password("Wi-Fi passphrase", true)?)
+            } else {
+                None
+            };
+            (Some(ssid), password)
+        } else {
+            (None, None)
         };
 
         // Desktop
@@ -878,6 +954,21 @@ impl DeploymentConfig {
         ];
         let de_idx = prompt_select("Desktop environment", &desktops, 0)?;
         let environment = desktops[de_idx].clone();
+
+        // Display manager (only meaningful with a desktop environment)
+        let mut display_manager = if environment != DesktopEnvironment::None {
+            let dms = [
+                DisplayManager::Greetd,
+                DisplayManager::Sddm,
+                DisplayManager::Gdm,
+                DisplayManager::Lightdm,
+                DisplayManager::None,
+            ];
+            let dm_idx = prompt_select("Display manager", &dms, 0)?;
+            dms[dm_idx]
+        } else {
+            DisplayManager::None
+        };
 
         // Swap type selection
         let swap_types = [SwapType::Partition, SwapType::FileZram, SwapType::ZramOnly];
@@ -937,6 +1028,27 @@ impl DeploymentConfig {
         } else {
             false
         };
+
+        // Steam's gamepad UI configures Wi-Fi through NetworkManager; the
+        // standalone iwd backend would leave first-boot network setup broken
+        // in Game Mode (and fail validation), so coerce it here.
+        if install_session_switching && backend == NetworkBackend::Iwd {
+            println!(
+                "  Note: Game Mode session switching requires NetworkManager. \
+                 Switching network backend to NetworkManager + iwd."
+            );
+            backend = NetworkBackend::NetworkManager;
+        }
+
+        // The gamescope ↔ desktop loop (session manager, IPC helper, PAM
+        // files) is built on greetd, so coerce the display manager as well.
+        if install_session_switching && display_manager != DisplayManager::Greetd {
+            println!(
+                "  Note: Game Mode session switching is driven through greetd. \
+                 Switching display manager to greetd."
+            );
+            display_manager = DisplayManager::Greetd;
+        }
 
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
@@ -1037,10 +1149,12 @@ impl DeploymentConfig {
             network: NetworkConfig {
                 backend,
                 iwd_frontend,
+                wifi_ssid,
+                wifi_password,
             },
             desktop: DesktopConfig {
                 environment,
-                display_manager: None,
+                display_manager,
             },
             packages: PackagesConfig {
                 install_yay,
@@ -1105,10 +1219,12 @@ impl DeploymentConfig {
             network: NetworkConfig {
                 backend: NetworkBackend::Iwd,
                 iwd_frontend: IwdFrontend::default(),
+                wifi_ssid: None,
+                wifi_password: None,
             },
             desktop: DesktopConfig {
                 environment: DesktopEnvironment::Kde,
-                display_manager: Some("sddm".to_string()),
+                display_manager: DisplayManager::default(),
             },
             packages: PackagesConfig::default(),
         }
@@ -1297,6 +1413,53 @@ impl DeploymentConfig {
                     "Session switching requires a desktop environment".to_string(),
                 ));
             }
+            // The gamescope ↔ desktop loop (deploytix-session-manager, the
+            // greetd-ipc helper, the PAM files, and the switch scripts'
+            // `sv restart greetd`) is built on greetd.
+            if self.desktop.display_manager != DisplayManager::Greetd {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching requires display_manager = \"greetd\" \
+                     (the Game Mode ↔ Desktop loop is driven through greetd IPC)"
+                        .to_string(),
+                ));
+            }
+            // Steam's gamepad UI (Deck OOBE network page, Settings > Internet)
+            // configures Wi-Fi via NetworkManager over D-Bus; the standalone
+            // iwd backend leaves it non-functional in the gamescope session.
+            if self.network.backend == NetworkBackend::Iwd {
+                return Err(DeploytixError::ValidationError(
+                    "Session switching (gamescope Game Mode) requires a NetworkManager backend \
+                     (backend = \"networkmanager\" or \"networkmanager-wpa\"); Steam's gamepad UI \
+                     configures Wi-Fi through NetworkManager"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Wi-Fi pre-seeding sanity checks
+        if let Some(ssid) = &self.network.wifi_ssid {
+            if ssid.is_empty() || ssid.len() > 32 {
+                return Err(DeploytixError::ValidationError(
+                    "wifi_ssid must be 1-32 characters".to_string(),
+                ));
+            }
+            // The SSID is used as a filename on the target system.
+            if ssid.contains('/') || ssid.chars().any(|c| c.is_control()) {
+                return Err(DeploytixError::ValidationError(
+                    "wifi_ssid must not contain '/' or control characters".to_string(),
+                ));
+            }
+            if let Some(pw) = &self.network.wifi_password {
+                if pw.len() < 8 || pw.len() > 63 {
+                    return Err(DeploytixError::ValidationError(
+                        "wifi_password must be a WPA-PSK passphrase of 8-63 characters".to_string(),
+                    ));
+                }
+            }
+        } else if self.network.wifi_password.is_some() {
+            return Err(DeploytixError::ValidationError(
+                "wifi_password is set but wifi_ssid is missing".to_string(),
+            ));
         }
 
         // The standalone-iwd backend ships an AUR GUI frontend (iwgtk / iwdgui /

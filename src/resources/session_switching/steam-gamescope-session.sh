@@ -207,12 +207,37 @@ trap cleanup EXIT HUP TERM
 # immediately instead of being deferred until the foreground child exits.
 # Without this, a hung Steam process blocks the cleanup trap indefinitely,
 # preventing greetd from restarting the session manager on logout.
-echo "[steam-session] Starting Steam (-steamos3 -gamepadui)..."
-steam -steamos3 -gamepadui &
+#
+# Flags match the upstream ChimeraOS/Bazzite gamescope-session launch line.
+# -steampal -steamdeck are required in addition to -steamos3 -gamepadui so
+# that a fresh install (no cached credentials) presents the Steam Deck OOBE:
+# language -> network setup -> controller-navigable login with on-screen
+# keyboard and QR-code sign-in. Without them, Steam falls back to the legacy
+# X11 login dialog, which is unreachable under gamescope's forced-fullscreen
+# base layer. -steamdeck makes Steam probe SteamOS update tooling; the
+# steamos-update / jupiter-biosupdate / steamos-select-branch stubs in
+# /usr/bin satisfy those probes.
+echo "[steam-session] Starting Steam (-gamepadui -steamos3 -steampal -steamdeck)..."
+steam -gamepadui -steamos3 -steampal -steamdeck &
 steam_pid=$!
 
-wait "$steam_pid" 2>/dev/null || true
-steam_ret=$?
+steam_ret=0
+wait "$steam_pid" 2>/dev/null || steam_ret=$?
 echo "[steam-session] Steam exited ($steam_ret)"
+
+# --------- 14. First-login fallback ---------
+# Steam's gamepad-UI login screen (QR code + on-screen keyboard) is the
+# primary sign-in path and runs right here in gamescope. But if Steam
+# exited while there is still no remembered account, the user could not
+# (or chose not to) sign in under gamescope — OSK/text input is not
+# fully reliable there pre-login. Route the next session to the
+# desktop, where the steam-first-login autostart entry offers a
+# windowed sign-in and automatically returns to gamemode afterward.
+if ! /usr/bin/steam-login-check; then
+    SENTINEL="${XDG_CONFIG_HOME:-$HOME/.config}/deploytix-session"
+    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
+    echo "desktop" > "$SENTINEL"
+    echo "[steam-session] No Steam login on exit; next session -> desktop (first-login fallback)"
+fi
 
 exit "$steam_ret"

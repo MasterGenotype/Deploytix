@@ -30,6 +30,8 @@ cargo build --release --features gui
 
 GUI build requires system libraries: `libxcb`, `libxkbcommon`, `libwayland`, `libGL`.
 
+Running the GUI on an X11 session additionally requires `libX11`, `libXcursor`, and `libxkbcommon-x11` at runtime (winit loads them dynamically). Artix/Arch: `pacman -S libx11 libxcursor libxkbcommon-x11`; Debian/Ubuntu: `apt install libx11-6 libxcursor1 libxkbcommon-x11-0`.
+
 ### Static Binary (Portable)
 
 Builds a fully statically-linked binary with musl — zero runtime dependencies, runs on any x86_64 Linux:
@@ -186,6 +188,7 @@ backend = "networkmanager"     # iwd, networkmanager
 
 [desktop]
 environment = "kde"            # kde, gnome, xfce, none
+display_manager = "greetd"     # greetd (auto-login), sddm, gdm, lightdm, none
 
 [packages]
 install_yay = true             # AUR helper (built from source)
