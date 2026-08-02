@@ -126,6 +126,11 @@ mount -t btrfs -o "$SUBVOL" /dev/mapper/Crypt-Root /new_root
 This is a localised change in one function and doesn't affect the existing
 hook architecture.
 
+> **Status: implemented.** `generate_mountcrypt_hook()` now emits a
+> `resolve_root_subvol()` parser (POSIX ash — the `grep -oP` draft above is
+> not available in the initramfs) on subvolume layouts. See
+> [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md), Fix 1.
+
 #### GRUB cryptodisk interaction
 
 Deploytix only sets `GRUB_ENABLE_CRYPTODISK=y` when `/boot` itself is
@@ -147,6 +152,15 @@ initramfs does that. The only case where GRUB must unlock something is when
   must unlock the LUKS1 `/boot` container before reading any kernel or config).
 
 **Net effort**: Medium. One hook change + config file generation.
+
+> **Status: implemented** as a dormant patch script
+> (`/usr/local/bin/patch-grub-btrfs-integrity` + pacman hook
+> `91-patch-grub-btrfs.hook`) installed on encrypted btrfs layouts. It sets
+> `GRUB_BTRFS_ENABLE_CRYPTODISK` from `boot_encryption` and adds a
+> `grub-probe || blkid` fallback to `41_snapshots-btrfs` (grub-probe cannot
+> walk dm-integrity mapper stacks). Both are inert until the user installs
+> grub-btrfs. See [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md),
+> Fixes 2–3.
 
 ---
 
@@ -380,6 +394,7 @@ requirement.
 2. Add `grub-btrfs` to package installation (pacman, not AUR).
 3. Fix `mountcrypt` hook to parse `rootflags` from cmdline — required for
    *any* encrypted multi-LUKS system to honour snapshot boot entries.
+   *(Done — see [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md).)*
 4. Add snapper root config creation in chroot (`snapper -c root create-config /`).
 5. Generate `/etc/default/grub-btrfs/config`, selecting `GRUB_BTRFS_MKCONFIG`
    based on the existing `use_standalone` boolean:
