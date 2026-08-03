@@ -14,5 +14,5 @@ iso/repo/*.pkg.tar*
 # Local makepkg artefacts and staging dirs.  Only the PKGBUILD is
 # tracked; everything else (built tarballs, .SRCINFO, $srcdir/$pkgdir
 # scratch, generated .desktop.out) is regenerated on demand.
-pkg/
+pkg/*
 !pkg/PKGBUILD
