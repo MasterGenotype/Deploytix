@@ -1,7 +1,7 @@
 # Maintainer: superphenotype
 pkgbase=deploytix-git
 pkgname=('deploytix-git' 'deploytix-gui-git')
-pkgver=1.2.6.rr9.ge34a93c.9.gfb8e963.39.g3c3451e.11.gd3120d1
+pkgver=1.4.0.r30.g79e0726
 pkgrel=1
 pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
 arch=('x86_64')
@@ -16,7 +16,9 @@ _repodir="$startdir/.."
 
 pkgver() {
     cd "$_repodir"
-    git describe --long --tags --abbrev=7 2>/dev/null \
+    # --exclude '*-*' skips stale tags accidentally created from previous
+    # describe output (e.g. v1.2.6-r9-g...), which would compound the version
+    git describe --long --tags --abbrev=7 --exclude '*-*' 2>/dev/null \
         | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
         || printf "0.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
 }

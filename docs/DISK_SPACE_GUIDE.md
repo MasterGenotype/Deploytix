@@ -10,7 +10,7 @@ sizing table you can use as a starting point.
 ## 1. How Deploytix sees your media
 
 `deploytix list-disks` reports each candidate device's `device_type`
-(`removable`, `nvme`, `ssd`, `hdd`, `sd`, `mmc`, `loop`, `disk`) and a
+(`removable`, `nvme`, `ssd`, `hdd`, `mmc`, `loop`, `disk`) and a
 `removable` flag (read from `/sys/block/<dev>/removable`). That distinction
 matters because it tells you what kind of workload the target can sustain:
 
