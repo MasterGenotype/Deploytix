@@ -22,6 +22,15 @@ const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile
     search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
     video xfs zfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
 
+/// Whether this configuration boots through a standalone GRUB EFI binary
+/// (grub.cfg embedded as a memdisk, rebuilt + re-signed on change) instead of
+/// a standard grub-install with an on-disk grub.cfg.
+pub fn uses_standalone_grub(config: &DeploymentConfig) -> bool {
+    config.system.secureboot
+        && config.system.secureboot_method == SecureBootMethod::Sbctl
+        && config.disk.encryption
+}
+
 /// Install and configure the bootloader
 pub fn install_bootloader(
     cmd: &CommandRunner,
@@ -255,9 +264,7 @@ pub fn run_grub_install_with_secureboot(
     install_root: &str,
 ) -> Result<()> {
     // For sbctl method with encryption, use standalone GRUB to avoid verification errors
-    let use_standalone = config.system.secureboot
-        && config.system.secureboot_method == SecureBootMethod::Sbctl
-        && config.disk.encryption;
+    let use_standalone = uses_standalone_grub(config);
 
     if use_standalone {
         info!("Using standalone GRUB for SecureBoot with encryption");
@@ -424,9 +431,7 @@ pub fn create_grub_reinstall_hook(
     fs::create_dir_all(&hooks_dir)?;
 
     // Standalone GRUB is used when SecureBoot (sbctl) + encryption are both active
-    let use_standalone = config.system.secureboot
-        && config.system.secureboot_method == SecureBootMethod::Sbctl
-        && config.disk.encryption;
+    let use_standalone = uses_standalone_grub(config);
 
     create_grub_reinstall_script(config, device, use_standalone, install_root)?;
 
@@ -924,6 +929,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn uses_standalone_grub_requires_sbctl_secureboot_and_encryption() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Sbctl;
+        cfg.disk.encryption = true;
+        assert!(uses_standalone_grub(&cfg));
+
+        cfg.disk.encryption = false;
+        assert!(!uses_standalone_grub(&cfg));
+
+        cfg.disk.encryption = true;
+        cfg.system.secureboot = false;
+        assert!(!uses_standalone_grub(&cfg));
+
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Shim;
+        assert!(!uses_standalone_grub(&cfg));
     }
 
     #[test]

@@ -245,5 +245,22 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
         } else {
             packages.install_btrfs_tools = false;
         }
+
+        if *filesystem == Filesystem::Btrfs {
+            ui.checkbox(
+                &mut packages.install_grub_btrfs,
+                "grub-btrfs (bootable snapshot menu entries)",
+            );
+            if packages.install_grub_btrfs {
+                widgets::info_text(
+                    ui,
+                    "Installs grub-btrfs + snapper, creates a @snapshots subvolume, and \
+                     enables the grub-btrfsd daemon. Not compatible with LVM thin.",
+                );
+            }
+            ui.add_space(theme::SPACING_XS);
+        } else {
+            packages.install_grub_btrfs = false;
+        }
     });
 }

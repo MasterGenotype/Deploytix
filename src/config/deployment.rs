@@ -241,6 +241,12 @@ pub struct PackagesConfig {
     /// Requires: install_yay = true + btrfs filesystem.
     #[serde(default)]
     pub install_btrfs_tools: bool,
+    /// Install grub-btrfs (bootable snapshot menu entries + grub-btrfsd
+    /// daemon) and configure snapper for the root subvolume, including a
+    /// top-level @snapshots subvolume mounted at /.snapshots.
+    /// Requires: btrfs filesystem + subvolumes; incompatible with use_lvm_thin.
+    #[serde(default)]
+    pub install_grub_btrfs: bool,
     /// Apply gaming/handheld sysctl performance tweaks.
     /// Writes /etc/sysctl.d/99-gaming.conf with vm.max_map_count, swappiness, etc.
     #[serde(default)]
@@ -1063,6 +1069,18 @@ impl DeploymentConfig {
             false
         };
 
+        // grub-btrfs — bootable snapshot menu entries; needs btrfs subvolumes
+        // and is out of scope for LVM thin (no subvolume-per-data layout there).
+        let install_grub_btrfs =
+            if filesystem == Filesystem::Btrfs && use_subvolumes && !use_lvm_thin {
+                prompt_confirm(
+                    "Install grub-btrfs? (bootable snapshot menu entries + snapper root config)",
+                    false,
+                )?
+            } else {
+                false
+            };
+
         // sysctl gaming tweaks (standalone — no prerequisites)
         let sysctl_gaming_tweaks = prompt_confirm(
             "Apply gaming sysctl performance tweaks? (vm.max_map_count, swappiness, etc.)",
@@ -1162,6 +1180,7 @@ impl DeploymentConfig {
                 install_gaming,
                 install_session_switching,
                 install_btrfs_tools,
+                install_grub_btrfs,
                 sysctl_gaming_tweaks,
                 sysctl_network_performance,
                 install_hhd,
@@ -1517,6 +1536,26 @@ impl DeploymentConfig {
             if self.disk.filesystem != Filesystem::Btrfs {
                 return Err(DeploytixError::ValidationError(
                     "Btrfs tools require btrfs filesystem".to_string(),
+                ));
+            }
+        }
+
+        // grub-btrfs requires btrfs + subvolumes; the LVM thin path does not
+        // use btrfs subvolumes for data and is out of scope for snapshot boot.
+        if self.packages.install_grub_btrfs {
+            if self.disk.filesystem != Filesystem::Btrfs {
+                return Err(DeploytixError::ValidationError(
+                    "grub-btrfs requires btrfs filesystem".to_string(),
+                ));
+            }
+            if !self.disk.use_subvolumes {
+                return Err(DeploytixError::ValidationError(
+                    "grub-btrfs requires use_subvolumes = true (snapshot boot entries need the @ subvolume layout)".to_string(),
+                ));
+            }
+            if self.disk.use_lvm_thin {
+                return Err(DeploytixError::ValidationError(
+                    "grub-btrfs is not supported with use_lvm_thin = true".to_string(),
                 ));
             }
         }

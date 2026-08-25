@@ -196,6 +196,7 @@ install_wine = true            # Wine compatibility layer
 install_gaming = true          # Steam, gamescope (Bazzite fork)
 install_session_switching = true  # gamescope ↔ desktop via greetd
 install_btrfs_tools = true     # snapper, btrfs-assistant (via yay)
+install_grub_btrfs = true      # snapshot boot menu + snapper root config (btrfs only)
 sysctl_gaming_tweaks = true    # vm.max_map_count, swappiness, etc.
 sysctl_network_performance = true  # BBR, fq, larger buffers
 install_hhd = true             # Handheld Daemon (gamepad remapping, TDP)

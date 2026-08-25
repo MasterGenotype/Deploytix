@@ -343,6 +343,16 @@ impl Installer {
             self.install_btrfs_tools()?;
         }
 
+        // Phase 5.45: grub-btrfs — snapshot boot menu entries + snapper root
+        // config. Must run after the bootloader phase (the 91-patch hook is
+        // then in place to patch the generator during this pacman
+        // transaction) and before finalize's `mkinitcpio -P` (which needs
+        // the package's grub-btrfs-overlayfs hook installed).
+        if self.config.packages.install_grub_btrfs {
+            self.report_progress(0.885, "Installing grub-btrfs (snapshot boot support)...");
+            self.install_grub_btrfs()?;
+        }
+
         // Phase 5.5: User autostart entries (unconditional, after user creation)
         self.report_progress(0.89, "Installing user autostart entries...");
         self.install_autostart_entries()?;
@@ -928,6 +938,63 @@ impl Installer {
     fn install_btrfs_tools(&self) -> Result<()> {
         info!("Installing btrfs snapshot tools via yay");
         configure::packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// Install grub-btrfs: packages, snapper root config with a top-level
+    /// @snapshots subvolume, /etc/default/grub-btrfs/config, and an
+    /// init-specific grub-btrfsd service.
+    fn install_grub_btrfs(&self) -> Result<()> {
+        info!("[Phase 5.45] Installing grub-btrfs (snapshot boot menu entries)");
+
+        // The block device carrying the root btrfs filesystem: the Root LUKS
+        // mapper on encrypted layouts, the ROOT partition otherwise.
+        let root_fs_device = if self.config.disk.encryption {
+            match self
+                .luks_containers
+                .iter()
+                .find(|c| c.volume_name == "Root")
+            {
+                Some(c) => c.mapped_path.clone(),
+                None if self.cmd.is_dry_run() => "/dev/mapper/Crypt-Root".to_string(),
+                None => {
+                    return Err(DeploytixError::ConfigError(
+                        "No Root LUKS container found for grub-btrfs setup".to_string(),
+                    ))
+                }
+            }
+        } else {
+            let layout = self.layout.as_ref().unwrap();
+            let root_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.name == "ROOT")
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError(
+                        "No ROOT partition found for grub-btrfs setup".to_string(),
+                    )
+                })?;
+            partition_path(&self.config.disk.device, root_part.number)
+        };
+
+        configure::grub_btrfs::install_grub_btrfs(
+            &self.cmd,
+            &self.config,
+            &root_fs_device,
+            INSTALL_ROOT,
+        )?;
+
+        // The service definition was just written (for s6, into
+        // /etc/s6/adminsv) — sync the s6 repository so the enable can see it
+        // (no-op for other init systems), then enable for the target init.
+        configure::services::sync_s6_repository(&self.cmd, &self.config.system.init, INSTALL_ROOT)?;
+        configure::services::enable_service(
+            &self.cmd,
+            &self.config.system.init,
+            "grub-btrfsd",
+            INSTALL_ROOT,
+        )?;
+
+        Ok(())
     }
 
     /// Install user autostart entries (audio-startup, nm-applet)

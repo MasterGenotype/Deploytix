@@ -59,6 +59,14 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
         modules.extend(["dm_thin_pool".to_string()]);
     }
 
+    // Read-only snapshot booting on multi-LUKS layouts: mountcrypt layers a
+    // tmpfs overlay over RO snapshot roots and needs the overlay module in
+    // the initramfs. (Unencrypted layouts get it via the grub-btrfs package's
+    // own grub-btrfs-overlayfs install file instead.)
+    if config.packages.install_grub_btrfs && config.disk.encryption && !config.disk.use_lvm_thin {
+        modules.push("overlay".to_string());
+    }
+
     modules
 }
 
@@ -142,6 +150,16 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         }
 
         hooks.push("filesystems".to_string());
+
+        // grub-btrfs's overlayfs latehook makes read-only snapshot entries
+        // bootable by layering tmpfs+overlayfs over the RO root. It must run
+        // after `filesystems` (root mounted) and before `usr` (the overlayed
+        // root is what /usr mounts into). The hook file ships with the
+        // grub-btrfs package, which the installer adds before the final
+        // `mkinitcpio -P` — mkinitcpio hard-fails on missing hooks otherwise.
+        if config.packages.install_grub_btrfs {
+            hooks.push("grub-btrfs-overlayfs".to_string());
+        }
 
         // Separate /usr mount (partition or btrfs subvolume) requires the
         // usr hook so initramfs mounts /usr before attempting to exec /sbin/init.
@@ -362,6 +380,57 @@ mod tests {
             unlock_pos < mount_pos,
             "crypttab-unlock must precede mountcrypt"
         );
+    }
+
+    #[test]
+    fn grub_btrfs_overlayfs_hook_between_filesystems_and_usr() {
+        let mut cfg = config_encrypted(false);
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.use_subvolumes = true;
+        cfg.packages.install_grub_btrfs = true;
+
+        let hooks = construct_hooks(&cfg);
+        let fs_pos = hooks.iter().position(|h| h == "filesystems").unwrap();
+        let overlay_pos = hooks
+            .iter()
+            .position(|h| h == "grub-btrfs-overlayfs")
+            .unwrap();
+        let usr_pos = hooks.iter().position(|h| h == "usr").unwrap();
+        // Latehooks run in HOOKS order: the overlay must wrap root after
+        // filesystems mounts it and before usr mounts /usr into it.
+        assert!(
+            fs_pos < overlay_pos,
+            "overlayfs hook must follow filesystems"
+        );
+        assert!(overlay_pos < usr_pos, "overlayfs hook must precede usr");
+
+        cfg.packages.install_grub_btrfs = false;
+        assert!(!construct_hooks(&cfg).contains(&"grub-btrfs-overlayfs".to_string()));
+    }
+
+    #[test]
+    fn grub_btrfs_multi_luks_uses_overlay_module_not_latehook() {
+        let mut cfg = config_encrypted(true);
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.use_subvolumes = true;
+        cfg.packages.install_grub_btrfs = true;
+
+        // mountcrypt replaces the filesystems hook and handles the overlay
+        // itself; the stock latehook would hide its submounts.
+        assert!(!construct_hooks(&cfg).contains(&"grub-btrfs-overlayfs".to_string()));
+        assert!(construct_modules(&cfg).contains(&"overlay".to_string()));
+    }
+
+    #[test]
+    fn overlay_module_only_on_encrypted_grub_btrfs_layouts() {
+        // Unencrypted: the grub-btrfs package's own install file adds overlay.
+        let mut cfg = config_encrypted(false);
+        cfg.packages.install_grub_btrfs = true;
+        assert!(!construct_modules(&cfg).contains(&"overlay".to_string()));
+
+        // Encrypted without the feature: no overlay either.
+        let cfg = config_encrypted(true);
+        assert!(!construct_modules(&cfg).contains(&"overlay".to_string()));
     }
 
     #[test]

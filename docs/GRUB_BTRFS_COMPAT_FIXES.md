@@ -126,19 +126,32 @@ remove the marker — with the marker present the script leaves the line alone).
 
 ---
 
-## Remaining caveats (not fixed here)
+## Remaining caveats
 
-- **Read-only snapshots.** snapper snapshots are RO by default and mountcrypt
-  mounts rw. Booting one writably needs grub-btrfs's `grub-btrfs-overlayfs`
-  latehook in `HOOKS` (it does not conflict with mountcrypt — it runs after
-  the mount and layers tmpfs+overlayfs on RO btrfs roots). Deploytix does not
-  add it because the hook belongs to the grub-btrfs package, which Deploytix
-  does not install; mkinitcpio fails on missing hooks.
+- **Read-only snapshots** — *fixed when `install_grub_btrfs = true`.* snapper
+  snapshots are RO by default. On unencrypted layouts the stock
+  `grub-btrfs-overlayfs` latehook is added to `HOOKS` (the package is
+  installed, so mkinitcpio finds it). On multi-LUKS layouts the stock
+  latehook is **not** usable, contrary to this document's earlier analysis:
+  by latehook time mountcrypt has already mounted `/usr`, `/var` and `/home`
+  inside `/new_root`, and the latehook's `mount --move` would carry them into
+  the overlay's lowerdir where overlayfs hides submounts — `/usr` would
+  appear empty and boot would fail. Instead the generated mountcrypt hook
+  probes the mounted root for writability and, when a non-default subvolume
+  is read-only, layers a tmpfs-backed overlayfs over it *before* the other
+  volume mounts. Without `install_grub_btrfs`, behaviour is unchanged
+  (mountcrypt mounts rw and prints the manual-remedy hint on failure).
 - **Partial rollback semantics.** Only `/` is snapshotted; `/usr`, `/var`,
-  `/home` remain live volumes on separate LUKS containers. Booting a snapshot
-  shows the snapshot's root with the live everything-else.
-- **Full grub-btrfs integration** (installing the package, snapper config,
-  `grub-btrfsd` service wiring per init system) remains future work — see the
+  `/home` remain live volumes on separate LUKS containers (separate
+  subvolumes on the single-partition layout). Booting a snapshot shows the
+  snapshot's root with the live everything-else. This is by design.
+- **Full grub-btrfs integration** — *implemented* behind
+  `packages.install_grub_btrfs` (installer Phase 5.45,
+  `src/configure/grub_btrfs.rs`): package installation from the official
+  repos, snapper root config with a top-level `@snapshots` subvolume,
+  `/etc/default/grub-btrfs/config` generation (pointing
+  `GRUB_BTRFS_MKCONFIG` at `reinstall-grub` on standalone-GRUB systems), and
+  `grub-btrfsd` service definitions for runit/OpenRC/s6/dinit. See the
   implementation order in
   [GRUB_BTRFS_FEASIBILITY.md](GRUB_BTRFS_FEASIBILITY.md).
 
