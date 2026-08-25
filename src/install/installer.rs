@@ -818,16 +818,27 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
 
-            // grub-btrfs (if the user later installs it) aborts grub-mkconfig
-            // on encrypted btrfs layouts, silently breaking GRUB regeneration
-            // on every kernel update. Ship the compat patch + pacman hook now;
-            // both are inert until grub-btrfs appears.
+            // grub-btrfs aborts grub-mkconfig on encrypted btrfs layouts,
+            // silently breaking GRUB regeneration on every kernel update.
+            // Ship the compat patch + pacman hook now; both are inert until
+            // grub-btrfs appears (whether via Phase 5.45 or a later manual
+            // install).
             if self.config.disk.encryption
                 && self.config.disk.filesystem == crate::config::Filesystem::Btrfs
             {
+                // With an encrypted /boot, snapshot entries need the UUID of
+                // the container GRUB unlocks, or they fall back to prompting
+                // for every container on the disk.
+                let boot_luks_uuid = if self.config.disk.boot_encryption {
+                    self.boot_luks_uuid()?
+                } else {
+                    None
+                };
+
                 configure::bootloader::create_grub_btrfs_compat(
                     &self.cmd,
                     &self.config,
+                    boot_luks_uuid.as_deref(),
                     INSTALL_ROOT,
                 )?;
             }
@@ -938,6 +949,26 @@ impl Installer {
     fn install_btrfs_tools(&self) -> Result<()> {
         info!("Installing btrfs snapshot tools via yay");
         configure::packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// LUKS UUID of the container holding `/boot`, for the grub-btrfs compat
+    /// patch. `None` when the layout has no Boot container or under dry-run
+    /// (where the containers were never actually created).
+    fn boot_luks_uuid(&self) -> Result<Option<String>> {
+        if self.cmd.is_dry_run() {
+            return Ok(None);
+        }
+
+        let Some(container) = self
+            .luks_containers
+            .iter()
+            .find(|c| c.volume_name == "Boot")
+        else {
+            warn!("boot_encryption is set but no Boot LUKS container was recorded");
+            return Ok(None);
+        };
+
+        configure::encryption::get_luks_uuid(&container.device).map(Some)
     }
 
     /// Install grub-btrfs: packages, snapper root config with a top-level

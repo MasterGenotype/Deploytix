@@ -156,17 +156,20 @@ initramfs does that. The only case where GRUB must unlock something is when
   the grub-btrfs config (GRUB reads `/boot` unencrypted, initramfs handles
   data LUKS).
 - If `boot_encryption = true`: set `GRUB_BTRFS_ENABLE_CRYPTODISK=y` (GRUB
-  must unlock the LUKS1 `/boot` container before reading any kernel or config).
+  must unlock the LUKS1 `/boot` container before reading any kernel or config),
+  **and** pin which container that is — the generator otherwise emits
+  `cryptomount -a` and GRUB prompts for every LUKS container on the disk.
 
 **Net effort**: Medium. One hook change + config file generation.
 
-> **Status: implemented** as a dormant patch script
+> **Status: implemented** as a patch script
 > (`/usr/local/bin/patch-grub-btrfs-integrity` + pacman hook
 > `91-patch-grub-btrfs.hook`) installed on encrypted btrfs layouts. It sets
-> `GRUB_BTRFS_ENABLE_CRYPTODISK` from `boot_encryption` and adds a
+> `GRUB_BTRFS_ENABLE_CRYPTODISK` from `boot_encryption`, pins `crypt_source`
+> to the boot LUKS UUID when `/boot` is encrypted, and adds a
 > `grub-probe || blkid` fallback to `41_snapshots-btrfs` (grub-probe cannot
-> walk dm-integrity mapper stacks). Both are inert until the user installs
-> grub-btrfs. See [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md),
+> walk dm-integrity mapper stacks). All are inert until grub-btrfs is
+> installed. See [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md),
 > Fixes 2–3.
 
 ---

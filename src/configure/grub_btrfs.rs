@@ -14,7 +14,7 @@
 
 use crate::config::{DeploymentConfig, InitSystem};
 use crate::configure::bootloader::uses_standalone_grub;
-use crate::configure::packages::pacman_install_chroot;
+use crate::configure::packages::pacman_install_chroot_reviewed_status;
 use crate::disk::formatting::get_partition_uuid;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -43,7 +43,14 @@ pub fn install_grub_btrfs(
         return Ok(());
     }
 
-    install_packages(cmd, install_root)?;
+    if !install_packages(cmd, install_root)? {
+        warn!(
+            "grub-btrfs package install was declined during interactive review — \
+             skipping snapper config, grub-btrfs config and the grub-btrfsd service"
+        );
+        return Ok(());
+    }
+
     configure_snapper_root(cmd, root_fs_device, install_root)?;
     write_grub_btrfs_config(cmd, config, install_root)?;
     write_grub_btrfsd_service(cmd, config, install_root)?;
@@ -53,7 +60,11 @@ pub fn install_grub_btrfs(
 }
 
 /// Install grub-btrfs and its runtime dependencies via pacman in chroot.
-fn install_packages(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+///
+/// Routed through the interactive review policy like every other optional
+/// package collection, so `--interactive` runs get to inspect or edit the
+/// transaction.  Returns `false` when the policy skipped the install.
+fn install_packages(cmd: &CommandRunner, install_root: &str) -> Result<bool> {
     info!(
         "Installing grub-btrfs packages: {}",
         GRUB_BTRFS_PACKAGES.join(", ")
@@ -64,14 +75,15 @@ fn install_packages(cmd: &CommandRunner, install_root: &str) -> Result<()> {
             "  [dry-run] Would install via pacman: {:?}",
             GRUB_BTRFS_PACKAGES
         );
-        return Ok(());
+        return Ok(true);
     }
 
-    let pacman_cmd = format!(
-        "pacman -S --noconfirm --needed {}",
-        GRUB_BTRFS_PACKAGES.join(" ")
-    );
-    pacman_install_chroot(cmd, install_root, &pacman_cmd)
+    pacman_install_chroot_reviewed_status(
+        cmd,
+        install_root,
+        "grub-btrfs (snapshot boot)",
+        GRUB_BTRFS_PACKAGES.iter().map(|p| p.to_string()).collect(),
+    )
 }
 
 /// Create the snapper config for `/` with a top-level `@snapshots` subvolume
