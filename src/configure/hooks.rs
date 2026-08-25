@@ -1,7 +1,7 @@
 //! Custom mkinitcpio hook generation
 
 use crate::config::{DeploymentConfig, Filesystem};
-use crate::disk::layouts::{multi_volume_subvolumes, ComputedLayout};
+use crate::disk::layouts::{is_root_partition, multi_volume_subvolumes, ComputedLayout};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -408,9 +408,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     let use_subvolumes = layout.uses_subvolumes();
 
     // Root must always be first
-    let has_root = luks_data_parts
-        .iter()
-        .any(|p| p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT"));
+    let has_root = luks_data_parts.iter().any(|p| is_root_partition(p));
     if has_root {
         if use_subvolumes {
             // Root subvolume comes from the kernel cmdline: grub-btrfs snapshot
@@ -492,7 +490,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 
     // Remaining encrypted volumes
     for part in &luks_data_parts {
-        if part.mount_point.as_deref() == Some("/") || part.name.eq_ignore_ascii_case("ROOT") {
+        if is_root_partition(part) {
             continue; // Already handled above
         }
         let mp = match part.mount_point.as_deref() {

@@ -4,7 +4,7 @@ use crate::config::{Bootloader, DeploymentConfig, SecureBootMethod};
 use crate::configure::encryption::get_luks_uuid;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::get_partition_uuid;
-use crate::disk::layouts::ComputedLayout;
+use crate::disk::layouts::{is_root_partition, ComputedLayout};
 use crate::disk::lvm;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -94,14 +94,10 @@ fn install_grub(
     }
 
     // Find root partition from layout instead of hardcoding partition number.
-    // When btrfs subvolumes are enabled the root partition's mount_point is
-    // cleared to None (it mounts via subvol=@), so fall back to the
-    // partition name.
     let root_part_def = layout
         .partitions
         .iter()
-        .find(|p| p.mount_point.as_deref() == Some("/"))
-        .or_else(|| layout.partitions.iter().find(|p| p.name == "ROOT"))
+        .find(|p| is_root_partition(p))
         .ok_or_else(|| {
             crate::utils::error::DeploytixError::ConfigError(
                 "No root partition found in layout".to_string(),

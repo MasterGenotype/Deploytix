@@ -33,14 +33,20 @@ const GRUB_BTRFS_PACKAGES: &[&str] = &["grub-btrfs", "inotify-tools", "snapper"]
 /// `root_fs_device` is the block device carrying the root btrfs filesystem:
 /// the Root LUKS mapper path on encrypted layouts, the ROOT partition path
 /// otherwise.
+///
+/// Returns `false` when the interactive policy declined the package install,
+/// in which case nothing was configured — the caller must undo the parts of
+/// the system that assume grub-btrfs is present (notably the
+/// `grub-btrfs-overlayfs` entry in `HOOKS`, which would make the final
+/// `mkinitcpio -P` hard-fail on a missing hook).
 pub fn install_grub_btrfs(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     root_fs_device: &str,
     install_root: &str,
-) -> Result<()> {
+) -> Result<bool> {
     if !config.packages.install_grub_btrfs {
-        return Ok(());
+        return Ok(false);
     }
 
     if !install_packages(cmd, install_root)? {
@@ -48,7 +54,7 @@ pub fn install_grub_btrfs(
             "grub-btrfs package install was declined during interactive review — \
              skipping snapper config, grub-btrfs config and the grub-btrfsd service"
         );
-        return Ok(());
+        return Ok(false);
     }
 
     configure_snapper_root(cmd, root_fs_device, install_root)?;
@@ -56,7 +62,7 @@ pub fn install_grub_btrfs(
     write_grub_btrfsd_service(cmd, config, install_root)?;
 
     info!("grub-btrfs installation complete");
-    Ok(())
+    Ok(true)
 }
 
 /// Install grub-btrfs and its runtime dependencies via pacman in chroot.
@@ -86,6 +92,23 @@ fn install_packages(cmd: &CommandRunner, install_root: &str) -> Result<bool> {
     )
 }
 
+/// Shell command that creates the top-level `@snapshots` subvolume on
+/// `root_fs_device` (mounted by `subvolid=5`, the filesystem root) and gives
+/// it the root-only mode snapper expects.
+///
+/// The `chmod` targets the subvolume rather than the `/.snapshots` mount
+/// point: `btrfs subvolume create` yields 0755, and once mounted it is this
+/// inode users reach, so restricting only the covered directory would leave
+/// snapshot metadata world-traversable.
+fn create_snapshots_subvolume_cmd(root_fs_device: &str) -> String {
+    format!(
+        "mkdir -p /mnt && mount -t btrfs -o subvolid=5 {dev} /mnt && \
+         btrfs subvolume create /mnt/@snapshots && chmod 750 /mnt/@snapshots; \
+         ret=$?; umount /mnt; exit $ret",
+        dev = root_fs_device
+    )
+}
+
 /// Create the snapper config for `/` with a top-level `@snapshots` subvolume
 /// mounted at `/.snapshots` (the standard snapper + grub-btrfs layout).
 ///
@@ -102,7 +125,7 @@ fn configure_snapper_root(
     if cmd.is_dry_run() {
         println!("  [dry-run] snapper --no-dbus -c root create-config /");
         println!(
-            "  [dry-run] Would replace nested .snapshots with top-level @snapshots on {}",
+            "  [dry-run] Would replace nested .snapshots with top-level @snapshots (mode 0750) on {}",
             root_fs_device
         );
         println!(
@@ -117,18 +140,21 @@ fn configure_snapper_root(
 
     // 2. Drop the nested .snapshots subvolume snapper just created and
     //    replace it with a top-level @snapshots (subvolid=5 = fs root).
+    //
+    //    The mode is set on the subvolume here, not on the mount point below:
+    //    `btrfs subvolume create` makes it 0755, and once it is mounted over
+    //    /.snapshots it is the subvolume's own inode that users reach, so a
+    //    chmod on the covered directory would leave snapshot metadata
+    //    world-traversable.
     cmd.run_in_chroot(install_root, "btrfs subvolume delete /.snapshots")?;
     cmd.run_in_chroot(
         install_root,
-        &format!(
-            "mkdir -p /mnt && mount -t btrfs -o subvolid=5 {dev} /mnt && \
-             btrfs subvolume create /mnt/@snapshots; ret=$?; umount /mnt; exit $ret",
-            dev = root_fs_device
-        ),
+        &create_snapshots_subvolume_cmd(root_fs_device),
     )?;
 
     // 3. Mount point for the top-level subvolume (0750 per snapper convention:
-    //    snapshot metadata is root-only).
+    //    snapshot metadata is root-only). Restricted too, so the placeholder
+    //    is not permissive while nothing is mounted over it.
     cmd.run_in_chroot(
         install_root,
         "mkdir -p /.snapshots && chmod 750 /.snapshots",
@@ -368,6 +394,78 @@ mod tests {
 
     fn read_config(install_root: &str) -> String {
         fs::read_to_string(format!("{}/etc/default/grub-btrfs/config", install_root)).unwrap()
+    }
+
+    /// Policy that declines every pacman invocation, mirroring an operator
+    /// choosing "skip" at the interactive review prompt.
+    struct DecliningPolicy;
+
+    impl crate::utils::interactive::InteractivePolicy for DecliningPolicy {
+        fn confirm_pacman(
+            &self,
+            _inv: &crate::utils::interactive::PacmanInvocation,
+        ) -> crate::utils::interactive::PacmanDecision {
+            crate::utils::interactive::PacmanDecision::Skip
+        }
+
+        fn prompt_extras(
+            &self,
+            _can_use_yay: bool,
+        ) -> (crate::utils::interactive::ExtraPackages, bool) {
+            (Default::default(), false)
+        }
+    }
+
+    #[test]
+    fn declined_install_reports_skip_and_configures_nothing() {
+        // Not dry-run: the review policy must actually be consulted. A Skip
+        // has to short-circuit before any chroot command would run — if it
+        // did not, this test would try to exec snapper on the host.
+        let cmd = CommandRunner::new(false).with_policy(
+            std::sync::Arc::new(DecliningPolicy) as crate::utils::interactive::PolicyHandle
+        );
+        let config = base_config();
+        let root = temp_root("declined");
+
+        let installed = install_grub_btrfs(&cmd, &config, "/dev/mapper/Crypt-Root", &root).unwrap();
+
+        assert!(!installed, "a declined transaction must report skipped");
+        assert!(
+            !std::path::Path::new(&format!("{}/etc/default/grub-btrfs/config", root)).exists(),
+            "declined install must not write the grub-btrfs config"
+        );
+        assert!(
+            !std::path::Path::new(&format!("{}/etc/runit", root)).exists(),
+            "declined install must not write service files"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn snapshots_subvolume_mode_set_on_subvolume_not_mountpoint() {
+        let cmd = create_snapshots_subvolume_cmd("/dev/mapper/Crypt-Root");
+
+        // The mount covers /.snapshots, so the mode that actually governs
+        // access must land on the subvolume inode.
+        let create = cmd.find("btrfs subvolume create /mnt/@snapshots").unwrap();
+        let chmod = cmd.find("chmod 750 /mnt/@snapshots").unwrap();
+        assert!(create < chmod, "chmod must follow the subvolume creation");
+
+        // Chained with && so a failed create cannot leave an unrestricted
+        // subvolume behind, and /mnt is always unmounted afterwards.
+        assert!(cmd.contains("create /mnt/@snapshots && chmod 750 /mnt/@snapshots"));
+        assert!(cmd.contains("umount /mnt"));
+        assert!(cmd.contains("mount -t btrfs -o subvolid=5 /dev/mapper/Crypt-Root /mnt"));
+
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .status();
+        if let Ok(status) = status {
+            assert!(status.success(), "generated command is not valid shell");
+        }
     }
 
     #[test]

@@ -998,21 +998,49 @@ impl Installer {
             let root_part = layout
                 .partitions
                 .iter()
-                .find(|p| p.name == "ROOT")
+                .find(|p| crate::disk::layouts::is_root_partition(p))
                 .ok_or_else(|| {
                     DeploytixError::ConfigError(
-                        "No ROOT partition found for grub-btrfs setup".to_string(),
+                        "No root partition found for grub-btrfs setup".to_string(),
                     )
                 })?;
             partition_path(&self.config.disk.device, root_part.number)
         };
 
-        configure::grub_btrfs::install_grub_btrfs(
+        let installed = configure::grub_btrfs::install_grub_btrfs(
             &self.cmd,
             &self.config,
             &root_fs_device,
             INSTALL_ROOT,
         )?;
+
+        // Declining the transaction leaves mkinitcpio.conf referencing hooks
+        // and modules that ship with the package. Phase 6's `mkinitcpio -P`
+        // hard-fails on a missing hook, so rewrite the config as if the
+        // feature had never been enabled rather than failing the install over
+        // an optional package the operator chose to skip.
+        if !installed {
+            warn!(
+                "grub-btrfs was not installed — regenerating mkinitcpio.conf without \
+                 its hooks so the final mkinitcpio -P still succeeds"
+            );
+            let mut config = self.config.clone();
+            config.packages.install_grub_btrfs = false;
+
+            // configure_mkinitcpio backs up whatever is currently on disk,
+            // which this second call would be our own Phase 5 output. Keep
+            // the pristine pre-install backup instead.
+            let conf = format!("{}/etc/mkinitcpio.conf", INSTALL_ROOT);
+            let backup = format!("{}.bak", conf);
+            let original = std::fs::read(&backup).ok();
+
+            configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &config, INSTALL_ROOT)?;
+
+            if let Some(original) = original {
+                std::fs::write(&backup, original)?;
+            }
+            return Ok(());
+        }
 
         // The service definition was just written (for s6, into
         // /etc/s6/adminsv) — sync the s6 repository so the enable can see it
