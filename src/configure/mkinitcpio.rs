@@ -168,8 +168,16 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             .partitions
             .iter()
             .any(|p| p.mount_point == "/usr");
-        let has_usr_subvolume =
-            config.disk.use_subvolumes && config.disk.filesystem == Filesystem::Btrfs;
+        // A separate @usr subvolume only exists on a single-partition btrfs
+        // layout: `compute_layout_from_config` uses `standard_subvolumes()`
+        // (@, @usr, @var, @log, @home) when there are no non-root data
+        // partitions, and otherwise gives root just "@" with /usr living
+        // inside it. Mirror that test exactly — keying on the filesystem alone
+        // would add a `usr` hook for a /usr that is not separately mounted,
+        // and keying on `use_subvolumes` (serde default false) would drop it
+        // on the single-partition layout that does need it.
+        let has_usr_subvolume = config.disk.filesystem == Filesystem::Btrfs
+            && !config.disk.partitions.iter().any(|p| p.mount_point != "/");
         if has_usr_partition || has_usr_subvolume {
             hooks.push("usr".to_string());
         }
@@ -561,16 +569,19 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_subvolumes_include_usr_hook() {
+    fn btrfs_single_partition_layout_includes_usr_hook() {
         let mut cfg = config_encrypted(false);
         cfg.disk.filesystem = Filesystem::Btrfs;
         cfg.disk.use_subvolumes = true;
-        // No explicit /usr partition — /usr comes from the @usr subvolume
-        cfg.disk.partitions.retain(|p| p.mount_point != "/usr");
+        // Single-partition btrfs: with no non-root data partitions the layout
+        // uses standard_subvolumes(), so /usr really is a separate @usr mount.
+        // (With /home or /var as their own partitions the layout gives root
+        // just "@" and /usr lives inside it — see the sibling test below.)
+        cfg.disk.partitions.retain(|p| p.mount_point == "/");
         let hooks = construct_hooks(&cfg);
         assert!(
             hooks.contains(&"usr".to_string()),
-            "Btrfs with subvolumes must include usr hook for @usr subvolume"
+            "single-partition btrfs mounts /usr from the @usr subvolume"
         );
         let filesystems_pos = hooks.iter().position(|h| h == "filesystems").unwrap();
         let usr_pos = hooks.iter().position(|h| h == "usr").unwrap();
@@ -578,6 +589,22 @@ mod tests {
             filesystems_pos < usr_pos,
             "usr hook must come after filesystems hook"
         );
+    }
+
+    #[test]
+    fn btrfs_multi_partition_layout_omits_usr_hook() {
+        let mut cfg = config_encrypted(false);
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.use_subvolumes = true;
+        // Separate data partitions exist, so root gets only "@" and /usr lives
+        // inside it — there is no @usr to mount from the initramfs.
+        cfg.disk.partitions.retain(|p| p.mount_point != "/usr");
+        assert!(
+            cfg.disk.partitions.iter().any(|p| p.mount_point != "/"),
+            "fixture must keep at least one non-root data partition"
+        );
+
+        assert!(!construct_hooks(&cfg).contains(&"usr".to_string()));
     }
 
     #[test]

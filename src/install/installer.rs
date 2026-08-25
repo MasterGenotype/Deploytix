@@ -1460,20 +1460,51 @@ impl Installer {
             .run("mount", &[&root_container.mapped_path, INSTALL_ROOT])?;
         info!("Mounted {} to {}", root_container.mapped_path, INSTALL_ROOT);
 
+        // Resolve each container's mount point from the layout partition it
+        // was created on, rather than lower-casing the volume name. The two
+        // coincide for Root/Usr/Var/Home but diverge for any custom mount
+        // point ("/srv/data" would become /srv → "data") and for nested ones
+        // ("/var/log" → "log"), which would mount at the wrong place.
+        let layout = self.layout.as_ref().unwrap();
+        let device = &self.config.disk.device;
+
+        let mut pending: Vec<(&LuksContainer, String)> = Vec::new();
         for container in &self.luks_containers {
             if container.volume_name == "Root" {
                 continue;
             }
 
-            let mount_name = container.volume_name.to_lowercase();
-            let mount_point = format!("{}/{}", INSTALL_ROOT, mount_name);
+            let mount_point = layout
+                .partitions
+                .iter()
+                .find(|p| partition_path(device, p.number) == container.device)
+                .and_then(|p| p.mount_point.clone())
+                .unwrap_or_else(|| {
+                    let fallback = format!("/{}", container.volume_name.to_lowercase());
+                    warn!(
+                        "No layout partition matches LUKS container {} ({}); \
+                         falling back to {} derived from the volume name",
+                        container.volume_name, container.device, fallback
+                    );
+                    fallback
+                });
+
+            pending.push((container, mount_point));
+        }
+
+        // Shallowest first, so a parent is mounted before anything nested
+        // inside it (e.g. /var before /var/log).
+        pending.sort_by_key(|(_, mp)| mp.matches('/').count());
+
+        for (container, mount_point) in pending {
+            let full_mount = format!("{}{}", INSTALL_ROOT, mount_point);
 
             if !self.cmd.is_dry_run() {
-                fs::create_dir_all(&mount_point)?;
+                fs::create_dir_all(&full_mount)?;
             }
             self.cmd
-                .run("mount", &[&container.mapped_path, &mount_point])?;
-            info!("Mounted {} to {}", container.mapped_path, mount_point);
+                .run("mount", &[&container.mapped_path, &full_mount])?;
+            info!("Mounted {} to {}", container.mapped_path, full_mount);
         }
 
         Ok(())
@@ -1522,6 +1553,7 @@ impl Installer {
             filesystem: &self.config.disk.filesystem,
             boot_filesystem: &self.config.disk.boot_filesystem,
             swap_type: &self.config.disk.swap_type,
+            encrypted_swap: self.config.encrypted_swap(),
             install_root: INSTALL_ROOT,
         })
     }
@@ -1530,12 +1562,25 @@ impl Installer {
     fn generate_crypttab_multi_volume(&self) -> Result<()> {
         info!("[Phase 3/6] Generating /etc/crypttab for multi-volume encrypted system");
 
+        // Random-key swap device, when hibernation is not in play.
+        let swap_device = if self.config.encrypted_swap() {
+            let layout = self.layout.as_ref().unwrap();
+            layout
+                .partitions
+                .iter()
+                .find(|p| p.is_swap)
+                .map(|p| partition_path(&self.config.disk.device, p.number))
+        } else {
+            None
+        };
+
         generate_crypttab_multi_volume(
             &self.cmd,
             &self.luks_containers,
             self.luks_boot_container.as_ref(),
             &self.keyfiles,
             self.config.disk.integrity,
+            swap_device.as_deref(),
             INSTALL_ROOT,
         )
     }

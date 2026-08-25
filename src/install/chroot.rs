@@ -6,7 +6,7 @@ use crate::disk::formatting::{
     create_btrfs_subvolumes, create_zfs_datasets, create_zfs_pool, mount_btrfs_subvolumes,
     mount_zfs_boot, mount_zfs_datasets,
 };
-use crate::disk::layouts::{ComputedLayout, SubvolumeDef};
+use crate::disk::layouts::{is_root_partition, ComputedLayout, SubvolumeDef};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use tracing::{info, warn};
@@ -21,6 +21,18 @@ pub fn mount_partitions(
     boot_filesystem: &Filesystem,
 ) -> Result<()> {
     mount_partitions_inner(cmd, device, layout, install_root, boot_filesystem)
+}
+
+/// Ordering key for mounting a partition: root first, then shallowest first.
+///
+/// Depth alone is not enough. `"/"` and `"/boot"` both contain one `'/'`, and
+/// a stable sort would then keep BOOT ahead of ROOT (BOOT comes first in the
+/// layout). Mounting `/boot` before `/` hides the boot partition beneath the
+/// later root mount, and `/boot/efi` then lands inside the *root* filesystem,
+/// so the kernel is installed to the wrong place. `mp != "/"` sorts root to
+/// the front because `false < true`.
+fn mount_sort_key(mount_point: &str) -> (bool, usize) {
+    (mount_point != "/", mount_point.matches('/').count())
 }
 
 fn mount_partitions_inner(
@@ -48,17 +60,14 @@ fn mount_partitions_inner(
         install_root
     );
 
-    // Sort partitions by mount point depth (root first, then deeper paths)
+    // Sort partitions so parents are mounted before their children.
     let mut mount_order: Vec<_> = layout
         .partitions
         .iter()
         .filter(|p| p.mount_point.is_some() && !p.is_swap)
         .collect();
 
-    mount_order.sort_by_key(|p| {
-        let mp = p.mount_point.as_ref().unwrap();
-        mp.matches('/').count()
-    });
+    mount_order.sort_by_key(|p| mount_sort_key(p.mount_point.as_ref().unwrap()));
 
     // Mount each partition
     for part in mount_order {
@@ -117,10 +126,10 @@ pub fn mount_partitions_zfs(
     let root_part = layout
         .partitions
         .iter()
-        .find(|p| p.mount_point.as_deref() == Some("/") || p.name == "ROOT")
+        .find(|p| is_root_partition(p))
         .ok_or_else(|| {
             crate::utils::error::DeploytixError::ConfigError(
-                "No ROOT partition found for ZFS layout".to_string(),
+                "No root partition found for ZFS layout".to_string(),
             )
         })?;
     let root_path = partition_path(device, root_part.number);
@@ -201,10 +210,10 @@ fn mount_partitions_with_subvolumes(
     let root_part = layout
         .partitions
         .iter()
-        .find(|p| p.name == "ROOT")
+        .find(|p| is_root_partition(p))
         .ok_or_else(|| {
             crate::utils::error::DeploytixError::ConfigError(
-                "No ROOT partition found for subvolume layout".to_string(),
+                "No root partition found for subvolume layout".to_string(),
             )
         })?;
 
@@ -355,4 +364,60 @@ pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mount points as they appear in a default non-subvolume layout, in
+    /// layout order (EFI is partition 1, BOOT partition 2).
+    fn default_mount_points() -> Vec<&'static str> {
+        vec!["/boot/efi", "/boot", "/", "/usr", "/var", "/home"]
+    }
+
+    #[test]
+    fn root_is_mounted_before_boot() {
+        let mut mps = default_mount_points();
+        mps.sort_by_key(|mp| mount_sort_key(mp));
+
+        assert_eq!(
+            mps[0], "/",
+            "root must be mounted first; mounting /boot first hides it under the later root mount"
+        );
+        let boot = mps.iter().position(|m| *m == "/boot").unwrap();
+        let efi = mps.iter().position(|m| *m == "/boot/efi").unwrap();
+        assert!(boot < efi, "/boot must precede /boot/efi");
+    }
+
+    #[test]
+    fn parents_precede_nested_children() {
+        let mut mps = vec!["/var/log", "/", "/var", "/srv/data/cache", "/srv/data"];
+        mps.sort_by_key(|mp| mount_sort_key(mp));
+
+        for (parent, child) in [("/var", "/var/log"), ("/srv/data", "/srv/data/cache")] {
+            let p = mps.iter().position(|m| *m == parent).unwrap();
+            let c = mps.iter().position(|m| *m == child).unwrap();
+            assert!(p < c, "{} must be mounted before {}", parent, child);
+        }
+        assert_eq!(mps[0], "/");
+    }
+
+    #[test]
+    fn sort_is_deterministic_regardless_of_input_order() {
+        let mut forward = default_mount_points();
+        let mut reversed = default_mount_points();
+        reversed.reverse();
+
+        forward.sort_by_key(|mp| mount_sort_key(mp));
+        reversed.sort_by_key(|mp| mount_sort_key(mp));
+
+        assert_eq!(forward[0], "/");
+        assert_eq!(reversed[0], "/");
+        assert_eq!(
+            forward.last(),
+            reversed.last(),
+            "deepest mount point must sort last either way"
+        );
+    }
 }

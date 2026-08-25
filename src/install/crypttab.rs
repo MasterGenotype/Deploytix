@@ -1,13 +1,19 @@
 //! Crypttab generation for LUKS containers
 
-use crate::config::DeploymentConfig;
+use crate::config::{DeploymentConfig, SWAP_MAPPER_NAME};
 use crate::configure::encryption::{get_luks_uuid, LuksContainer};
 use crate::configure::keyfiles::{keyfile_path, VolumeKeyfile};
 use crate::disk::detection::partition_path;
+use crate::disk::formatting::get_partition_uuid;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
 use tracing::info;
+
+/// Options for the random-key swap entry. `swap` is the flag the
+/// crypttab-unlock hook keys on to open the device in plain mode and re-run
+/// mkswap; the cipher and key size mirror the LUKS2 defaults.
+pub const SWAP_CRYPTTAB_OPTIONS: &str = "swap,cipher=aes-xts-plain64,size=256";
 
 /// Build the crypttab options string based on integrity configuration.
 /// When integrity is enabled, TRIM/discard is not supported by dm-integrity.
@@ -115,12 +121,20 @@ pub fn generate_crypttab(
 ///
 /// Creates entries for ROOT, USR, VAR, HOME and optionally BOOT with keyfile
 /// paths for automatic unlocking during initramfs.
+///
+/// `swap_device`, when set, adds a random-key swap entry: a plain (header-less)
+/// dm-crypt device re-keyed from /dev/urandom on every boot by the
+/// crypttab-unlock hook, so swapped-out memory is unrecoverable after
+/// shutdown. Only passed when hibernation is off — see
+/// [`DeploymentConfig::encrypted_swap`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate_crypttab_multi_volume(
     cmd: &CommandRunner,
     containers: &[LuksContainer],
     boot_container: Option<&LuksContainer>,
     keyfiles: &[VolumeKeyfile],
     integrity: bool,
+    swap_device: Option<&str>,
     install_root: &str,
 ) -> Result<()> {
     let total = containers.len() + if boot_container.is_some() { 1 } else { 0 };
@@ -142,6 +156,12 @@ pub fn generate_crypttab_multi_volume(
             println!(
                 "    {} UUID=<BOOT_LUKS_UUID> {} luks,discard",
                 boot.volume_name, kf_path
+            );
+        }
+        if swap_device.is_some() {
+            println!(
+                "    {} UUID=<SWAP_UUID> /dev/urandom {}",
+                SWAP_MAPPER_NAME, SWAP_CRYPTTAB_OPTIONS
             );
         }
         return Ok(());
@@ -193,13 +213,27 @@ pub fn generate_crypttab_multi_volume(
         ));
     }
 
+    // Random-key swap. Addressed by UUID of the *raw* partition: the mapper
+    // gets a new key (and so a new filesystem UUID) on every boot, so only the
+    // partition's own UUID is stable.
+    if let Some(swap_dev) = swap_device {
+        let uuid = get_partition_uuid(swap_dev)?;
+        content.push_str(&format!(
+            "{name}    UUID={uuid}    /dev/urandom    {options}\n",
+            name = SWAP_MAPPER_NAME,
+            uuid = uuid,
+            options = SWAP_CRYPTTAB_OPTIONS,
+        ));
+    }
+
     let crypttab_path = format!("{}/etc/crypttab", install_root);
     fs::create_dir_all(format!("{}/etc", install_root))?;
     fs::write(&crypttab_path, &content)?;
 
     info!(
         "Crypttab written to {} with {} entries",
-        crypttab_path, total
+        crypttab_path,
+        total + usize::from(swap_device.is_some())
     );
     Ok(())
 }
@@ -219,5 +253,33 @@ mod tests {
     fn crypttab_options_with_integrity_omits_discard() {
         // dm-integrity is incompatible with TRIM/discard
         assert_eq!(crypttab_options(true), "luks");
+    }
+
+    // ── random-key swap ──────────────────────────────────────────────────────
+
+    #[test]
+    fn swap_options_carry_the_flag_the_hook_keys_on() {
+        // crypttab-unlock branches on a bare `swap` element to open the device
+        // in plain mode; the comma framing is what its `case ",$options,"`
+        // match relies on.
+        let framed = format!(",{},", SWAP_CRYPTTAB_OPTIONS);
+        assert!(
+            framed.contains(",swap,"),
+            "hook matches on a bare `swap` element, got {}",
+            SWAP_CRYPTTAB_OPTIONS
+        );
+        assert!(SWAP_CRYPTTAB_OPTIONS.contains("cipher=aes-xts-plain64"));
+        assert!(SWAP_CRYPTTAB_OPTIONS.contains("size=256"));
+        assert!(
+            !SWAP_CRYPTTAB_OPTIONS.contains("luks"),
+            "random-key swap is plain dm-crypt, it has no LUKS header"
+        );
+    }
+
+    #[test]
+    fn swap_mapper_name_is_shared_with_fstab() {
+        // fstab addresses swap as /dev/mapper/<name> because the mapper is
+        // re-keyed each boot and has no stable UUID; the two must agree.
+        assert_eq!(SWAP_MAPPER_NAME, "Crypt-Swap");
     }
 }

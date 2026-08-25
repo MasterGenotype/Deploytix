@@ -1,6 +1,6 @@
 //! Fstab generation
 
-use crate::config::{Filesystem, SwapType};
+use crate::config::{Filesystem, SwapType, SWAP_MAPPER_NAME};
 use crate::configure::encryption::LuksContainer;
 use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
 use crate::disk::detection::partition_path;
@@ -344,6 +344,9 @@ pub struct MultiVolumeFstabParams<'a> {
     pub filesystem: &'a Filesystem,
     pub boot_filesystem: &'a Filesystem,
     pub swap_type: &'a SwapType,
+    /// Swap is a random-key dm-crypt device opened by crypttab-unlock, so the
+    /// entry points at the mapper rather than a (per-boot) UUID.
+    pub encrypted_swap: bool,
     pub install_root: &'a str,
 }
 
@@ -429,13 +432,23 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
         SwapType::Partition => {
             let swap_part = layout.partitions.iter().find(|p| p.is_swap);
             if let Some(swap) = swap_part {
-                let swap_device = partition_path(device, swap.number);
-                let swap_uuid = get_partition_uuid(&swap_device)?;
-                content.push_str(&format!(
-                    "# Swap partition\n\
-                     UUID={}  none  swap  defaults  0  0\n\n",
-                    swap_uuid
-                ));
+                if params.encrypted_swap {
+                    // The mapper is re-keyed each boot by crypttab-unlock, so
+                    // its UUID changes; address it by mapper path instead.
+                    content.push_str(&format!(
+                        "# Swap partition (random-key encrypted, re-keyed each boot)\n\
+                         /dev/mapper/{}  none  swap  defaults  0  0\n\n",
+                        SWAP_MAPPER_NAME
+                    ));
+                } else {
+                    let swap_device = partition_path(device, swap.number);
+                    let swap_uuid = get_partition_uuid(&swap_device)?;
+                    content.push_str(&format!(
+                        "# Swap partition\n\
+                         UUID={}  none  swap  defaults  0  0\n\n",
+                        swap_uuid
+                    ));
+                }
             }
         }
         SwapType::FileZram => {

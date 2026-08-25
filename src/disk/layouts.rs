@@ -8,6 +8,7 @@
 use crate::config::{CustomPartitionEntry, DiskConfig, Filesystem, SwapType};
 use crate::disk::detection::get_ram_mib;
 use crate::utils::error::{DeploytixError, Result};
+use tracing::warn;
 
 /// GPT partition type GUIDs
 #[allow(dead_code)]
@@ -336,8 +337,26 @@ pub fn compute_layout_from_entries(
         next_part_num += 1;
     }
 
-    // Add user-defined partitions
-    for entry in entries {
+    // Add user-defined partitions.
+    //
+    // The remainder entry (size_mib == 0) must come last: the sfdisk script
+    // gives it every sector up to last-lba, so anything placed after it would
+    // start beyond the end of the disk. Reorder rather than reject, and say so.
+    let mut ordered: Vec<&CustomPartitionEntry> = entries.iter().collect();
+    if let Some(pos) = ordered.iter().position(|e| e.size_mib == 0) {
+        if pos != ordered.len() - 1 {
+            let moved = ordered.remove(pos);
+            warn!(
+                "Partition '{}' claims the remaining disk space but is not last; \
+                 moving it to the end of the partition table (everything after a \
+                 remainder partition would start past the end of the disk)",
+                moved.mount_point
+            );
+            ordered.push(moved);
+        }
+    }
+
+    for entry in ordered {
         let label = entry.effective_label();
         let is_luks = entry.is_encrypted(encryption);
 
@@ -478,6 +497,11 @@ pub fn compute_layout_from_config(
 }
 
 /// Mark data partitions (non-EFI, non-boot, non-swap) as LUKS containers.
+///
+/// Swap is deliberately excluded: `is_luks` drives `luksFormat` during the
+/// encryption phase, and encrypted swap is a *plain* random-key device with no
+/// LUKS header (opened by the crypttab-unlock hook at boot). Whether swap is
+/// encrypted is decided by [`crate::config::DiskConfig::encrypted_swap`].
 fn apply_encryption_flags(layout: &mut ComputedLayout) {
     for part in &mut layout.partitions {
         if !part.is_efi && !part.is_boot_fs && !part.is_swap && !part.is_bios_boot {
@@ -555,7 +579,12 @@ pub fn apply_lvm_thin_to_layout(
     Ok(ComputedLayout {
         partitions: system_parts,
         total_mib: layout.total_mib,
-        subvolumes: layout.subvolumes,
+        // Thin LVs are formatted as plain filesystems and mounted directly
+        // (see `format_lvm_volumes` / `generate_fstab_lvm_thin`) — there is no
+        // `@` subvolume on them. Carrying the subvolume set through would make
+        // `uses_subvolumes()` true and put `rootflags=subvol=@` on the kernel
+        // cmdline for a root that has no such subvolume, which does not boot.
+        subvolumes: None,
         planned_thin_volumes: Some(planned_volumes),
     })
 }
@@ -581,6 +610,97 @@ mod tests {
             attributes: None,
             subvolume_name: None,
         }
+    }
+
+    fn btrfs_disk_config(use_lvm_thin: bool) -> DiskConfig {
+        let mut disk = crate::config::DeploymentConfig::sample().disk;
+        disk.filesystem = Filesystem::Btrfs;
+        disk.use_lvm_thin = use_lvm_thin;
+        disk.encryption = false;
+        disk
+    }
+
+    #[test]
+    fn lvm_thin_layout_reports_no_subvolumes() {
+        // Thin LVs are formatted as plain filesystems, so a carried-over
+        // subvolume set would put rootflags=subvol=@ on the cmdline for a root
+        // that has no @ subvolume — an unbootable system.
+        let plain = compute_layout_from_config(&btrfs_disk_config(false), 500_000).unwrap();
+        assert!(
+            plain.uses_subvolumes(),
+            "btrfs without LVM thin should still use subvolumes"
+        );
+
+        let thin = compute_layout_from_config(&btrfs_disk_config(true), 500_000).unwrap();
+        assert!(
+            !thin.uses_subvolumes(),
+            "LVM thin has no btrfs subvolumes on its thin LVs"
+        );
+        assert!(thin.uses_lvm_thin());
+    }
+
+    #[test]
+    fn remainder_partition_is_moved_last() {
+        // Anything placed after a remainder partition would start beyond the
+        // end of the disk, since the remainder consumes every free sector.
+        let entries = vec![
+            CustomPartitionEntry {
+                mount_point: "/".into(),
+                size_mib: 0,
+                label: None,
+                encryption: None,
+            },
+            CustomPartitionEntry {
+                mount_point: "/home".into(),
+                size_mib: 40960,
+                label: None,
+                encryption: None,
+            },
+        ];
+
+        let layout = compute_layout_from_entries(500_000, false, false, &entries).unwrap();
+        let data: Vec<&PartitionDef> = layout
+            .partitions
+            .iter()
+            .filter(|p| !p.is_efi && !p.is_boot_fs && !p.is_swap)
+            .collect();
+
+        assert_eq!(data.last().unwrap().size_mib, 0, "remainder must sort last");
+        assert!(is_root_partition(data.last().unwrap()));
+
+        // Partition numbers stay contiguous and ascending after the reorder.
+        let numbers: Vec<u32> = layout.partitions.iter().map(|p| p.number).collect();
+        let mut sorted = numbers.clone();
+        sorted.sort_unstable();
+        assert_eq!(numbers, sorted, "partition numbers must ascend");
+    }
+
+    #[test]
+    fn remainder_already_last_is_left_alone() {
+        let entries = vec![
+            CustomPartitionEntry {
+                mount_point: "/".into(),
+                size_mib: 40960,
+                label: None,
+                encryption: None,
+            },
+            CustomPartitionEntry {
+                mount_point: "/home".into(),
+                size_mib: 0,
+                label: None,
+                encryption: None,
+            },
+        ];
+
+        let layout = compute_layout_from_entries(500_000, false, false, &entries).unwrap();
+        let data: Vec<&PartitionDef> = layout
+            .partitions
+            .iter()
+            .filter(|p| !p.is_efi && !p.is_boot_fs && !p.is_swap)
+            .collect();
+
+        assert_eq!(data[0].mount_point.as_deref(), Some("/"));
+        assert_eq!(data[1].mount_point.as_deref(), Some("/home"));
     }
 
     #[test]

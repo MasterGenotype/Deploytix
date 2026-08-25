@@ -111,8 +111,13 @@ fn install_grub(
         get_partition_uuid(&root_part)?
     };
 
-    // Configure GRUB defaults
-    let uses_subvolumes = config.disk.use_subvolumes;
+    // Configure GRUB defaults.
+    //
+    // Read the subvolume fact off the layout, not `config.disk.use_subvolumes`:
+    // the layout is what actually decided whether `@` was created and whether
+    // root is mounted through it, and the two disagree for a btrfs config that
+    // leaves the flag unset (it defaults to false).
+    let uses_subvolumes = layout.uses_subvolumes();
     let swap_uuid = get_swap_uuid_from_layout(cmd, device, layout)?;
     configure_grub_defaults(
         cmd,

@@ -194,6 +194,58 @@ unlock_device() {
     return 0
 }
 
+# Open a random-key swap device.
+#
+# Swap marked `swap` in crypttab has no LUKS header: it is opened in plain
+# mode with a fresh key from /dev/urandom on every boot, so yesterday's
+# swapped-out memory is unrecoverable. That also means the previous swap
+# signature is gone, so mkswap has to run each time.
+unlock_swap_device() {
+    local device="$1"
+    local mapper_name="$2"
+    local options="$3"
+    local mapper_path="/dev/mapper/$mapper_name"
+
+    if is_already_unlocked "$mapper_name"; then
+        echo "[crypttab-unlock] $mapper_name is already unlocked, skipping."
+        return 0
+    fi
+
+    # Honour cipher=/size= from the options, else use the crypttab defaults.
+    local cipher="aes-xts-plain64"
+    local keysize="256"
+    local opt
+    local saved_ifs="$IFS"
+    IFS=','
+    for opt in $options; do
+        case "$opt" in
+            cipher=*) cipher="${opt#cipher=}" ;;
+            size=*) keysize="${opt#size=}" ;;
+        esac
+    done
+    IFS="$saved_ifs"
+
+    echo "[crypttab-unlock] Opening random-key swap $mapper_name on $device"
+    if ! cryptsetup open --type plain --key-file /dev/urandom \
+            --cipher "$cipher" --key-size "$keysize" "$device" "$mapper_name"; then
+        echo "[crypttab-unlock] ERROR: failed to open swap $mapper_name"
+        return 1
+    fi
+
+    if ! wait_for_mapper "$mapper_path"; then
+        echo "[crypttab-unlock] ERROR: $mapper_path did not appear after unlock"
+        return 1
+    fi
+
+    if ! mkswap "$mapper_path" >/dev/null 2>&1; then
+        echo "[crypttab-unlock] ERROR: mkswap failed on $mapper_path"
+        return 1
+    fi
+
+    echo "[crypttab-unlock] Swap ready at $mapper_path"
+    return 0
+}
+
 run_hook() {
     # Ensure cryptsetup is available in the initramfs environment
     if ! command -v cryptsetup >/dev/null 2>&1; then
@@ -279,6 +331,21 @@ run_hook() {
             continue
         fi
 
+        # Random-key swap is handled before the keyfile check below: its
+        # "keyfile" is /dev/urandom, a character device rather than a regular
+        # file, so the -f test would reject a perfectly valid entry.
+        case ",$options," in
+            *,swap,*)
+                if unlock_swap_device "$device" "$full_mapper_name" "$options"; then
+                    unlock_count=$((unlock_count + 1))
+                else
+                    fail_count=$((fail_count + 1))
+                    ret=1
+                fi
+                continue
+                ;;
+        esac
+
         # Verify keyfile existence
         if [ -n "$keyfile" ] && [ "$keyfile" != "none" ]; then
             if [ ! -f "$keyfile" ]; then
@@ -327,6 +394,10 @@ build() {
     fi
 
     add_binary 'cryptsetup'
+
+    # Random-key swap is re-made on every boot (the old signature dies with
+    # the old key), so mkswap has to be available in the initramfs.
+    add_binary 'mkswap'
 
     map add_udev_rule \
         '10-dm.rules' \
@@ -816,6 +887,49 @@ help() {{
 mod tests {
     use super::*;
     use crate::config::DeploymentConfig;
+
+    #[test]
+    fn crypttab_unlock_handles_random_key_swap() {
+        let hook = generate_crypttab_unlock_hook();
+        let body = &hook.hook_content;
+
+        assert!(
+            body.contains("unlock_swap_device()"),
+            "swap needs its own open path: plain mode, no LUKS header"
+        );
+        assert!(body.contains("--type plain --key-file /dev/urandom"));
+        assert!(
+            body.contains("mkswap \"$mapper_path\""),
+            "a fresh random key invalidates the old swap signature"
+        );
+
+        // The swap branch must precede the keyfile existence check: the
+        // "keyfile" is /dev/urandom, a character device, so the `-f` test
+        // there would reject a valid entry.
+        let branch = body.find("*,swap,*)").expect("swap branch missing");
+        // Anchor on the loop's error message: the same `-n "$keyfile"` test
+        // also appears earlier inside unlock_device(), which is not the one
+        // that matters here.
+        let keyfile_check = body
+            .find("Keyfile $keyfile does not exist")
+            .expect("keyfile check missing");
+        assert!(
+            branch < keyfile_check,
+            "swap must be handled before the regular-file keyfile check"
+        );
+
+        // mkswap has to exist inside the initramfs for that to work.
+        assert!(hook.install_content.contains("add_binary 'mkswap'"));
+
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(body)
+            .status();
+        if let Ok(status) = status {
+            assert!(status.success(), "generated hook is not valid shell");
+        }
+    }
 
     /// Helper: build a config with the given encryption flag
     fn config_encrypted(encryption: bool) -> DeploymentConfig {

@@ -6,6 +6,7 @@ use crate::utils::prompt::*;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
+use tracing::warn;
 
 /// Main deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,9 +103,15 @@ pub struct DiskConfig {
     #[serde(default = "default_true")]
     pub keyfile_enabled: bool,
     /// Use btrfs subvolumes within partitions.
-    /// Automatically set to true whenever `filesystem == Btrfs`; no manual
-    /// opt-in is required.  Kept as a serialisable field for backwards
-    /// compatibility with existing configuration files.
+    ///
+    /// Derived, not an input: `normalize()` sets it to
+    /// `filesystem == Btrfs && !use_lvm_thin`, matching what
+    /// `compute_layout_from_config` actually builds (LVM thin collapses the
+    /// data partitions into plain-formatted thin LVs, which carry no
+    /// subvolumes). Whatever a config file supplies is overwritten on load.
+    /// Consumers should prefer `ComputedLayout::uses_subvolumes()`, which is
+    /// the authoritative source; this field exists so a saved config reports
+    /// the layout truthfully.
     #[serde(default)]
     pub use_subvolumes: bool,
 
@@ -624,6 +631,11 @@ pub fn default_luks_boot_mapper_name() -> String {
     "Crypt-Boot".to_string()
 }
 
+/// Mapper name for random-key encrypted swap. Not configurable: the name is
+/// referenced from crypttab, fstab and the crypttab-unlock hook, which must
+/// all agree.
+pub const SWAP_MAPPER_NAME: &str = "Crypt-Swap";
+
 fn default_vg_name() -> String {
     "vg0".to_string()
 }
@@ -707,8 +719,35 @@ impl DeploymentConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: DeploymentConfig = toml::from_str(&content)?;
+        let mut config: DeploymentConfig = toml::from_str(&content)?;
+        config.normalize();
         Ok(config)
+    }
+
+    /// Bring derived fields in line with the values they are computed from, so
+    /// a hand-written TOML that omits them still describes the system that
+    /// will actually be built.
+    ///
+    /// `use_subvolumes` is the only such field today: `compute_layout_from_config`
+    /// creates btrfs subvolumes based on the filesystem alone and
+    /// `apply_lvm_thin_to_layout` drops them again, so the flag's value is
+    /// fully determined and a stale `false` (its serde default) would only
+    /// misreport what happened.
+    pub fn normalize(&mut self) {
+        self.disk.use_subvolumes =
+            self.disk.filesystem == Filesystem::Btrfs && !self.disk.use_lvm_thin;
+    }
+
+    /// Whether the swap partition is encrypted with a per-boot random key.
+    ///
+    /// Requires an encrypted install with a real swap *partition* (swap files
+    /// live inside an already-encrypted filesystem, and ZRAM never touches the
+    /// disk). Hibernation turns it off: resume must find the same swap image
+    /// after a power cycle, which a key discarded at shutdown cannot provide.
+    pub fn encrypted_swap(&self) -> bool {
+        self.disk.encryption
+            && self.disk.swap_type == SwapType::Partition
+            && !self.system.hibernation
     }
 
     /// Serialise the config to TOML and write it to `path`, creating
@@ -1334,6 +1373,20 @@ impl DeploymentConfig {
             )));
         }
 
+        // Hibernation and encrypted swap are mutually exclusive: resume needs
+        // the swap image to survive a power cycle, which a per-boot random key
+        // cannot do. Hibernation wins, so say plainly what that costs.
+        if self.disk.encryption
+            && self.disk.swap_type == SwapType::Partition
+            && self.system.hibernation
+        {
+            warn!(
+                "hibernation is enabled, so the swap partition is left unencrypted \
+                 (resume cannot use a per-boot random key). Memory paged out to swap \
+                 will be readable on disk. Set hibernation = false to encrypt swap."
+            );
+        }
+
         // Swap file requires btrfs or ext4 filesystem
         if self.disk.swap_type == SwapType::FileZram
             && self.disk.filesystem != Filesystem::Btrfs
@@ -1567,6 +1620,58 @@ impl DeploymentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_derives_use_subvolumes_from_filesystem() {
+        let mut cfg = DeploymentConfig::sample();
+
+        // A hand-written TOML that omits the key gets serde's `false`; the
+        // layout would still build subvolumes, leaving the two disagreeing.
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.use_lvm_thin = false;
+        cfg.disk.use_subvolumes = false;
+        cfg.normalize();
+        assert!(cfg.disk.use_subvolumes, "btrfs implies subvolumes");
+
+        // LVM thin collapses the data partitions into plain-formatted LVs.
+        cfg.disk.use_lvm_thin = true;
+        cfg.normalize();
+        assert!(!cfg.disk.use_subvolumes, "LVM thin has no subvolumes");
+
+        // A non-btrfs config that wrongly claims subvolumes is corrected.
+        cfg.disk.use_lvm_thin = false;
+        cfg.disk.filesystem = Filesystem::Ext4;
+        cfg.disk.use_subvolumes = true;
+        cfg.normalize();
+        assert!(!cfg.disk.use_subvolumes);
+    }
+
+    #[test]
+    fn encrypted_swap_requires_partition_swap_and_no_hibernation() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.swap_type = SwapType::Partition;
+        cfg.system.hibernation = false;
+        assert!(cfg.encrypted_swap());
+
+        // Resume needs a swap image that survives a power cycle; a per-boot
+        // random key cannot provide one, so hibernation wins.
+        cfg.system.hibernation = true;
+        assert!(!cfg.encrypted_swap());
+
+        // Swap files live inside an already-encrypted filesystem, and ZRAM
+        // never reaches the disk — neither needs its own crypt device.
+        cfg.system.hibernation = false;
+        cfg.disk.swap_type = SwapType::FileZram;
+        assert!(!cfg.encrypted_swap());
+        cfg.disk.swap_type = SwapType::ZramOnly;
+        assert!(!cfg.encrypted_swap());
+
+        // Nothing to encrypt on an unencrypted install.
+        cfg.disk.swap_type = SwapType::Partition;
+        cfg.disk.encryption = false;
+        assert!(!cfg.encrypted_swap());
+    }
 
     // ── CustomPartitionEntry::effective_label ────────────────────────────────
 
