@@ -54,6 +54,13 @@ to the generated entries.
 
 ### What is missing
 
+> **Status: all five items are now implemented** behind the
+> `packages.install_grub_btrfs` config field (installer Phase 5.45,
+> `src/configure/grub_btrfs.rs`). Read-only snapshot booting is covered too:
+> the `grub-btrfs-overlayfs` latehook on unencrypted layouts, an equivalent
+> overlay inside `mountcrypt` on multi-LUKS layouts (see
+> [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md)).
+
 1. `grub-btrfs` package installation.
 2. `/etc/default/grub-btrfs/config` generation.
 3. `grub-btrfsd` service enablement (init-system-aware).
@@ -149,17 +156,20 @@ initramfs does that. The only case where GRUB must unlock something is when
   the grub-btrfs config (GRUB reads `/boot` unencrypted, initramfs handles
   data LUKS).
 - If `boot_encryption = true`: set `GRUB_BTRFS_ENABLE_CRYPTODISK=y` (GRUB
-  must unlock the LUKS1 `/boot` container before reading any kernel or config).
+  must unlock the LUKS1 `/boot` container before reading any kernel or config),
+  **and** pin which container that is — the generator otherwise emits
+  `cryptomount -a` and GRUB prompts for every LUKS container on the disk.
 
 **Net effort**: Medium. One hook change + config file generation.
 
-> **Status: implemented** as a dormant patch script
+> **Status: implemented** as a patch script
 > (`/usr/local/bin/patch-grub-btrfs-integrity` + pacman hook
 > `91-patch-grub-btrfs.hook`) installed on encrypted btrfs layouts. It sets
-> `GRUB_BTRFS_ENABLE_CRYPTODISK` from `boot_encryption` and adds a
+> `GRUB_BTRFS_ENABLE_CRYPTODISK` from `boot_encryption`, pins `crypt_source`
+> to the boot LUKS UUID when `/boot` is encrypted, and adds a
 > `grub-probe || blkid` fallback to `41_snapshots-btrfs` (grub-probe cannot
-> walk dm-integrity mapper stacks). Both are inert until the user installs
-> grub-btrfs. See [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md),
+> walk dm-integrity mapper stacks). All are inert until grub-btrfs is
+> installed. See [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md),
 > Fixes 2–3.
 
 ---
@@ -390,22 +400,47 @@ requirement.
 
 ## Implementation Order
 
-1. Add `install_grub_btrfs` config field (no mutual-exclusion guard needed).
+All steps are now implemented; the new code lives in
+`src/configure/grub_btrfs.rs` and runs as installer Phase 5.45 (after the
+bootloader phase, before finalize's `mkinitcpio -P`).
+
+1. Add `install_grub_btrfs` config field.
+   *(Done — `PackagesConfig.install_grub_btrfs`; validation requires btrfs +
+   `use_subvolumes` and rejects `use_lvm_thin`.)*
 2. Add `grub-btrfs` to package installation (pacman, not AUR).
+   *(Done — `grub-btrfs`, `inotify-tools`, `snapper` via
+   `pacman -S --needed` in Phase 5.45, so the `91-patch-grub-btrfs.hook`
+   compat patch fires during the same transaction on encrypted layouts.)*
 3. Fix `mountcrypt` hook to parse `rootflags` from cmdline — required for
    *any* encrypted multi-LUKS system to honour snapshot boot entries.
    *(Done — see [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md).)*
 4. Add snapper root config creation in chroot (`snapper -c root create-config /`).
+   *(Done — plus replacement of the nested `.snapshots` subvolume with a
+   top-level `@snapshots` mounted at `/.snapshots` and an fstab entry.)*
 5. Generate `/etc/default/grub-btrfs/config`, selecting `GRUB_BTRFS_MKCONFIG`
    based on the existing `use_standalone` boolean:
    - standalone → `/usr/local/bin/reinstall-grub`
    - standard → `/usr/bin/grub-mkconfig`
    (Must run after `create_grub_reinstall_hook()` so the script exists when referenced.)
+   *(Done — `uses_standalone_grub()` in `src/configure/bootloader.rs` is the
+   shared predicate; the generated line carries the `DEPLOYTIX-CRYPTODISK-V1`
+   marker so `patch-grub-btrfs-integrity` treats it as already managed.)*
 6. Enable `grub-btrfsd` with the correct init service, running as root, with
    debounce timing tuned for the standalone-rebuild cost (several seconds
    per regeneration) when standalone GRUB is active.
+   *(Done — hand-written runit/OpenRC/s6/dinit definitions, all as root;
+   `GRUB_BTRFS_LIMIT="10"` bounds per-event work. No snapshot timers or
+   snap-pac ship in v1, so regeneration bursts are user-driven.)*
 7. No changes needed to `95-grub-reinstall.hook` — it already performs the
    full regenerate → rebuild → sign cycle that snapshot entries ride along on.
+
+Additionally, read-only snapshot booting (not in the original order): on
+unencrypted layouts the `grub-btrfs-overlayfs` latehook is added to `HOOKS`
+between `filesystems` and `usr`; on multi-LUKS layouts `mountcrypt` probes
+the mounted snapshot for writability and layers a tmpfs-backed overlayfs
+itself *before* mounting `/usr`, `/var` and `/home` (the stock latehook
+would hide those submounts — see the corrected analysis in
+[GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md)).
 
 This order keeps every step independently testable: 1-2 are inert until
 combined with 3-7, and 3 (the mountcrypt fix) is the only change that affects

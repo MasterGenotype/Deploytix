@@ -215,6 +215,17 @@ pub fn get_luks_partitions(layout: &ComputedLayout) -> Vec<&PartitionDef> {
     layout.partitions.iter().filter(|p| p.is_luks).collect()
 }
 
+/// True for the partition carrying `/`.
+///
+/// Two identifiers are needed because neither alone is sufficient: subvolume
+/// layouts clear the root partition's `mount_point` (it mounts via `subvol=@`,
+/// see `apply_subvolumes_to_layout`), so the label is the only handle there;
+/// and custom layouts may label the root partition something other than
+/// `ROOT`, so the mount point is the only handle in that case.
+pub fn is_root_partition(part: &PartitionDef) -> bool {
+    part.mount_point.as_deref() == Some("/") || part.name.eq_ignore_ascii_case("ROOT")
+}
+
 /// Derive the btrfs subvolume name for a given mount point.
 ///
 /// Convention: `@` for root, `@<last-component>` for everything else.
@@ -554,6 +565,48 @@ mod tests {
     use super::*;
 
     // ── Pure math helpers ────────────────────────────────────────────────────
+
+    fn part(name: &str, mount_point: Option<&str>) -> PartitionDef {
+        PartitionDef {
+            number: 1,
+            name: name.to_string(),
+            size_mib: 0,
+            type_guid: partition_types::LINUX_FILESYSTEM.to_string(),
+            mount_point: mount_point.map(|s| s.to_string()),
+            is_swap: false,
+            is_efi: false,
+            is_luks: false,
+            is_bios_boot: false,
+            is_boot_fs: false,
+            attributes: None,
+            subvolume_name: None,
+        }
+    }
+
+    #[test]
+    fn is_root_partition_matches_mount_point_or_label() {
+        // Raw (non-subvolume) layout: mount_point identifies root.
+        assert!(is_root_partition(&part("ROOT", Some("/"))));
+        // Custom label, mount_point still present.
+        assert!(is_root_partition(&part("SYSTEM", Some("/"))));
+        // Subvolume layout clears mount_point; the label is the only handle.
+        assert!(is_root_partition(&part("ROOT", None)));
+        assert!(is_root_partition(&part("root", None)), "case-insensitive");
+
+        assert!(!is_root_partition(&part("HOME", Some("/home"))));
+        assert!(!is_root_partition(&part("USR", None)));
+    }
+
+    #[test]
+    fn is_root_partition_cannot_identify_custom_labelled_subvolume_root() {
+        // Documents a known gap rather than asserting desired behaviour: on a
+        // subvolume layout the root mount_point is cleared, so a root labelled
+        // something other than ROOT has no handle left. Such a config already
+        // fails earlier, in install_grub().
+        let mut p = part("SYSTEM", None);
+        p.subvolume_name = Some("@".to_string());
+        assert!(!is_root_partition(&p));
+    }
 
     #[test]
     fn floor_align_rounds_down_to_nearest_multiple() {

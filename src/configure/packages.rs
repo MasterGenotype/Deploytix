@@ -32,9 +32,21 @@ pub(crate) fn pacman_install_chroot_reviewed(
     label: &str,
     packages: Vec<String>,
 ) -> Result<()> {
+    pacman_install_chroot_reviewed_status(cmd, install_root, label, packages).map(|_| ())
+}
+
+/// As [`pacman_install_chroot_reviewed`], but reports whether the transaction
+/// actually ran: `Ok(false)` means the interactive policy skipped it.  Use
+/// this when later steps depend on the packages being present.
+pub(crate) fn pacman_install_chroot_reviewed_status(
+    cmd: &CommandRunner,
+    install_root: &str,
+    label: &str,
+    packages: Vec<String>,
+) -> Result<bool> {
     let inv = PacmanInvocation::pacman_chroot(install_root, label, packages);
     let Some(inv) = cmd.review_pacman(inv)? else {
-        return Ok(());
+        return Ok(false);
     };
     let extras = if inv.extra_flags.is_empty() {
         String::new()
@@ -46,7 +58,8 @@ pub(crate) fn pacman_install_chroot_reviewed(
         extras,
         inv.packages.join(" ")
     );
-    pacman_install_chroot(cmd, install_root, &install_cmd)
+    pacman_install_chroot(cmd, install_root, &install_cmd)?;
+    Ok(true)
 }
 
 /// Run `sudo -u <user> yay -S` in chroot, after passing the package list

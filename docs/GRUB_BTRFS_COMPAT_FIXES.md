@@ -5,18 +5,19 @@ Status: **implemented** (see per-fix code references below).
 These fixes originate from a 2026-05-18 field incident on a Deploytix-deployed
 Artix system (runit, multi-LUKS with dm-integrity, btrfs subvolumes,
 unencrypted `/boot`) where the user had installed the `grub-btrfs` package for
-snapshot boot menu entries. Two independent failures caused every
+snapshot boot menu entries. A failing `grub-probe` (Fix 2) caused every
 kernel-update GRUB regeneration to abort silently — the machine was one reboot
-away from an unbootable state — and a third gap made snapshot menu entries
-boot the live system instead of the selected snapshot. The full root-cause
-analysis lives in [GRUB_BTRFS_FEASIBILITY.md](GRUB_BTRFS_FEASIBILITY.md); this
-document records what Deploytix now ships to close each gap, and how to undo
-it.
+away from an unbootable state — while a second gap made snapshot menu entries
+boot the live system instead of the selected snapshot (Fix 1). Fix 3 covers a
+related mis-targeting on encrypted-`/boot` layouts, which degrades snapshot
+boot rather than breaking regeneration. The full root-cause analysis lives in
+[GRUB_BTRFS_FEASIBILITY.md](GRUB_BTRFS_FEASIBILITY.md); this document records
+what Deploytix now ships to close each gap, and how to undo it.
 
-Deploytix does **not** install grub-btrfs. Fixes 2 and 3 are delivered as a
-dormant patch script plus a pacman hook that only fire if/when the user
-installs grub-btrfs; Fix 1 is unconditionally part of the generated
-`mountcrypt` hook on subvolume layouts.
+Fixes 2 and 3 are delivered as a patch script plus a pacman hook, applied on
+encrypted btrfs layouts and dormant until grub-btrfs is installed — by
+`packages.install_grub_btrfs` or by the user later. Fix 1 is unconditionally
+part of the generated `mountcrypt` hook on subvolume layouts.
 
 ---
 
@@ -106,39 +107,83 @@ restores the pristine generator.
 `patch-grub-btrfs-integrity`).
 
 **Problem.** With `GRUB_BTRFS_ENABLE_CRYPTODISK="true"` in
-`/etc/default/grub-btrfs/config`, the generator extracts a LUKS UUID by
-grepping the cmdline for `cryptdevice=UUID=…:cryptdev` — the format consumed
-by the stock `encrypt` mkinitcpio hook, which Deploytix's custom hooks replace
-and whose cmdline token Deploytix never emits. The grep exits 1 and `set -e`
-aborts the generator (same blast radius as Fix 2). That branch only exists for
-setups where GRUB must `cryptomount` a disk before it can read a kernel, i.e.
-when `/boot` itself is encrypted.
+`/etc/default/grub-btrfs/config`, the generator picks the LUKS container GRUB
+must unlock by grepping the cmdline for `cryptdevice=UUID=…:cryptdev` — the
+format consumed by the stock `encrypt` mkinitcpio hook, which Deploytix's
+custom hooks replace and whose cmdline token Deploytix never emits.
 
-**Fix.** The patch script sets `GRUB_BTRFS_ENABLE_CRYPTODISK` from the
-layout's `boot_encryption` value baked in at install time: `"false"` for
-unencrypted `/boot` (GRUB uses the plain `insmod btrfs` + `search --fs-uuid`
-path), `"true"` when `/boot` is a LUKS1 container. Applied once, marked with
-`# DEPLOYTIX-CRYPTODISK-V1` on the managed line; later manual edits by the
-user are never overwritten because the marker check runs first.
+That grep is `|| true`-guarded upstream, so — unlike Fix 2 — it does **not**
+abort the generator:
+
+```bash
+crypt_source="$(printf '%s %s\n' "$GRUB_CMDLINE_LINUX_DEFAULT" "$GRUB_CMDLINE_LINUX" \
+                  | grep -o -P 'cryptdevice=\K[^:]+' || true)"
+```
+
+With no token the generator falls through to `cryptomount -a` instead of
+`cryptomount -u <uuid>`, so GRUB tries to unlock **every** LUKS container it
+can see — on a multi-LUKS layout that is a passphrase prompt for Boot, Root,
+Usr, Var and Home before a snapshot entry boots. It is a boot-UX regression,
+not a regeneration failure. The branch only exists for setups where GRUB must
+`cryptomount` a disk before it can read a kernel, i.e. when `/boot` itself is
+encrypted.
+
+**Fix.** Two parts, both baked in at install time:
+
+1. `ensure_cryptodisk_flag()` sets `GRUB_BTRFS_ENABLE_CRYPTODISK` from the
+   layout's `boot_encryption`: `"false"` for unencrypted `/boot` (GRUB uses
+   the plain `insmod btrfs` + `search --fs-uuid` path), `"true"` when `/boot`
+   is a LUKS container. Marked `# DEPLOYTIX-CRYPTODISK-V1` on the managed
+   line.
+2. `ensure_crypt_source_fallback()` (encrypted `/boot` only) appends a default
+   to the extraction so the correct container is targeted:
+
+   ```bash
+   crypt_source="${crypt_source:-UUID=<boot-luks-uuid>}" # DEPLOYTIX-CRYPTSOURCE-V1
+   ```
+
+   Upstream's next block turns a `UUID=…` source into `cryptomount -u`. The
+   default is *appended* rather than replacing the extraction, so if upstream
+   reworks that line the patch degrades to today's `cryptomount -a` behaviour
+   instead of corrupting the script.
+
+Both are applied once and skipped when their marker is present, so later
+manual edits by the user are never overwritten.
 
 **Rollback.** Edit the value in `/etc/default/grub-btrfs/config` (keep or
 remove the marker — with the marker present the script leaves the line alone).
+To drop the pinned container, delete the `DEPLOYTIX-CRYPTSOURCE-V1` line from
+`/etc/grub.d/41_snapshots-btrfs`; leaving the marker-bearing line out but the
+marker absent means the next package upgrade re-applies it.
 
 ---
 
-## Remaining caveats (not fixed here)
+## Remaining caveats
 
-- **Read-only snapshots.** snapper snapshots are RO by default and mountcrypt
-  mounts rw. Booting one writably needs grub-btrfs's `grub-btrfs-overlayfs`
-  latehook in `HOOKS` (it does not conflict with mountcrypt — it runs after
-  the mount and layers tmpfs+overlayfs on RO btrfs roots). Deploytix does not
-  add it because the hook belongs to the grub-btrfs package, which Deploytix
-  does not install; mkinitcpio fails on missing hooks.
+- **Read-only snapshots** — *fixed when `install_grub_btrfs = true`.* snapper
+  snapshots are RO by default. On unencrypted layouts the stock
+  `grub-btrfs-overlayfs` latehook is added to `HOOKS` (the package is
+  installed, so mkinitcpio finds it). On multi-LUKS layouts the stock
+  latehook is **not** usable, contrary to this document's earlier analysis:
+  by latehook time mountcrypt has already mounted `/usr`, `/var` and `/home`
+  inside `/new_root`, and the latehook's `mount --move` would carry them into
+  the overlay's lowerdir where overlayfs hides submounts — `/usr` would
+  appear empty and boot would fail. Instead the generated mountcrypt hook
+  probes the mounted root for writability and, when a non-default subvolume
+  is read-only, layers a tmpfs-backed overlayfs over it *before* the other
+  volume mounts. Without `install_grub_btrfs`, behaviour is unchanged
+  (mountcrypt mounts rw and prints the manual-remedy hint on failure).
 - **Partial rollback semantics.** Only `/` is snapshotted; `/usr`, `/var`,
-  `/home` remain live volumes on separate LUKS containers. Booting a snapshot
-  shows the snapshot's root with the live everything-else.
-- **Full grub-btrfs integration** (installing the package, snapper config,
-  `grub-btrfsd` service wiring per init system) remains future work — see the
+  `/home` remain live volumes on separate LUKS containers (separate
+  subvolumes on the single-partition layout). Booting a snapshot shows the
+  snapshot's root with the live everything-else. This is by design.
+- **Full grub-btrfs integration** — *implemented* behind
+  `packages.install_grub_btrfs` (installer Phase 5.45,
+  `src/configure/grub_btrfs.rs`): package installation from the official
+  repos, snapper root config with a top-level `@snapshots` subvolume,
+  `/etc/default/grub-btrfs/config` generation (pointing
+  `GRUB_BTRFS_MKCONFIG` at `reinstall-grub` on standalone-GRUB systems), and
+  `grub-btrfsd` service definitions for runit/OpenRC/s6/dinit. See the
   implementation order in
   [GRUB_BTRFS_FEASIBILITY.md](GRUB_BTRFS_FEASIBILITY.md).
 

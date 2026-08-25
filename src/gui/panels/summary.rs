@@ -154,6 +154,15 @@ pub fn show(
                             "Disabled"
                         },
                     );
+                    row(
+                        ui,
+                        "grub-btrfs",
+                        if packages.install_grub_btrfs {
+                            "Enabled (snapshot boot menu + snapper root config)"
+                        } else {
+                            "Disabled"
+                        },
+                    );
                 });
         });
 

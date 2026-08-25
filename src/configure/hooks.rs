@@ -1,7 +1,7 @@
 //! Custom mkinitcpio hook generation
 
 use crate::config::{DeploymentConfig, Filesystem};
-use crate::disk::layouts::{multi_volume_subvolumes, ComputedLayout};
+use crate::disk::layouts::{is_root_partition, multi_volume_subvolumes, ComputedLayout};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -408,9 +408,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     let use_subvolumes = layout.uses_subvolumes();
 
     // Root must always be first
-    let has_root = luks_data_parts
-        .iter()
-        .any(|p| p.mount_point.as_deref() == Some("/") || p.name.eq_ignore_ascii_case("ROOT"));
+    let has_root = luks_data_parts.iter().any(|p| is_root_partition(p));
     if has_root {
         if use_subvolumes {
             // Root subvolume comes from the kernel cmdline: grub-btrfs snapshot
@@ -440,6 +438,43 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
                 sv_name = root_svols[0].name,
                 sv_opts = root_svols[0].mount_options,
             ));
+
+            // Read-only snapshot boot support. The stock grub-btrfs-overlayfs
+            // latehook is NOT usable here: by latehook time this handler has
+            // already mounted /usr, /var and /home inside $new_root, and its
+            // `mount --move` would bury them in the overlay's lowerdir where
+            // overlayfs hides submounts (/usr would appear empty). Instead the
+            // overlay is layered right after the root mount, BEFORE the other
+            // volume mounts, so they land on top of the overlay and stay
+            // visible. Requires the `overlay` module (added to MODULES when
+            // install_grub_btrfs is set on encrypted layouts).
+            if config.packages.install_grub_btrfs {
+                volume_mounts.push_str(&format!(
+                    r#"
+    # RO snapshot boot (grub-btrfs): snapper snapshots are read-only by
+    # default. btrfs mounts a RO subvolume rw-at-the-vfs-level, so probe with
+    # an actual write and layer a tmpfs-backed overlayfs when it fails.
+    if [ "$root_subvol" != "{sv_name}" ]; then
+        if touch "$new_root/.deploytix-rw-probe" 2>/dev/null; then
+            rm -f "$new_root/.deploytix-rw-probe"
+        else
+            echo "[mountcrypt] Root subvol $root_subvol is read-only; layering tmpfs overlay (changes are ephemeral)"
+            mkdir -p /run/deploytix-overlay
+            mount -t tmpfs -o mode=0755 deploytix-overlay /run/deploytix-overlay
+            mkdir -p /run/deploytix-overlay/upper /run/deploytix-overlay/work /run/deploytix-overlay/lower
+            mount --move "$new_root" /run/deploytix-overlay/lower
+            if mount -t overlay overlay -o lowerdir=/run/deploytix-overlay/lower,upperdir=/run/deploytix-overlay/upper,workdir=/run/deploytix-overlay/work "$new_root"; then
+                echo "[mountcrypt] Overlay root active"
+            else
+                echo "[mountcrypt] WARNING: overlay mount failed; restoring direct (read-only) root mount" >&2
+                mount --move /run/deploytix-overlay/lower "$new_root"
+            fi
+        fi
+    fi
+"#,
+                    sv_name = root_svols[0].name,
+                ));
+            }
         } else {
             volume_mounts.push_str(
                 r#"    # Mount root first (required)
@@ -455,7 +490,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 
     // Remaining encrypted volumes
     for part in &luks_data_parts {
-        if part.mount_point.as_deref() == Some("/") || part.name.eq_ignore_ascii_case("ROOT") {
+        if is_root_partition(part) {
             continue; // Already handled above
         }
         let mp = match part.mount_point.as_deref() {
@@ -1138,6 +1173,65 @@ mod tests {
             !hook.hook_content.contains("resolve_root_subvol"),
             "Plain-filesystem layouts must not parse rootflags"
         );
+    }
+
+    #[test]
+    fn mountcrypt_hook_overlay_block_only_with_grub_btrfs() {
+        let mut layout = standard_encrypted_layout();
+        layout.subvolumes = Some(multi_volume_subvolumes("Root"));
+
+        // Flag off: no overlay logic (regression guard for the default path).
+        let cfg = config_encrypted(true);
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+        assert!(
+            !hook.hook_content.contains("deploytix-overlay"),
+            "Overlay block must not be emitted without install_grub_btrfs"
+        );
+
+        // Flag on: overlay block present, layered before the other volume
+        // mounts so /usr, /var and /home land on top of the overlay.
+        let mut cfg = config_encrypted(true);
+        cfg.packages.install_grub_btrfs = true;
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+        let overlay_pos = hook
+            .hook_content
+            .find("mount -t overlay overlay")
+            .expect("Overlay mount missing with install_grub_btrfs");
+        let usr_pos = hook
+            .hook_content
+            .find("=== Mounting /usr ===")
+            .expect("/usr mount section missing");
+        assert!(
+            overlay_pos < usr_pos,
+            "Overlay must be layered before /usr is mounted into the root"
+        );
+        assert!(hook.hook_content.contains("/run/deploytix-overlay"));
+    }
+
+    #[test]
+    fn mountcrypt_hook_with_overlay_is_valid_shell_syntax() {
+        let mut cfg = config_encrypted(true);
+        cfg.packages.install_grub_btrfs = true;
+        let mut layout = standard_encrypted_layout();
+        layout.subvolumes = Some(multi_volume_subvolumes("Root"));
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+
+        let path = std::env::temp_dir().join(format!(
+            "deploytix-mountcrypt-overlay-syntax-{}",
+            std::process::id()
+        ));
+        fs::write(&path, &hook.hook_content).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&path)
+            .status();
+        let _ = fs::remove_file(&path);
+        if let Ok(status) = status {
+            assert!(
+                status.success(),
+                "generated mountcrypt hook (overlay variant) fails sh -n syntax check"
+            );
+        }
     }
 
     #[test]

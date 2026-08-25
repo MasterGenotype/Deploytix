@@ -4,7 +4,7 @@ use crate::config::{Bootloader, DeploymentConfig, SecureBootMethod};
 use crate::configure::encryption::get_luks_uuid;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::get_partition_uuid;
-use crate::disk::layouts::ComputedLayout;
+use crate::disk::layouts::{is_root_partition, ComputedLayout};
 use crate::disk::lvm;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -21,6 +21,15 @@ const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile
     part_msdos part_gpt password_pbkdf2 png probe reboot regexp search \
     search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
     video xfs zfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
+
+/// Whether this configuration boots through a standalone GRUB EFI binary
+/// (grub.cfg embedded as a memdisk, rebuilt + re-signed on change) instead of
+/// a standard grub-install with an on-disk grub.cfg.
+pub fn uses_standalone_grub(config: &DeploymentConfig) -> bool {
+    config.system.secureboot
+        && config.system.secureboot_method == SecureBootMethod::Sbctl
+        && config.disk.encryption
+}
 
 /// Install and configure the bootloader
 pub fn install_bootloader(
@@ -85,14 +94,10 @@ fn install_grub(
     }
 
     // Find root partition from layout instead of hardcoding partition number.
-    // When btrfs subvolumes are enabled the root partition's mount_point is
-    // cleared to None (it mounts via subvol=@), so fall back to the
-    // partition name.
     let root_part_def = layout
         .partitions
         .iter()
-        .find(|p| p.mount_point.as_deref() == Some("/"))
-        .or_else(|| layout.partitions.iter().find(|p| p.name == "ROOT"))
+        .find(|p| is_root_partition(p))
         .ok_or_else(|| {
             crate::utils::error::DeploytixError::ConfigError(
                 "No root partition found in layout".to_string(),
@@ -255,9 +260,7 @@ pub fn run_grub_install_with_secureboot(
     install_root: &str,
 ) -> Result<()> {
     // For sbctl method with encryption, use standalone GRUB to avoid verification errors
-    let use_standalone = config.system.secureboot
-        && config.system.secureboot_method == SecureBootMethod::Sbctl
-        && config.disk.encryption;
+    let use_standalone = uses_standalone_grub(config);
 
     if use_standalone {
         info!("Using standalone GRUB for SecureBoot with encryption");
@@ -424,9 +427,7 @@ pub fn create_grub_reinstall_hook(
     fs::create_dir_all(&hooks_dir)?;
 
     // Standalone GRUB is used when SecureBoot (sbctl) + encryption are both active
-    let use_standalone = config.system.secureboot
-        && config.system.secureboot_method == SecureBootMethod::Sbctl
-        && config.disk.encryption;
+    let use_standalone = uses_standalone_grub(config);
 
     create_grub_reinstall_script(config, device, use_standalone, install_root)?;
 
@@ -572,32 +573,42 @@ echo "GRUB reinstallation complete"
 
 /// Install the grub-btrfs compatibility patch for encrypted btrfs layouts.
 ///
-/// Deploytix does not install grub-btrfs, but users commonly add it for
-/// snapshot boot menu entries. On this installer's encrypted layouts its
-/// `/etc/grub.d/41_snapshots-btrfs` generator aborts `grub-mkconfig` (and
-/// with it every kernel-update GRUB regeneration) for two reasons:
+/// On this installer's encrypted layouts, grub-btrfs's
+/// `/etc/grub.d/41_snapshots-btrfs` generator misbehaves in two distinct
+/// ways — one fatal, one a boot-time regression:
 ///
-/// 1. `grub-probe --target=fs_uuid` cannot walk device-mapper stacks that
-///    contain a dm-integrity layer (`<name>_dif`) — and fails on some plain
-///    LUKS2 setups too. The generator runs under `set -e`, so the failing
-///    command substitution kills the whole script.
-/// 2. With `GRUB_BTRFS_ENABLE_CRYPTODISK="true"` it extracts a LUKS UUID by
-///    grepping the cmdline for `cryptdevice=…:cryptdev`, a token the stock
-///    `encrypt` hook consumes but Deploytix's custom hooks never emit.
+/// 1. **Fatal.** `grub-probe --target=fs_uuid` cannot walk device-mapper
+///    stacks that contain a dm-integrity layer (`<name>_dif`) — and fails on
+///    some plain LUKS2 setups too. The generator runs under `set -e`, so the
+///    failing command substitution kills the whole script, aborting
+///    `grub-mkconfig` and with it every kernel-update GRUB regeneration.
+/// 2. **Degraded.** With `GRUB_BTRFS_ENABLE_CRYPTODISK="true"` the generator
+///    resolves which LUKS container GRUB must unlock by grepping the cmdline
+///    for `cryptdevice=…`, a token the stock `encrypt` hook consumes but
+///    Deploytix's custom hooks never emit. That grep is `|| true`-guarded
+///    upstream, so it does *not* abort `grub-mkconfig`; instead the generator
+///    falls back to `cryptomount -a`, making GRUB prompt for every LUKS
+///    container it can see (Boot, Root, Usr, Var, Home) before a snapshot
+///    entry boots, rather than unlocking just the one holding `/boot`.
 ///
 /// Creates:
 /// - `/usr/local/bin/patch-grub-btrfs-integrity` — adds a `grub-probe ||
-///   blkid` fallback chain to `41_snapshots-btrfs` and sets
-///   `GRUB_BTRFS_ENABLE_CRYPTODISK` to match the layout's boot encryption
+///   blkid` fallback chain to `41_snapshots-btrfs`, sets
+///   `GRUB_BTRFS_ENABLE_CRYPTODISK` to match the layout's boot encryption,
+///   and (when `/boot` is encrypted) pins `crypt_source` to the boot LUKS
+///   UUID so snapshot entries emit `cryptomount -u <uuid>`
 /// - `/etc/pacman.d/hooks/91-patch-grub-btrfs.hook` — re-applies the patch
 ///   whenever the grub-btrfs package (re)writes `41_snapshots-btrfs`;
 ///   numbered before `95-grub-reinstall.hook` so the patched generator is in
 ///   place when `grub-mkconfig` runs
 ///
-/// Both are inert until grub-btrfs is installed.
+/// Both are inert until grub-btrfs is installed. `boot_luks_uuid` is the LUKS
+/// UUID of the container holding `/boot`, required when
+/// `config.disk.boot_encryption` is set and ignored otherwise.
 pub fn create_grub_btrfs_compat(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
+    boot_luks_uuid: Option<&str>,
     install_root: &str,
 ) -> Result<()> {
     info!("Installing grub-btrfs compatibility patch for encrypted btrfs layout");
@@ -616,6 +627,21 @@ pub fn create_grub_btrfs_compat(
         "false"
     };
 
+    // Only meaningful on the cryptodisk path. Empty disables the patch, which
+    // leaves upstream's `cryptomount -a` fallback in place.
+    let boot_luks_uuid = if config.disk.boot_encryption {
+        let uuid = boot_luks_uuid.unwrap_or("");
+        if uuid.is_empty() {
+            warn!(
+                "Encrypted /boot but no boot LUKS UUID available — grub-btrfs snapshot \
+                 entries will fall back to `cryptomount -a` (prompts for every container)"
+            );
+        }
+        uuid
+    } else {
+        ""
+    };
+
     let script = format!(
         r##"#!/bin/bash
 # Patch grub-btrfs for Deploytix encrypted layouts.
@@ -628,10 +654,15 @@ pub fn create_grub_btrfs_compat(
 #    filesystem superblock through the mapper device and has no opinion about
 #    the device-mapper hierarchy above it.
 # 2. /etc/default/grub-btrfs/config: GRUB_BTRFS_ENABLE_CRYPTODISK must match
-#    whether /boot itself is encrypted. When "true" on a layout with an
-#    unencrypted /boot, the cryptodisk branch greps the cmdline for a
-#    `cryptdevice=` token Deploytix layouts never carry, which also aborts
-#    grub-mkconfig under `set -e`.
+#    whether /boot itself is encrypted, so the cryptodisk branch only runs
+#    where GRUB actually has to unlock something.
+# 3. On the cryptodisk branch the generator picks the container to unlock by
+#    grepping the kernel cmdline for `cryptdevice=`, a token the stock
+#    `encrypt` hook consumes but Deploytix's custom hooks never emit. That
+#    grep is `|| true`-guarded upstream, so grub-mkconfig still succeeds --
+#    but the generator then emits `cryptomount -a`, and GRUB prompts for
+#    every LUKS container it can see before a snapshot entry boots. Pinning
+#    crypt_source to the boot container's UUID restores `cryptomount -u`.
 #
 # Idempotent: markers record applied state. Re-run automatically whenever the
 # grub-btrfs package writes 41_snapshots-btrfs (91-patch-grub-btrfs.hook).
@@ -643,7 +674,9 @@ TARGET="/etc/grub.d/41_snapshots-btrfs"
 MARKER="# DEPLOYTIX-INTEGRITY-PATCH-V1"
 CONFIG="/etc/default/grub-btrfs/config"
 CONFIG_MARKER="# DEPLOYTIX-CRYPTODISK-V1"
+SOURCE_MARKER="# DEPLOYTIX-CRYPTSOURCE-V1"
 CRYPTODISK="{cryptodisk}"
+BOOT_LUKS_UUID="{boot_luks_uuid}"
 
 patch_snapshots_script() {{
     if [ ! -f "$TARGET" ]; then
@@ -701,10 +734,39 @@ ensure_cryptodisk_flag() {{
     echo "Set GRUB_BTRFS_ENABLE_CRYPTODISK=\"$CRYPTODISK\" in $CONFIG."
 }}
 
+# Pin the LUKS container GRUB unlocks for snapshot entries. Appends a default
+# to the existing extraction rather than rewriting it, so an upstream rewrite
+# of that line degrades to `cryptomount -a` instead of corrupting the script.
+ensure_crypt_source_fallback() {{
+    [ -n "$BOOT_LUKS_UUID" ] || return 0
+    [ -f "$TARGET" ] || return 0
+
+    if grep -qF "$SOURCE_MARKER" "$TARGET"; then
+        echo "crypt_source fallback already applied to $TARGET."
+        return 0
+    fi
+
+    if ! grep -q "cryptdevice=" "$TARGET"; then
+        echo "No cryptdevice extraction in $TARGET; skipping crypt_source fallback." >&2
+        return 0
+    fi
+
+    sed -i "/grep -o -P .cryptdevice=/a crypt_source=\"\${{crypt_source:-UUID=$BOOT_LUKS_UUID}}\" $SOURCE_MARKER" "$TARGET"
+
+    if ! grep -qF "$SOURCE_MARKER" "$TARGET"; then
+        echo "ERROR: crypt_source fallback did not apply to $TARGET" >&2
+        exit 1
+    fi
+
+    echo "Pinned snapshot cryptomount to UUID=$BOOT_LUKS_UUID in $TARGET."
+}}
+
 patch_snapshots_script
 ensure_cryptodisk_flag
+ensure_crypt_source_fallback
 "##,
         cryptodisk = cryptodisk,
+        boot_luks_uuid = boot_luks_uuid,
     );
 
     let script_dir = format!("{}/usr/local/bin", install_root);
@@ -927,6 +989,26 @@ mod tests {
     }
 
     #[test]
+    fn uses_standalone_grub_requires_sbctl_secureboot_and_encryption() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Sbctl;
+        cfg.disk.encryption = true;
+        assert!(uses_standalone_grub(&cfg));
+
+        cfg.disk.encryption = false;
+        assert!(!uses_standalone_grub(&cfg));
+
+        cfg.disk.encryption = true;
+        cfg.system.secureboot = false;
+        assert!(!uses_standalone_grub(&cfg));
+
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Shim;
+        assert!(!uses_standalone_grub(&cfg));
+    }
+
+    #[test]
     fn grub_btrfs_compat_creates_patch_script_and_hook() {
         let root = temp_install_root("compat");
         let cmd = CommandRunner::new(false);
@@ -934,7 +1016,7 @@ mod tests {
         cfg.disk.encryption = true;
         cfg.disk.boot_encryption = false;
 
-        create_grub_btrfs_compat(&cmd, &cfg, &root).unwrap();
+        create_grub_btrfs_compat(&cmd, &cfg, None, &root).unwrap();
 
         let script_path = format!("{}/usr/local/bin/patch-grub-btrfs-integrity", root);
         let script = fs::read_to_string(&script_path).unwrap();
@@ -942,6 +1024,10 @@ mod tests {
         assert!(
             script.contains(r#"CRYPTODISK="false""#),
             "Unencrypted /boot must disable the grub-btrfs cryptodisk branch"
+        );
+        assert!(
+            script.contains(r#"BOOT_LUKS_UUID="""#),
+            "Unencrypted /boot must leave the crypt_source fallback inert"
         );
         assert!(
             script.contains(r#"|| blkid -s UUID -o value "${root_device}""#),
@@ -981,15 +1067,41 @@ mod tests {
         cfg.disk.encryption = true;
         cfg.disk.boot_encryption = true;
 
-        create_grub_btrfs_compat(&cmd, &cfg, &root).unwrap();
+        const BOOT_UUID: &str = "11111111-2222-3333-4444-555555555555";
+        create_grub_btrfs_compat(&cmd, &cfg, Some(BOOT_UUID), &root).unwrap();
 
-        let script =
-            fs::read_to_string(format!("{}/usr/local/bin/patch-grub-btrfs-integrity", root))
-                .unwrap();
+        let script_path = format!("{}/usr/local/bin/patch-grub-btrfs-integrity", root);
+        let script = fs::read_to_string(&script_path).unwrap();
         assert!(
             script.contains(r#"CRYPTODISK="true""#),
             "Encrypted /boot requires the grub-btrfs cryptodisk branch"
         );
+
+        // Without this the generator falls back to `cryptomount -a`, prompting
+        // for every LUKS container on the disk before a snapshot entry boots.
+        assert!(
+            script.contains(&format!(r#"BOOT_LUKS_UUID="{}""#, BOOT_UUID)),
+            "Encrypted /boot must pin the boot container UUID"
+        );
+        assert!(
+            script.contains("DEPLOYTIX-CRYPTSOURCE-V1"),
+            "crypt_source fallback must carry its idempotence marker"
+        );
+        assert!(
+            script.contains(r#"crypt_source=\"\${crypt_source:-UUID=$BOOT_LUKS_UUID}\""#),
+            "fallback must default crypt_source without clobbering the extraction"
+        );
+
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&script_path)
+            .status();
+        if let Ok(status) = status {
+            assert!(
+                status.success(),
+                "generated patch script fails bash -n syntax check"
+            );
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

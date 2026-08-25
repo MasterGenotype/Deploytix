@@ -343,6 +343,16 @@ impl Installer {
             self.install_btrfs_tools()?;
         }
 
+        // Phase 5.45: grub-btrfs — snapshot boot menu entries + snapper root
+        // config. Must run after the bootloader phase (the 91-patch hook is
+        // then in place to patch the generator during this pacman
+        // transaction) and before finalize's `mkinitcpio -P` (which needs
+        // the package's grub-btrfs-overlayfs hook installed).
+        if self.config.packages.install_grub_btrfs {
+            self.report_progress(0.885, "Installing grub-btrfs (snapshot boot support)...");
+            self.install_grub_btrfs()?;
+        }
+
         // Phase 5.5: User autostart entries (unconditional, after user creation)
         self.report_progress(0.89, "Installing user autostart entries...");
         self.install_autostart_entries()?;
@@ -808,16 +818,27 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
 
-            // grub-btrfs (if the user later installs it) aborts grub-mkconfig
-            // on encrypted btrfs layouts, silently breaking GRUB regeneration
-            // on every kernel update. Ship the compat patch + pacman hook now;
-            // both are inert until grub-btrfs appears.
+            // grub-btrfs aborts grub-mkconfig on encrypted btrfs layouts,
+            // silently breaking GRUB regeneration on every kernel update.
+            // Ship the compat patch + pacman hook now; both are inert until
+            // grub-btrfs appears (whether via Phase 5.45 or a later manual
+            // install).
             if self.config.disk.encryption
                 && self.config.disk.filesystem == crate::config::Filesystem::Btrfs
             {
+                // With an encrypted /boot, snapshot entries need the UUID of
+                // the container GRUB unlocks, or they fall back to prompting
+                // for every container on the disk.
+                let boot_luks_uuid = if self.config.disk.boot_encryption {
+                    self.boot_luks_uuid()?
+                } else {
+                    None
+                };
+
                 configure::bootloader::create_grub_btrfs_compat(
                     &self.cmd,
                     &self.config,
+                    boot_luks_uuid.as_deref(),
                     INSTALL_ROOT,
                 )?;
             }
@@ -928,6 +949,111 @@ impl Installer {
     fn install_btrfs_tools(&self) -> Result<()> {
         info!("Installing btrfs snapshot tools via yay");
         configure::packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
+    }
+
+    /// LUKS UUID of the container holding `/boot`, for the grub-btrfs compat
+    /// patch. `None` when the layout has no Boot container or under dry-run
+    /// (where the containers were never actually created).
+    fn boot_luks_uuid(&self) -> Result<Option<String>> {
+        if self.cmd.is_dry_run() {
+            return Ok(None);
+        }
+
+        let Some(container) = self
+            .luks_containers
+            .iter()
+            .find(|c| c.volume_name == "Boot")
+        else {
+            warn!("boot_encryption is set but no Boot LUKS container was recorded");
+            return Ok(None);
+        };
+
+        configure::encryption::get_luks_uuid(&container.device).map(Some)
+    }
+
+    /// Install grub-btrfs: packages, snapper root config with a top-level
+    /// @snapshots subvolume, /etc/default/grub-btrfs/config, and an
+    /// init-specific grub-btrfsd service.
+    fn install_grub_btrfs(&self) -> Result<()> {
+        info!("[Phase 5.45] Installing grub-btrfs (snapshot boot menu entries)");
+
+        // The block device carrying the root btrfs filesystem: the Root LUKS
+        // mapper on encrypted layouts, the ROOT partition otherwise.
+        let root_fs_device = if self.config.disk.encryption {
+            match self
+                .luks_containers
+                .iter()
+                .find(|c| c.volume_name == "Root")
+            {
+                Some(c) => c.mapped_path.clone(),
+                None if self.cmd.is_dry_run() => "/dev/mapper/Crypt-Root".to_string(),
+                None => {
+                    return Err(DeploytixError::ConfigError(
+                        "No Root LUKS container found for grub-btrfs setup".to_string(),
+                    ))
+                }
+            }
+        } else {
+            let layout = self.layout.as_ref().unwrap();
+            let root_part = layout
+                .partitions
+                .iter()
+                .find(|p| crate::disk::layouts::is_root_partition(p))
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError(
+                        "No root partition found for grub-btrfs setup".to_string(),
+                    )
+                })?;
+            partition_path(&self.config.disk.device, root_part.number)
+        };
+
+        let installed = configure::grub_btrfs::install_grub_btrfs(
+            &self.cmd,
+            &self.config,
+            &root_fs_device,
+            INSTALL_ROOT,
+        )?;
+
+        // Declining the transaction leaves mkinitcpio.conf referencing hooks
+        // and modules that ship with the package. Phase 6's `mkinitcpio -P`
+        // hard-fails on a missing hook, so rewrite the config as if the
+        // feature had never been enabled rather than failing the install over
+        // an optional package the operator chose to skip.
+        if !installed {
+            warn!(
+                "grub-btrfs was not installed — regenerating mkinitcpio.conf without \
+                 its hooks so the final mkinitcpio -P still succeeds"
+            );
+            let mut config = self.config.clone();
+            config.packages.install_grub_btrfs = false;
+
+            // configure_mkinitcpio backs up whatever is currently on disk,
+            // which this second call would be our own Phase 5 output. Keep
+            // the pristine pre-install backup instead.
+            let conf = format!("{}/etc/mkinitcpio.conf", INSTALL_ROOT);
+            let backup = format!("{}.bak", conf);
+            let original = std::fs::read(&backup).ok();
+
+            configure::mkinitcpio::configure_mkinitcpio(&self.cmd, &config, INSTALL_ROOT)?;
+
+            if let Some(original) = original {
+                std::fs::write(&backup, original)?;
+            }
+            return Ok(());
+        }
+
+        // The service definition was just written (for s6, into
+        // /etc/s6/adminsv) — sync the s6 repository so the enable can see it
+        // (no-op for other init systems), then enable for the target init.
+        configure::services::sync_s6_repository(&self.cmd, &self.config.system.init, INSTALL_ROOT)?;
+        configure::services::enable_service(
+            &self.cmd,
+            &self.config.system.init,
+            "grub-btrfsd",
+            INSTALL_ROOT,
+        )?;
+
+        Ok(())
     }
 
     /// Install user autostart entries (audio-startup, nm-applet)
