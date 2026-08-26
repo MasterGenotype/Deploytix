@@ -528,7 +528,7 @@ impl Installer {
                 .lines()
                 .filter_map(|line| {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
+                    if parts.len() >= 2 && crate::disk::mapping::is_under(parts[1], INSTALL_ROOT) {
                         Some(parts[1])
                     } else {
                         None
@@ -549,14 +549,29 @@ impl Installer {
             }
         }
 
-        // 2. Deactivate LVM volume group if it was created
+        // Everything below is scoped to the disk being installed to.  The
+        // mapper names this installer uses are the same ones a
+        // deploytix-deployed host runs on, so ownership — not the name — has
+        // to decide what may be torn down.
+        let targets = crate::disk::mapping::backing_disks(&self.config.disk.device);
+
+        // 2. Deactivate the LVM volume group, but only when the group actually
+        //    sits on the target disk.  A host deployed with the same vg name
+        //    would otherwise have its live group deactivated.
         if self.config.disk.use_lvm_thin {
             let vg_name = &self.config.disk.lvm_vg_name;
-            info!("Emergency cleanup: deactivating VG {}", vg_name);
-            if let Err(e) = self.cmd.force_run("vgchange", &["-an", vg_name]) {
-                warn!(
-                    "Emergency cleanup: failed to deactivate VG {}: {}",
-                    vg_name, e
+            if crate::disk::mapping::vg_backed_only_by(vg_name, &targets) {
+                info!("Emergency cleanup: deactivating VG {}", vg_name);
+                if let Err(e) = self.cmd.force_run("vgchange", &["-an", vg_name]) {
+                    warn!(
+                        "Emergency cleanup: failed to deactivate VG {}: {}",
+                        vg_name, e
+                    );
+                }
+            } else {
+                info!(
+                    "Emergency cleanup: leaving VG {} alone — not backed by {}",
+                    vg_name, self.config.disk.device
                 );
             }
         }
@@ -565,32 +580,55 @@ impl Installer {
         //    integrity still writing tags).  These hold dm mappings open.
         Self::kill_orphaned_cryptsetup();
 
-        // 4. Close all LUKS and temporary-cryptsetup dm mappings.
-        //    Enumerate /dev/mapper for both Crypt-* (deploytix-created)
-        //    and temporary-cryptsetup-* (cryptsetup internal).
-        let mapper_dir = std::path::Path::new("/dev/mapper");
-        if let Ok(entries) = fs::read_dir(mapper_dir) {
-            let mut names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-") {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        // 4. Close this installation's LUKS mappings.
+        //
+        //    Two sources, because neither alone is sufficient.  Tracked
+        //    containers carry their resolved names (resolve_mapper_name may
+        //    have disambiguated Crypt-Root to Crypt-Root-1 because the host
+        //    already had one), but they are only recorded once a whole batch
+        //    is created — an interrupt partway through leaves open containers
+        //    untracked.  So also sweep the dm nodes that are physically backed
+        //    by the target disk, which is what makes them ours regardless of
+        //    what they are called.
+        let mut victims = crate::disk::mapping::mapper_nodes(|name| {
+            name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-")
+        });
+        victims.retain(|name| {
+            let path = format!("/dev/mapper/{}", name);
+            crate::disk::mapping::backed_only_by(&path, &targets)
+                && crate::disk::mapping::mounts_outside(&path, INSTALL_ROOT).is_empty()
+        });
+        // Deepest first, so a mapping closes before whatever it sits on.
+        victims.reverse();
 
-            // Sort reverse so inner volumes close before outer ones
-            // (e.g. Crypt-LVM before Crypt-LVM_dif, temp before temp_dif)
-            names.sort();
-            names.reverse();
+        // Tracked containers close last and in creation order's reverse: the
+        // outer LVM container carries the volumes above it.
+        let mut tracked: Vec<String> = Vec::new();
+        for container in &self.luks_containers {
+            tracked.push(container.mapper_name.clone());
+        }
+        if let Some(container) = &self.luks_boot_container {
+            tracked.push(container.mapper_name.clone());
+        }
+        if let Some(container) = &self.luks_lvm_container {
+            tracked.push(container.mapper_name.clone());
+        }
+        for name in tracked {
+            if !victims.contains(&name) {
+                victims.push(name);
+            }
+        }
 
-            for name in names {
-                info!("Emergency cleanup: closing {}", name);
-                if let Err(e) = self.cmd.force_run("cryptsetup", &["close", &name]) {
-                    warn!("Emergency cleanup: failed to close {}: {}", name, e);
+        for name in victims {
+            // dm-integrity companions close with their parent; close one
+            // explicitly only if it outlives it.
+            for candidate in [format!("{}_dif", name), name] {
+                if !std::path::Path::new(&format!("/dev/mapper/{}", candidate)).exists() {
+                    continue;
+                }
+                info!("Emergency cleanup: closing {}", candidate);
+                if let Err(e) = self.cmd.force_run("cryptsetup", &["close", &candidate]) {
+                    warn!("Emergency cleanup: failed to close {}: {}", candidate, e);
                 }
             }
         }

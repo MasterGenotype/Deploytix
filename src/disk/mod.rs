@@ -5,5 +5,6 @@ pub mod existing;
 pub mod formatting;
 pub mod layouts;
 pub mod lvm;
+pub mod mapping;
 pub mod partitioning;
 pub mod volumes;

@@ -1,11 +1,13 @@
 //! Cleanup and uninstall functionality (Undeploytix)
 
 use crate::disk::detection::list_block_devices;
+use crate::disk::mapping;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::{prompt_confirm, prompt_select};
+use std::collections::BTreeSet;
 use std::fs;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Install root path
 const INSTALL_ROOT: &str = "/install";
@@ -29,21 +31,52 @@ impl Cleaner {
             if wipe { ", wipe" } else { "" }
         );
 
-        // Unmount all filesystems
-        self.unmount_all()?;
+        // Resolve the target device up front: when a wipe is requested without
+        // one, the answer also scopes the teardown below.
+        let target_device: Option<String> = match device {
+            Some(d) => Some(d.to_string()),
+            None if wipe => Some(self.prompt_for_device()?),
+            None => None,
+        };
 
-        // Close any LUKS containers
-        self.close_encrypted_volumes()?;
+        // Establish which physical disks this run is allowed to touch, before
+        // unmounting removes the evidence.  The installation being cleaned up
+        // is identified by what it has mounted under INSTALL_ROOT, plus the
+        // explicitly named target if there is one.  Anything backed by another
+        // disk belongs to the running system: on a deploytix-deployed host the
+        // live volumes carry the same Crypt-* names this installer uses.
+        let mut targets = mapping::disks_mounted_under(INSTALL_ROOT);
+        if let Some(d) = &target_device {
+            targets.extend(mapping::backing_disks(d));
+        }
+
+        if targets.is_empty() {
+            warn!(
+                "Nothing is mounted under {} and no device was named; skipping \
+                 unmount and LUKS teardown rather than guessing which disk to \
+                 act on. Re-run with --device <disk> to scope it.",
+                INSTALL_ROOT
+            );
+        } else {
+            info!(
+                "Cleanup scoped to disk(s): {}",
+                targets
+                    .iter()
+                    .map(|d| format!("/dev/{}", d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
+            // Unmount all filesystems
+            self.unmount_all(&targets)?;
+
+            // Close any LUKS containers
+            self.close_encrypted_volumes(&targets)?;
+        }
 
         // Wipe if requested
-        if wipe {
-            let device = if let Some(d) = device {
-                d.to_string()
-            } else {
-                self.prompt_for_device()?
-            };
-
-            self.wipe_device(&device)?;
+        if let (true, Some(d)) = (wipe, target_device.as_deref()) {
+            self.wipe_device(d)?;
         }
 
         info!("Cleanup complete (all resources released)");
@@ -51,7 +84,7 @@ impl Cleaner {
     }
 
     /// Unmount all filesystems under install root
-    fn unmount_all(&self) -> Result<()> {
+    fn unmount_all(&self, targets: &BTreeSet<String>) -> Result<()> {
         info!("Unmounting all filesystems under {}", INSTALL_ROOT);
 
         // Disable swap devices that were set up for the installation
@@ -59,7 +92,9 @@ impl Cleaner {
         let mounts = fs::read_to_string("/proc/swaps").unwrap_or_default();
         for line in mounts.lines().skip(1) {
             if let Some(device) = line.split_whitespace().next() {
-                if device.starts_with(INSTALL_ROOT) || device.contains("/dev/mapper/Crypt-") {
+                if mapping::is_under(device, INSTALL_ROOT)
+                    || mapping::backed_only_by(device, targets)
+                {
                     let _ = self.cmd.run("swapoff", &[device]);
                 }
             }
@@ -71,7 +106,7 @@ impl Cleaner {
             .lines()
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
+                if parts.len() >= 2 && mapping::is_under(parts[1], INSTALL_ROOT) {
                     Some(parts[1])
                 } else {
                     None
@@ -96,42 +131,51 @@ impl Cleaner {
         Ok(())
     }
 
-    /// Close any open LUKS encrypted volumes
+    /// Close the LUKS mappings belonging to the installation being cleaned up.
     ///
-    /// Dynamically enumerates `/dev/mapper/Crypt-*` and
-    /// `/dev/mapper/temporary-cryptsetup-*` entries so that both
-    /// canonical names (e.g. `Crypt-Root`) and disambiguated names
-    /// (e.g. `Crypt-Root-1`) are closed, as well as any temporary
-    /// dm mappings left behind by interrupted `cryptsetup luksFormat`
-    /// operations.
-    fn close_encrypted_volumes(&self) -> Result<()> {
-        info!("Closing any open LUKS encrypted volumes");
+    /// Candidates are the `Crypt-*` and `temporary-cryptsetup-*` dm nodes, but
+    /// a name match only makes a node a candidate — it is closed solely when
+    /// every disk backing it is one of `targets`, and when it is not serving a
+    /// mount outside INSTALL_ROOT.  Both guards matter on a host that was
+    /// itself deployed by deploytix, where the live root, usr and home
+    /// containers answer to the same names as the ones being installed.
+    fn close_encrypted_volumes(&self, targets: &BTreeSet<String>) -> Result<()> {
+        info!("Closing LUKS volumes belonging to the installation");
 
         // Kill orphaned cryptsetup processes first (they hold dm mappings open)
         self.kill_orphaned_cryptsetup();
 
-        let mapper_dir = std::path::Path::new("/dev/mapper");
-        if let Ok(entries) = fs::read_dir(mapper_dir) {
-            // Collect and sort in reverse so deeper volumes close before root
-            let mut names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-") {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            names.sort();
-            names.reverse();
+        let mut names = mapping::mapper_nodes(|name| {
+            name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-")
+        });
+        // Reverse order so deeper volumes close before the ones they sit on
+        // (e.g. Crypt-LVM_dif before Crypt-LVM).
+        names.reverse();
 
-            for name in names {
-                info!("Closing {}", name);
-                if let Err(e) = self.cmd.run("cryptsetup", &["close", &name]) {
-                    tracing::warn!("Failed to close LUKS volume {}: {}", name, e);
-                }
+        for name in names {
+            let path = format!("/dev/mapper/{}", name);
+
+            if !mapping::backed_only_by(&path, targets) {
+                info!(
+                    "Leaving {} alone — not backed by the disk being cleaned up",
+                    name
+                );
+                continue;
+            }
+
+            let outside = mapping::mounts_outside(&path, INSTALL_ROOT);
+            if !outside.is_empty() {
+                warn!(
+                    "Refusing to close {} — still mounted at {}",
+                    name,
+                    outside.join(", ")
+                );
+                continue;
+            }
+
+            info!("Closing {}", name);
+            if let Err(e) = self.cmd.run("cryptsetup", &["close", &name]) {
+                warn!("Failed to close LUKS volume {}: {}", name, e);
             }
         }
 

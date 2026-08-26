@@ -70,6 +70,8 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 
 **Signal-Safe Cleanup**: SIGINT/SIGTERM handlers catch interruptions and automatically unmount filesystems and close LUKS containers.
 
+**Device-Scoped Teardown**: Cleanup never selects devices by name. A host deployed by deploytix runs on containers named by the same scheme the installer uses (`Crypt-Root`, `Crypt-Home`, …), and `resolve_mapper_name()` disambiguates a collision to `Crypt-Root-1` rather than avoiding it. So `disk/mapping.rs` resolves *ownership* — the physical disks backing a dm node, walked through `/sys/class/block/…/slaves` — and both teardown paths act only on mappings backed by the disk being installed to. The `cleanup` subcommand derives that disk from what is mounted under `/install` plus `--device`, and does nothing when it can determine neither.
+
 ### Dual Binary Setup
 
 - `src/main.rs` — CLI entry point (always built)
