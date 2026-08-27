@@ -35,6 +35,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt -- --check
       - run: cargo clippy --all-features -- -D warnings
+      # A release must not ship with failing tests, even if it is cut from a
+      # branch that never went through the CI workflow.
+      - run: cargo test --all-features
 
   build-cli:
     name: Build CLI binary

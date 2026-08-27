@@ -1,0 +1,57 @@
+name: CI
+
+# The release workflow only runs on tags and release/* branches, so until
+# now nothing checked ordinary pushes and pull requests — and `cargo test`
+# ran nowhere at all. This is the merge gate.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The CLI links libasound for theme audio, so even `cargo test` fails
+      # to build without the ALSA headers.
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-features
+
+  build:
+    name: Build CLI and GUI
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl-dev
+      # --features gui builds both binaries, so this covers the CLI too.
+      - name: Build
+        run: cargo build --release --features gui
