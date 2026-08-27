@@ -10,8 +10,15 @@
 > coverage) — 233 tests. P1 #7 (no CI) — `.github/workflows/ci.yml` gates
 > fmt/clippy/test on every push and PR.
 >
-> Still open and worth reading: P1 #8 (mixed `DeploytixError`/`anyhow`), P1 #9
-> (`unwrap()` in critical paths), P3 #16 (no BIOS/legacy boot). See
+> Also resolved: **P1 #8 (mixed `DeploytixError`/`anyhow`)**. `anyhow` now
+> appears exactly twice in the tree, both in `src/main.rs`, which is the layering
+> CLAUDE.md describes as intended — `DeploytixError` for domain errors,
+> `anyhow::Result` at the top level. This boundary is already correct; do not
+> "fix" it.
+>
+> Still open, verified August 2026: **P1 #9** — `.unwrap()` in non-test code,
+> 17 occurrences in `install/installer.rs` alone. **P3 #16** — no BIOS/legacy
+> boot path; the tree is UEFI-only and hardcodes `x86_64-efi`/`BOOTX64`. See
 > `docs/ROADMAP.md` for current sequencing.
 
 An audit of the current codebase surfaced the following improvement areas,

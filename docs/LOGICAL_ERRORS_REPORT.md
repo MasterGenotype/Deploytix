@@ -1,14 +1,44 @@
 # Logical Errors Report
 
-> **⚠️ HISTORICAL — most findings below are already fixed. Verify before acting.**
+> **✅ HISTORICAL — this report is essentially fully addressed. Do not work from
+> it without re-checking.**
 >
-> This was a point-in-time code review. Spot-checking against the tree in
-> August 2026 found findings **#1, #2, #3, #4, #8, #9, #10 and #21 all already
-> resolved**, including all four rated Critical. #25 is moot: `zram_percent` was
-> replaced by a fixed ZRAM size in `07ec743`.
+> All 25 findings were re-verified against the tree at `f4a4da0` in August 2026.
+> **24 are resolved** and #25 is moot. Only #23 has residue.
 >
-> Kept as a record of what was found and how it was addressed. Re-verify any
-> item against current source before treating it as open — an undated audit
+> | Finding | Verified state |
+> |---|---|
+> | #1, #2 hardcoded `btrfs` in fstab | Fixed — both generators use `fs_fstab_entry`/`fsck_pass` |
+> | #3 missing `rootflags=subvol=@` | Fixed — added in the LUKS-mapper branch |
+> | #4 crypttab mapper mismatch | Fixed — uses `crypttab_options_pub` and `Crypt-LVM` |
+> | #5, #6, #7 ZRAM created but never enabled | Fixed — runit symlinks into `runsvdir/default`, openrc into `runlevels/default`, dinit into `boot.d`; s6 commits the service DB |
+> | #8 `is_device_mounted` never matched | Fixed — matches the partition prefix |
+> | #9 `lv_mapper_path` hyphens | Fixed — doubles hyphens for device-mapper |
+> | #10 `fsck_pass` always 0 | Fixed — ext4 root=1, other ext4=2, everything else 0 |
+> | #11, #12 EFI umask / fsck pass inconsistent | Fixed — all five sites are `umask=0077,defaults … 0 0` |
+> | #13 hook timeouts half the documented value | Fixed — `sleep 1` matches the per-iteration decrement |
+> | #14 no newline to `luksAddKey` | Fixed — uses `writeln!` |
+> | #15, #16 LVM crypttab `discard` / missing `swapon` | Fixed |
+> | #17 last MB not zeroed | Fixed — `dd … seek=<last_mb>` clears the backup GPT |
+> | #18 removable misclassified as `usb` | Fixed — returns `removable`, and handles `loop` |
+> | #19 LVM entries in mount order | Fixed — filters empty mount points |
+> | #20 `nm-applet` always installed | Fixed — gated on the NetworkManager backends |
+> | #21 `swapoff -a` disabled host swap | Fixed — per-device `swapoff` |
+> | #22 silent failure cascade in cleanup | Fixed — `?` propagation plus a `warn!` per failure, with a lazy-unmount fallback |
+> | #24 wizard could create two remainder partitions | Fixed — checks `has_remainder` and gives the auto-inserted root a fixed size |
+> | #25 `zram_percent` unvalidated | Moot — the field was replaced by a fixed ZRAM size in `07ec743` |
+>
+> **#23 (operations bypassing `CommandRunner`) is partly open.** Five raw
+> `std::process::Command` sites remain: `disk/partitioning.rs:143` (sfdisk),
+> `disk/formatting.rs:98` (`mkfs.btrfs -O list-all`) and `:260` (`blkid`),
+> `cleanup/mod.rs:258` (sfdisk) and `:268` (fdisk). Two are read-only probes.
+> The three destructive ones sit behind early `is_dry_run()` returns — confirmed
+> by execution, not by reading: a full `--dry-run` install against a 200 GiB loop
+> device left the image byte-identical. So the finding's actual concern is what
+> it always said it was — the guarantee is convention rather than construction,
+> and would be fragile under restructuring. Tracked in `docs/ROADMAP.md`.
+>
+> Kept as a record of what was found and how it was addressed. An undated audit
 > invites re-fixing solved problems.
 
 Systematic code review of the Deploytix codebase, organized by severity.

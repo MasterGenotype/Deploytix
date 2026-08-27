@@ -69,7 +69,7 @@ Worth recording, because acting on the uncorrected version would waste effort:
 | `-n`/`--dry-run` is an existing global flag | It was documented but never wired up. The `CommandRunner` plumbing was complete; only the flag was missing. |
 | Test coverage is sparse (~68 tests) | It was 163 before this work, 233 after. `docs/test-coverage-proposal.md` was stale by ~165. |
 | `docs/IMPROVEMENTS.md` describes current risks | Written February 2026; most P0 items were already fixed. Now marked historical. |
-| `docs/LOGICAL_ERRORS_REPORT.md` lists open bugs | All four Critical findings were already fixed. Now marked historical. |
+| `docs/LOGICAL_ERRORS_REPORT.md` lists open bugs | All 25 findings re-verified: 24 resolved, #25 moot, only #23 with residue. Now marked historical. |
 | Rehearsal is Deploytix's dry-run | Rehearsal is the *opposite* — it performs a real install then wipes. The two are complementary. |
 
 **Accurate and still open:** the Artix-host requirement, absent aarch64 support,
@@ -167,11 +167,24 @@ generation and passed health checks", not "snapshot command returned zero".
   and retry machinery together. Package names there come from internal constants
   or operator-reviewed lists, so this is a cleanup, not an active hole.
 - **`--dry-run` is best-effort, not guaranteed.** Every destructive site is
-  guarded (verified by execution against a loop device), but the guarantee is
-  convention plus `CommandRunner`, not a sandbox. Making it structural would
-  mean routing the remaining raw `std::process::Command` sites — mostly
-  `cryptsetup` calls that need stdin — through `CommandRunner::run_with_stdin`,
-  which now exists.
+  guarded — verified by execution, not by reading: a full dry-run install
+  against a 200 GiB loop device left the image byte-identical. But the guarantee
+  is convention plus `CommandRunner`, not a sandbox, which is the live half of
+  `LOGICAL_ERRORS_REPORT.md` #23. Five raw `std::process::Command` sites remain
+  outside `CommandRunner`:
+
+  | Site | Command | Why it is currently safe |
+  |---|---|---|
+  | `disk/partitioning.rs:143` | `sfdisk` | behind an early `is_dry_run()` return in `apply_partitions` |
+  | `disk/formatting.rs:98` | `mkfs.btrfs -O list-all` | read-only capability probe |
+  | `disk/formatting.rs:260` | `blkid` | read-only |
+  | `cleanup/mod.rs:258` | `sfdisk` | behind an early `is_dry_run()` return in `wipe_device` |
+  | `cleanup/mod.rs:268` | `fdisk` | same guard |
+
+  Making it structural means routing these — plus the `cryptsetup` calls that
+  need stdin — through `CommandRunner`, whose `run_with_stdin` now exists. That
+  would also bring the encryption path into rehearsal recording, which it
+  currently escapes.
 - **Secrets are not zeroized in memory.** `Secret` prevents *logging* leaks. It
   does not scrub the heap; that needs `zeroize` and careful handling of
   `String` reallocation.
