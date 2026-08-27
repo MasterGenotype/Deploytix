@@ -1,5 +1,25 @@
 # Test Coverage Analysis & Improvement Proposal
 
+> **⚠️ Counts below are stale.** They described an early snapshot. As of August
+> 2026 the suite is **233 tests** — 223 unit across 24 modules plus 10
+> integration — and `cargo test --all-features` runs on every push and PR via
+> `.github/workflows/ci.yml`.
+>
+> **Item 1 (extract `validate_rules()`) is done**, exactly as proposed: the
+> device checks moved into `validate_device()` and the ~33 pure rules into
+> `validate_rules()`, now covered by 43 tests. Doing so immediately exposed a
+> real bug — `DeploymentConfig::sample()` violated its own iwd→yay rule, so
+> `generate-config` emitted a file that `validate` rejected.
+>
+> **Item 6 (`users.rs` command construction) is done**, though differently than
+> proposed: rather than asserting on dry-run log strings, `useradd` moved to
+> argv and `chpasswd` to a stdin pipe, so the injection class is gone by
+> construction. Note item 6 references `config.user.root_password`, which has
+> never existed — root-password policy is unimplemented, and
+> `set_root_password`/`lock_root_account` remain dead code.
+>
+> Items 2, 3, 4, 5, 7, 8, 9 and 10 remain accurate and open.
+
 ## Current State
 
 The codebase has **68 unit tests** spread across **6 files** out of 47 total Rust source files

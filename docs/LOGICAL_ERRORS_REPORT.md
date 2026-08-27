@@ -1,5 +1,16 @@
 # Logical Errors Report
 
+> **⚠️ HISTORICAL — most findings below are already fixed. Verify before acting.**
+>
+> This was a point-in-time code review. Spot-checking against the tree in
+> August 2026 found findings **#1, #2, #3, #4, #8, #9, #10 and #21 all already
+> resolved**, including all four rated Critical. #25 is moot: `zram_percent` was
+> replaced by a fixed ZRAM size in `07ec743`.
+>
+> Kept as a record of what was found and how it was addressed. Re-verify any
+> item against current source before treating it as open — an undated audit
+> invites re-fixing solved problems.
+
 Systematic code review of the Deploytix codebase, organized by severity.
 
 ---

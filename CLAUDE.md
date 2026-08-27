@@ -17,7 +17,7 @@ cargo build --release --features gui     # Release CLI + GUI binary
 cargo portable                           # Static musl binary (zero runtime deps)
 cargo clippy --all-features -- -D warnings  # Lint (warnings are errors)
 cargo fmt -- --check                     # Format check
-cargo test --all-features                # Run tests (no test suite yet)
+cargo test --all-features                # Run tests (233: 223 unit + 10 integration)
 ```
 
 **Makefile shortcuts:**
@@ -60,7 +60,24 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 
 ### Key Patterns
 
-**CommandRunner**: All system commands (`mkfs`, `cryptsetup`, `mount`, etc.) go through `CommandRunner` which respects dry-run mode. Use `cmd.run()` for host commands and `cmd.run_in_chroot()` for chroot execution.
+**CommandRunner**: All system commands (`mkfs`, `cryptsetup`, `mount`, etc.) go through `CommandRunner` which respects dry-run mode.
+
+- `cmd.run(prog, args)` — host commands, argv (no shell).
+- `cmd.run_in_chroot_argv(root, argv)` — **prefer this** for chroot commands.
+  No shell, so a username or package name cannot be re-parsed as syntax.
+- `cmd.run_in_chroot(root, "…")` — the shell escape hatch, `bash -c`. Use it
+  only when the command genuinely needs pipes, redirection, `&&`, or command
+  substitution. There is no quoting layer, so anything interpolated in is
+  parsed by bash.
+- `cmd.run_with_stdin(...)` / `cmd.run_in_chroot_argv_stdin(...)` — for
+  credentials. The payload is piped, never placed in argv (where
+  `/proc/<pid>/cmdline` exposes it) and never logged or recorded.
+
+**Secrets**: passphrases and passwords are `utils::secret::Secret`, a
+`#[serde(transparent)]` string newtype whose `Debug` prints `<redacted>`.
+`DeploymentConfig` derives `Debug`, so any new credential field must be
+`Secret` or a single `{:?}` will leak it. `Secret` has no `Display`; reaching
+the plaintext is always an explicit `.as_str()`.
 
 **Partition Layout Abstraction**: `ComputedLayout` and `PartitionDef` in `disk/layouts.rs` are generic across all layout types. Downstream code (`format_all_partitions()`, `generate_fstab()`, `generate_crypttab()`) works identically for Standard, Minimal, LVM Thin, and Custom layouts. Encryption and LVM are applied as layers, not separate code paths.
 
@@ -99,6 +116,12 @@ deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
+
+`--dry-run` prints every command instead of running it. It is a **best-effort**
+preview: the guarantee comes from `CommandRunner` plus early `is_dry_run()`
+returns at the destructive call sites, not from a sandbox. `deploytix rehearse`
+is the full-fidelity alternative — it performs a real install on the target and
+then wipes it.
 
 ## Reference Materials
 

@@ -174,6 +174,7 @@ locale = "en_US.UTF-8"
 keymap = "us"
 hostname = "artix"
 hibernation = false
+sudo_policy = "password"       # password (default) | nopasswd — see note below
 secureboot = false             # sbctl, shim (MOK), or manual keys
 secureboot_method = "sbctl"
 
@@ -181,7 +182,7 @@ secureboot_method = "sbctl"
 name = "user"
 password = "changeme"
 groups = ["wheel", "video", "audio", "input", "render", "network", "log", "seat"]
-sudoer = true
+sudoer = true                  # requires "wheel" in groups
 
 [network]
 backend = "networkmanager"     # iwd, networkmanager
@@ -222,11 +223,58 @@ Default partitions when none are specified: `/` (20 GiB), `/usr` (30 GiB), `/var
 > feature set (desktop environment, gaming/handheld stack, encryption, btrfs
 > subvolumes).
 
-## Rehearsal
+## Credentials in config files
 
-**Rehearsal** (`deploytix rehearse`) is the true dry-run: it executes the full installation pipeline on the real target disk with every command recorded, then wipes the disk to restore pristine state. The result is a detailed report showing exactly what happened and where it failed. This is destructive to the target device — it writes for real, then cleans up.
+A deployment config can carry the LUKS passphrase, the account password and the
+Wi-Fi PSK in cleartext. Configs written by `deploytix generate-config` and by
+the GUI's Save button are created **mode 0600** for that reason.
 
-Also available from the GUI Review step.
+The tracked `deploytix.toml` in this repository is a placeholder-only reference.
+Keep real credentials in `deploytix.local.toml`, which is gitignored:
+
+```bash
+deploytix install -c deploytix.local.toml
+```
+
+Secrets are redacted from log output — they never appear in a command line, in
+the rehearsal report, or in a `{:?}` dump of the config.
+
+### sudo policy
+
+`system.sudo_policy` controls the `/etc/sudoers.d` rule Deploytix writes for
+`%wheel`:
+
+| Value | Rule |
+|---|---|
+| `password` (default) | `%wheel ALL=(ALL:ALL) ALL` |
+| `nopasswd` | `%wheel ALL=(ALL:ALL) NOPASSWD: ALL` |
+
+> **Changed behaviour.** Deploytix ≤ 1.4.0 always granted `NOPASSWD: ALL` to the
+> whole wheel group, which makes the account password worthless for privilege
+> escalation. The default is now `password`. Set `sudo_policy = "nopasswd"` to
+> keep the old behaviour deliberately — reasonable for a kiosk or handheld image,
+> less so for a laptop.
+
+The rule is validated with `visudo -cf` before it is activated; if it does not
+parse, the install fails rather than leaving a drop-in that would lock every
+user out of sudo. `/etc/sudoers` itself is never modified.
+
+## Previewing and rehearsal
+
+Two different things, useful at different moments:
+
+**`deploytix -n install -c config.toml`** — `--dry-run` prints every command
+instead of running it. Nothing is written to the target. Best-effort: the
+guarantee comes from `CommandRunner` and early returns at the destructive call
+sites, not from a sandbox. Good for checking what a config will actually do.
+
+**`deploytix rehearse`** — executes the full installation pipeline on the real
+target disk with every command recorded, then wipes the disk to restore pristine
+state. The result is a detailed report showing exactly what happened and where it
+failed. This is destructive to the target device — it writes for real, then
+cleans up. Good for checking that an install *works* on specific hardware.
+
+Rehearsal is also available from the GUI Review step.
 
 ## Package Dependency Tracking
 

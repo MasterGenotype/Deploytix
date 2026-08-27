@@ -1,5 +1,19 @@
 # Deploytix: Recommended Improvements
 
+> **⚠️ HISTORICAL (February 2026) — partly superseded. Verify before acting.**
+>
+> Since resolved: P0 #1/#2 (command injection via `users.rs`) — chroot commands
+> that need no shell now go through `run_in_chroot_argv`, and credentials are
+> piped to stdin. P0 #3 (`/etc/sudoers` edited without `visudo`) — replaced by a
+> validated `/etc/sudoers.d` drop-in. P0 #5 (missing input validation) —
+> `validate_rules()` now enforces ~33 rules with tests. P1 #6 (near-zero test
+> coverage) — 233 tests. P1 #7 (no CI) — `.github/workflows/ci.yml` gates
+> fmt/clippy/test on every push and PR.
+>
+> Still open and worth reading: P1 #8 (mixed `DeploytixError`/`anyhow`), P1 #9
+> (`unwrap()` in critical paths), P3 #16 (no BIOS/legacy boot). See
+> `docs/ROADMAP.md` for current sequencing.
+
 An audit of the current codebase surfaced the following improvement areas,
 organized by priority. Each item includes the relevant source location and a
 concrete suggestion.
