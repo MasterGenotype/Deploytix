@@ -2,7 +2,7 @@
 
 use crate::config::{
     DeploymentConfig, DesktopConfig, DiskConfig, GpuDriverVendor, NetworkConfig, PackagesConfig,
-    SystemConfig, UserConfig,
+    SudoPolicy, SystemConfig, UserConfig,
 };
 use crate::disk::detection::list_block_devices;
 use crate::install::Installer;
@@ -100,6 +100,7 @@ impl DeploytixGui {
                 keymap: self.system.keymap.clone(),
                 hostname: self.system.hostname.clone(),
                 hibernation: false,
+                sudo_policy: SudoPolicy::default(),
                 secureboot: self.system.secureboot,
                 secureboot_method: self.system.secureboot_method.clone(),
                 secureboot_keys_path: None,

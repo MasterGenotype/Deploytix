@@ -164,6 +164,14 @@ pub struct SystemConfig {
     /// Enable hibernation support
     #[serde(default)]
     pub hibernation: bool,
+    /// Whether members of `wheel` must type a password for sudo.
+    ///
+    /// Defaults to `password`.  Deploytix <= 1.4.0 unconditionally granted
+    /// `NOPASSWD: ALL` to the whole wheel group, which makes the account
+    /// password worthless for privilege escalation; set `nopasswd` to keep
+    /// that behaviour deliberately.
+    #[serde(default)]
+    pub sudo_policy: SudoPolicy,
 
     // SecureBoot options
     /// Enable SecureBoot signing
@@ -343,6 +351,38 @@ impl std::fmt::Display for SwapType {
             Self::Partition => write!(f, "Swap Partition"),
             Self::FileZram => write!(f, "Swap File + ZRAM"),
             Self::ZramOnly => write!(f, "ZRAM Only"),
+        }
+    }
+}
+
+/// Whether `%wheel` needs a password for sudo on the installed system.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SudoPolicy {
+    /// `%wheel ALL=(ALL:ALL) ALL` — sudo prompts for the user's password.
+    #[default]
+    Password,
+    /// `%wheel ALL=(ALL:ALL) NOPASSWD: ALL` — passwordless root for every
+    /// member of `wheel`.  Convenient for kiosk/handheld images; it means
+    /// anyone who reaches a shell as that user is already root.
+    NoPasswd,
+}
+
+impl SudoPolicy {
+    /// The sudoers rule this policy expands to.
+    pub fn sudoers_rule(&self) -> &'static str {
+        match self {
+            Self::Password => "%wheel ALL=(ALL:ALL) ALL",
+            Self::NoPasswd => "%wheel ALL=(ALL:ALL) NOPASSWD: ALL",
+        }
+    }
+}
+
+impl std::fmt::Display for SudoPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password => write!(f, "password required"),
+            Self::NoPasswd => write!(f, "passwordless (NOPASSWD)"),
         }
     }
 }
@@ -1173,6 +1213,7 @@ impl DeploymentConfig {
                 keymap,
                 hostname,
                 hibernation: false,
+                sudo_policy: SudoPolicy::default(),
                 secureboot,
                 secureboot_method,
                 secureboot_keys_path: None,
@@ -1244,6 +1285,7 @@ impl DeploymentConfig {
                 keymap: "us".to_string(),
                 hostname: "artix".to_string(),
                 hibernation: false,
+                sudo_policy: SudoPolicy::default(),
                 secureboot: false,
                 secureboot_method: SecureBootMethod::Sbctl,
                 secureboot_keys_path: None,
