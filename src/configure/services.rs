@@ -296,7 +296,7 @@ fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str)
         return Ok(());
     }
 
-    cmd.run_in_chroot(install_root, &format!("rc-update add {} default", service))?;
+    cmd.run_in_chroot_argv(install_root, &["rc-update", "add", service, "default"])?;
     info!("Enabled OpenRC service {}", service);
 
     Ok(())
@@ -347,7 +347,7 @@ fn enable_s6_service(cmd: &CommandRunner, service: &str, install_root: &str) -> 
         return Ok(());
     };
 
-    cmd.run_in_chroot(install_root, &format!("s6 set enable {}", s6_service_name))?;
+    cmd.run_in_chroot_argv(install_root, &["s6", "set", "enable", &s6_service_name])?;
     info!("Enabled s6 service {}", service);
 
     Ok(())

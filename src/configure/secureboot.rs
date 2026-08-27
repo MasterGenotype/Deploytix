@@ -202,7 +202,7 @@ pub fn sign_efi_binary(
     match config.system.secureboot_method {
         SecureBootMethod::Sbctl => {
             // sbctl tracks and signs files
-            cmd.run_in_chroot(install_root, &format!("sbctl sign -s {}", binary_path))
+            cmd.run_in_chroot_argv(install_root, &["sbctl", "sign", "-s", binary_path])
                 .map_err(|e| DeploytixError::CommandFailed {
                     command: format!("sbctl sign {}", binary_path),
                     stderr: e.to_string(),

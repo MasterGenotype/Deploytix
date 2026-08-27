@@ -175,6 +175,15 @@ fn inject_config_flag(pacman_cmd: &str) -> String {
 /// This is the single call-site for every chroot pacman install in the
 /// codebase.  Call sites that previously did
 /// `cmd.run_in_chroot(root, &install_cmd)?` should use this instead.
+///
+/// Note this path is deliberately still string-based rather than argv:
+/// [`crate::utils::interactive::InteractivePolicy`] renders the command for
+/// user review and may rewrite it, and `inject_config_flag` splices
+/// `--config` into it during signature-error recovery.  Package names here
+/// come from internal constants and from lists the operator typed and
+/// reviewed themselves, not from unattended external input.  Moving the
+/// whole pacman pathway onto argv means reworking the policy and retry
+/// machinery together; see `docs/ROADMAP.md`.
 pub(crate) fn pacman_install_chroot(
     cmd: &CommandRunner,
     install_root: &str,
@@ -871,11 +880,17 @@ pub fn install_autostart_entries(
     }
 
     // Fix ownership: all deployed files should belong to the user, not root
-    let chown_cmd = format!(
-        "chown -R {0}:{0} /home/{0}/.local /home/{0}/.config",
-        username
-    );
-    cmd.run_in_chroot(install_root, &chown_cmd)?;
+    let owner = format!("{0}:{0}", username);
+    cmd.run_in_chroot_argv(
+        install_root,
+        &[
+            "chown",
+            "-R",
+            &owner,
+            &format!("/home/{}/.local", username),
+            &format!("/home/{}/.config", username),
+        ],
+    )?;
 
     info!("Autostart entries installed successfully");
     Ok(())
@@ -1375,11 +1390,17 @@ pub fn install_decky_loader(
     // Step 5: Ensure ownership under the user's home stays correct.
     // Bootstrap step above already chowns ~/homebrew; .local and .steam
     // were created by us as root, so chown them here.
-    let chown_cmd = format!(
-        "chown -R {user}:{user} /home/{user}/.local /home/{user}/.steam",
-        user = username
-    );
-    cmd.run_in_chroot(install_root, &chown_cmd)?;
+    let owner = format!("{0}:{0}", username);
+    cmd.run_in_chroot_argv(
+        install_root,
+        &[
+            "chown",
+            "-R",
+            &owner,
+            &format!("/home/{}/.local", username),
+            &format!("/home/{}/.steam", username),
+        ],
+    )?;
 
     info!("Decky Loader installation complete");
     Ok(())
@@ -1652,7 +1673,7 @@ pub fn install_evdevhook2(
     // that user) can read the motion sensor evdev nodes before any local
     // login session has been established (i.e. at boot, before uaccess
     // ACLs are applied).  `gpasswd -a` is idempotent.
-    cmd.run_in_chroot(install_root, &format!("gpasswd -a {} input", username))?;
+    cmd.run_in_chroot_argv(install_root, &["gpasswd", "-a", username, "input"])?;
     info!("  Added user '{}' to the 'input' group", username);
 
     // Step 4: Write init-specific service file
