@@ -219,15 +219,21 @@ impl Cleaner {
 
     /// Wipe partition table from device
     fn wipe_device(&self, device: &str) -> Result<()> {
-        // Confirm
-        let warning = format!(
-            "This will WIPE the partition table on {}. This cannot be undone!",
-            device
-        );
-        println!("\n⚠️  WARNING: {}\n", warning);
+        // Confirm — but not under --dry-run, which writes nothing.  Prompting
+        // there would make `deploytix -n cleanup --wipe` fail outright with
+        // "not a terminal" in a script or CI, which defeats the point of a
+        // preview.  Installer::prepare() already skips its confirmation the
+        // same way.
+        if !self.cmd.is_dry_run() {
+            let warning = format!(
+                "This will WIPE the partition table on {}. This cannot be undone!",
+                device
+            );
+            println!("\n⚠️  WARNING: {}\n", warning);
 
-        if !prompt_confirm("Are you sure you want to continue?", false)? {
-            return Err(DeploytixError::UserCancelled);
+            if !prompt_confirm("Are you sure you want to continue?", false)? {
+                return Err(DeploytixError::UserCancelled);
+            }
         }
 
         info!(

@@ -127,6 +127,12 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Preview only: print each command instead of executing it.
+    ///
+    /// Best-effort — see `deploytix rehearse` for a full-fidelity run.
+    #[arg(short = 'n', long, global = true)]
+    dry_run: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -258,7 +264,7 @@ fn main() -> Result<()> {
             } else {
                 config.is_none()
             };
-            cmd_install(config, device, interactive_resolved)?;
+            cmd_install(config, device, interactive_resolved, cli.dry_run)?;
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
@@ -270,7 +276,7 @@ fn main() -> Result<()> {
             cmd_generate_config(&output)?;
         }
         Some(Commands::Cleanup { device, wipe }) => {
-            cmd_cleanup(device, wipe)?;
+            cmd_cleanup(device, wipe, cli.dry_run)?;
         }
         Some(Commands::Rehearse { config, log_file }) => {
             cmd_rehearse(&config, &log_file)?;
@@ -283,7 +289,7 @@ fn main() -> Result<()> {
         }
         None => {
             // Default: run interactive wizard with full interactive review
-            cmd_install(None, None, true)?;
+            cmd_install(None, None, true, cli.dry_run)?;
         }
     }
 
@@ -294,12 +300,19 @@ fn cmd_install(
     config_path: Option<String>,
     device: Option<String>,
     interactive: bool,
+    dry_run: bool,
 ) -> Result<()> {
     use install::Installer;
 
-    // Check for root privileges
+    // Check for root privileges.  A dry run still needs them: it inspects
+    // block devices and computes the layout from real disk geometry.
     if !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
+    }
+
+    if dry_run {
+        println!("── DRY RUN ── no commands will be executed.");
+        println!("   Best-effort preview; `deploytix rehearse` runs the real thing.\n");
     }
 
     // Load or create configuration
@@ -315,7 +328,7 @@ fn cmd_install(
     config.validate()?;
 
     // Run installation
-    let mut installer = Installer::new(config, false);
+    let mut installer = Installer::new(config, dry_run);
     if interactive {
         use std::sync::Arc;
         let policy = Arc::new(deploytix::utils::cli_policy::CliInteractivePolicy::new());
@@ -402,14 +415,18 @@ fn cmd_rehearse(config_path: &str, log_file: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cleanup(device: Option<String>, wipe: bool) -> Result<()> {
+fn cmd_cleanup(device: Option<String>, wipe: bool, dry_run: bool) -> Result<()> {
     use cleanup::Cleaner;
 
     if !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
     }
 
-    let cleaner = Cleaner::new(false);
+    if dry_run {
+        println!("── DRY RUN ── no commands will be executed.\n");
+    }
+
+    let cleaner = Cleaner::new(dry_run);
     cleaner.cleanup(device.as_deref(), wipe)?;
 
     Ok(())
