@@ -1,9 +1,18 @@
+# Reference deployment config — tracked in git, so it must never contain
+# real credentials.  Keep working credentials in `deploytix.local.toml`
+# (gitignored) and install with:
+#
+#     deploytix install -c deploytix.local.toml
+#
+# Configs written by `deploytix generate-config` and by the GUI's Save
+# button are created mode 0600 because they carry secrets in cleartext.
+
 [disk]
 device = "/dev/sdb"
 filesystem = "btrfs"
 boot_filesystem = "btrfs"
 encryption = true
-encryption_password = "angelreb0rn heaven hell magic casting incantation cantation cantrip wizard reagent master grandmaster james"
+encryption_password = "CHANGE-ME-BEFORE-USE"
 luks_mapper_name = "Crypt-Root"
 boot_encryption = false
 luks_boot_mapper_name = "Crypt-Boot"
@@ -17,7 +26,6 @@ lvm_thin_pool_percent = 95
 swap_type = "zramonly"
 swap_file_size_mib = 0
 zram_algorithm = "zstd"
-preserve_home = false
 
 [[disk.partitions]]
 mount_point = "/"
@@ -48,7 +56,7 @@ secureboot_method = "sbctl"
 
 [user]
 name = "superphenotype"
-password = "angel"
+password = "CHANGE-ME-BEFORE-USE"
 groups = [
     "wheel",
     "video",

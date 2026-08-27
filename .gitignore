@@ -8,6 +8,11 @@
 # Default rehearsal log (deploytix rehearse [-l rehearsal.log])
 /rehearsal.log
 
+# Local deployment config carrying real credentials.  The tracked
+# deploytix.toml is a placeholder-only reference; put working LUKS
+# passphrases and account passwords here instead.
+/deploytix.local.toml
+
 # Custom pacman repo embedded into the live ISO
 iso/repo/*.pkg.tar*
 

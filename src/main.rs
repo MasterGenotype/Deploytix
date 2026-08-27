@@ -362,9 +362,10 @@ fn cmd_validate(config_path: &str) -> Result<()> {
 
 fn cmd_generate_config(output: &str) -> Result<()> {
     let sample = DeploymentConfig::sample();
-    let content = toml::to_string_pretty(&sample)?;
-    std::fs::write(output, content)?;
-    println!("✓ Sample configuration written to {}", output);
+    // `save_to` creates the file 0600: a generated config is meant to be
+    // filled in with a LUKS passphrase and an account password.
+    sample.save_to(std::path::Path::new(output))?;
+    println!("✓ Sample configuration written to {} (mode 0600)", output);
     Ok(())
 }
 

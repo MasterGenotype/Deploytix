@@ -3,8 +3,9 @@
 use crate::disk::detection::list_block_devices;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::*;
+use crate::utils::secret::Secret;
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Main deployment configuration
@@ -79,7 +80,7 @@ pub struct DiskConfig {
     pub encryption: bool,
     /// Encryption password (if encryption enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_password: Option<String>,
+    pub encryption_password: Option<Secret>,
     /// Name for the LUKS mapper device (default: "Crypt-Root")
     #[serde(default = "default_luks_mapper_name")]
     pub luks_mapper_name: String,
@@ -181,7 +182,7 @@ pub struct UserConfig {
     /// Username
     pub name: String,
     /// User password
-    pub password: String,
+    pub password: Secret,
     /// Additional groups
     #[serde(default = "default_groups")]
     pub groups: Vec<String>,
@@ -207,7 +208,7 @@ pub struct NetworkConfig {
     pub wifi_ssid: Option<String>,
     /// WPA-PSK passphrase for `wifi_ssid`. Omit for an open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wifi_password: Option<String>,
+    pub wifi_password: Option<Secret>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -714,12 +715,30 @@ impl DeploymentConfig {
     /// Serialise the config to TOML and write it to `path`, creating
     /// any missing parent directories.  Used by the post-install
     /// extras step to persist user-entered extras for later re-runs.
+    /// A saved config can carry the LUKS passphrase, the account password
+    /// and the Wi-Fi PSK in cleartext, so it is created 0600 rather than at
+    /// the process umask.  `OpenOptions::mode` applies at creation time, so
+    /// there is no window during which the file exists world-readable.  An
+    /// existing file is re-permissioned explicitly, since `mode` is ignored
+    /// when the file is merely truncated.
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
 
@@ -1129,7 +1148,7 @@ impl DeploymentConfig {
                 filesystem,
                 boot_filesystem,
                 encryption,
-                encryption_password,
+                encryption_password: encryption_password.map(Secret::new),
                 luks_mapper_name: default_luks_mapper_name(),
                 boot_encryption,
                 luks_boot_mapper_name: default_luks_boot_mapper_name(),
@@ -1160,7 +1179,7 @@ impl DeploymentConfig {
             },
             user: UserConfig {
                 name: username,
-                password,
+                password: Secret::new(password),
                 groups: default_groups(),
                 sudoer: true,
             },
@@ -1168,7 +1187,7 @@ impl DeploymentConfig {
                 backend,
                 iwd_frontend,
                 wifi_ssid,
-                wifi_password,
+                wifi_password: wifi_password.map(Secret::new),
             },
             desktop: DesktopConfig {
                 environment,
@@ -1231,7 +1250,7 @@ impl DeploymentConfig {
             },
             user: UserConfig {
                 name: "user".to_string(),
-                password: "changeme".to_string(),
+                password: Secret::new("changeme"),
                 groups: default_groups(),
                 sudoer: true,
             },
@@ -1567,6 +1586,69 @@ impl DeploymentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Secret redaction ─────────────────────────────────────────────────────
+    //
+    // `DeploymentConfig` derives `Debug`, so a single `{:?}` anywhere in the
+    // installer would otherwise dump every credential at once.  These guard
+    // that the `Secret` wrapper actually covers the whole config.
+
+    #[test]
+    fn debug_of_config_never_leaks_secrets() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.encryption_password = Some(Secret::new("luks-passphrase-sentinel"));
+        cfg.user.password = Secret::new("account-password-sentinel");
+        cfg.network.wifi_ssid = Some("somenet".to_string());
+        cfg.network.wifi_password = Some(Secret::new("wifi-psk-sentinel"));
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("luks-passphrase-sentinel"));
+        assert!(!rendered.contains("account-password-sentinel"));
+        assert!(!rendered.contains("wifi-psk-sentinel"));
+        // Non-secret fields must still be visible, or Debug is useless.
+        assert!(rendered.contains("somenet"));
+    }
+
+    #[test]
+    fn secrets_still_round_trip_through_toml() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.encryption_password = Some(Secret::new("luks-passphrase"));
+        cfg.user.password = Secret::new("account-password");
+
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: DeploymentConfig = toml::from_str(&text).unwrap();
+
+        assert_eq!(
+            back.disk.encryption_password.as_deref(),
+            Some("luks-passphrase")
+        );
+        assert_eq!(back.user.password.as_str(), "account-password");
+    }
+
+    #[test]
+    fn save_to_creates_the_file_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("deploytix-savetest-{}", std::process::id()));
+        let path = dir.join("cfg.toml");
+        let cfg = DeploymentConfig::sample();
+
+        cfg.save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "generated config must not be world-readable");
+
+        // Overwriting an existing (deliberately loose) file must tighten it:
+        // OpenOptions::mode is ignored when the file already exists.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        cfg.save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "re-saving must re-tighten an existing file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // ── CustomPartitionEntry::effective_label ────────────────────────────────
 

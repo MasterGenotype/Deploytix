@@ -329,7 +329,7 @@ mod tests {
         let mut cfg = DeploymentConfig::sample();
         cfg.disk.encryption = encryption;
         if encryption {
-            cfg.disk.encryption_password = Some("test".to_string());
+            cfg.disk.encryption_password = Some(crate::utils::secret::Secret::new("test"));
         }
         cfg
     }

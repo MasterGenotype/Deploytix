@@ -6,6 +6,7 @@ use crate::config::{
 };
 use crate::disk::detection::list_block_devices;
 use crate::install::Installer;
+use crate::utils::secret::Secret;
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -71,7 +72,7 @@ impl DeploytixGui {
                 boot_filesystem: crate::config::boot_filesystem_for(&self.disk.filesystem),
                 encryption: self.disk.encryption,
                 encryption_password: if self.disk.encryption {
-                    Some(self.disk.encryption_password.clone())
+                    Some(Secret::new(self.disk.encryption_password.clone()))
                 } else {
                     None
                 },
@@ -105,7 +106,7 @@ impl DeploytixGui {
             },
             user: UserConfig {
                 name: self.user.username.clone(),
-                password: self.user.password.clone(),
+                password: Secret::new(self.user.password.clone()),
                 groups: crate::config::default_groups(),
                 sudoer: self.user.sudoer,
             },
@@ -122,7 +123,7 @@ impl DeploytixGui {
                 {
                     None
                 } else {
-                    Some(self.packages.wifi_password.clone())
+                    Some(Secret::new(self.packages.wifi_password.clone()))
                 },
             },
             desktop: DesktopConfig {
@@ -161,22 +162,19 @@ impl DeploytixGui {
 
     fn save_config(&mut self) {
         let config = self.build_config();
-        match toml::to_string_pretty(&config) {
-            Ok(content) => match std::fs::write(&self.install.save_config_path, &content) {
-                Ok(()) => {
-                    self.install.save_config_status = Some((
-                        format!("\u{2713} Saved to {}", self.install.save_config_path),
-                        false,
-                    ));
-                }
-                Err(e) => {
-                    self.install.save_config_status =
-                        Some((format!("\u{2717} Write failed: {}", e), true));
-                }
-            },
+        // Goes through `save_to` rather than a bare `fs::write` so the
+        // saved file gets 0600 — it can contain the LUKS passphrase, the
+        // account password and the Wi-Fi PSK in cleartext.
+        match config.save_to(std::path::Path::new(&self.install.save_config_path)) {
+            Ok(()) => {
+                self.install.save_config_status = Some((
+                    format!("\u{2713} Saved to {}", self.install.save_config_path),
+                    false,
+                ));
+            }
             Err(e) => {
                 self.install.save_config_status =
-                    Some((format!("\u{2717} Serialization failed: {}", e), true));
+                    Some((format!("\u{2717} Write failed: {}", e), true));
             }
         }
     }

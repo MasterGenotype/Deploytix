@@ -6,4 +6,5 @@ pub mod deps;
 pub mod error;
 pub mod interactive;
 pub mod prompt;
+pub mod secret;
 pub mod signal;

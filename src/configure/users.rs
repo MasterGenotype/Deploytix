@@ -41,7 +41,7 @@ pub fn create_user(
     // avoid shell injection when the password contains single quotes or
     // other shell metacharacters.
     let temp_path = format!("{}/var/tmp/.deploytix_chpasswd", install_root);
-    fs::write(&temp_path, format!("{}:{}\n", username, password))?;
+    fs::write(&temp_path, format!("{}:{}\n", username, password.as_str()))?;
     let mut perms = fs::metadata(&temp_path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&temp_path, perms)?;
