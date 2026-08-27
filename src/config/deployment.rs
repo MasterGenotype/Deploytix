@@ -355,6 +355,32 @@ impl std::fmt::Display for SwapType {
     }
 }
 
+/// Whether `name` is acceptable to `useradd` on a POSIX system.
+///
+/// Deliberately the portable subset (`^[a-z_][a-z0-9_-]*$`) rather than
+/// everything `useradd --badname` would tolerate: the username is used to
+/// build home paths, service files and ownership strings throughout the
+/// installer.
+fn is_valid_username(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Whether `host` is a valid RFC 1123 hostname label.
+fn is_valid_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 63 {
+        return false;
+    }
+    if host.starts_with('-') || host.ends_with('-') {
+        return false;
+    }
+    host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// Whether `%wheel` needs a password for sudo on the installed system.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1306,12 +1332,32 @@ impl DeploymentConfig {
                 environment: DesktopEnvironment::Kde,
                 display_manager: DisplayManager::default(),
             },
-            packages: PackagesConfig::default(),
+            packages: PackagesConfig {
+                // The iwd backend above has no in-repo GUI frontend, so
+                // validate_rules() requires yay for it.  Without this the
+                // sample emitted by `deploytix generate-config` fails
+                // `deploytix validate` for a reason the user did not cause.
+                install_yay: true,
+                ..PackagesConfig::default()
+            },
         }
     }
 
-    /// Validate the configuration
+    /// Validate the configuration.
+    ///
+    /// Device checks first (they are the cheapest way to catch the most
+    /// common mistake), then the pure cross-field rules.
     pub fn validate(&self) -> Result<()> {
+        self.validate_device()?;
+        self.validate_rules()
+    }
+
+    /// Check that `disk.device` exists and is a block device.
+    ///
+    /// Split out from [`Self::validate`] because it is the only part that
+    /// touches the filesystem: keeping it separate is what lets
+    /// [`Self::validate_rules`] be unit-tested without hardware.
+    pub fn validate_device(&self) -> Result<()> {
         // Check device exists
         if !Path::new(&self.disk.device).exists() {
             return Err(DeploytixError::DeviceNotFound(self.disk.device.clone()));
@@ -1323,6 +1369,15 @@ impl DeploymentConfig {
             return Err(DeploytixError::NotBlockDevice(self.disk.device.clone()));
         }
 
+        Ok(())
+    }
+
+    /// Every cross-field rule that does not touch the filesystem.
+    ///
+    /// Pure and hardware-independent, so each rule below can have a test.
+    /// Rules are fail-fast: the first violation wins, and callers see one
+    /// error at a time.
+    pub fn validate_rules(&self) -> Result<()> {
         // Validate username
         if self.user.name.is_empty() {
             return Err(DeploytixError::ValidationError(
@@ -1334,12 +1389,43 @@ impl DeploymentConfig {
                 "Username cannot contain spaces".to_string(),
             ));
         }
+        // Restrict to the POSIX portable username set. Beyond matching what
+        // useradd will actually accept, this bounds what can appear in the
+        // paths and service files built from the username elsewhere.
+        if !is_valid_username(&self.user.name) {
+            return Err(DeploytixError::ValidationError(format!(
+                "Invalid username '{}': must start with a lowercase letter or \
+                 underscore and contain only lowercase letters, digits, \
+                 underscores or hyphens",
+                self.user.name
+            )));
+        }
 
         // Validate password
         if self.user.password.is_empty() {
             return Err(DeploytixError::ValidationError(
                 "Password cannot be empty".to_string(),
             ));
+        }
+
+        // sudoer grants sudo via a %wheel rule, so the account has to be in
+        // wheel or the setting silently does nothing.
+        if self.user.sudoer && !self.user.groups.iter().any(|g| g == "wheel") {
+            return Err(DeploytixError::ValidationError(
+                "user.sudoer = true grants sudo through the 'wheel' group, but \
+                 'wheel' is not in user.groups — add it, or set sudoer = false"
+                    .to_string(),
+            ));
+        }
+
+        // Hostname must be a valid RFC 1123 label; an invalid one breaks
+        // name resolution on the installed system.
+        if !is_valid_hostname(&self.system.hostname) {
+            return Err(DeploytixError::ValidationError(format!(
+                "Invalid hostname '{}': must be 1-63 characters of letters, \
+                 digits or hyphens, and must not start or end with a hyphen",
+                self.system.hostname
+            )));
         }
 
         // Validate encryption password if encryption enabled
@@ -1690,6 +1776,565 @@ mod tests {
         assert_eq!(mode, 0o600, "re-saving must re-tighten an existing file");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // validate_rules() — one test per rule.
+    //
+    // These are reachable only because validate() was split into
+    // validate_device() + validate_rules(): the device checks used to run
+    // first, so every rule below was unreachable without a real disk.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// A config that satisfies every rule.  Each test perturbs exactly one
+    /// thing, so a failure names the rule that fired.
+    fn valid() -> DeploymentConfig {
+        let mut c = DeploymentConfig::sample();
+        c.network.backend = NetworkBackend::NetworkManager;
+        c.packages.install_yay = false;
+        c
+    }
+
+    /// Assert that `cfg` is rejected and the message mentions `needle`.
+    #[track_caller]
+    fn rejected_because(cfg: &DeploymentConfig, needle: &str) {
+        match cfg.validate_rules() {
+            Ok(()) => panic!(
+                "expected rejection mentioning {:?}, but config passed",
+                needle
+            ),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.to_lowercase().contains(&needle.to_lowercase()),
+                    "expected message mentioning {:?}, got: {}",
+                    needle,
+                    msg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_baseline_config_is_valid() {
+        assert!(valid().validate_rules().is_ok());
+    }
+
+    #[test]
+    fn sample_config_passes_every_rule() {
+        // `deploytix generate-config` emits sample(); if it cannot pass its
+        // own rules then `deploytix validate` on a freshly generated file
+        // fails for reasons the user did not cause.
+        if let Err(e) = DeploymentConfig::sample().validate_rules() {
+            panic!(
+                "DeploymentConfig::sample() violates a validation rule: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rules_does_not_touch_the_filesystem() {
+        // A device path that cannot exist must not affect the pure rules.
+        let mut c = valid();
+        c.disk.device = "/dev/deploytix-definitely-not-a-real-device".to_string();
+        assert!(c.validate_rules().is_ok());
+        // ...while validate() as a whole still rejects it.
+        assert!(c.validate().is_err());
+    }
+
+    // ── user ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_empty_username() {
+        let mut c = valid();
+        c.user.name = String::new();
+        rejected_because(&c, "Username cannot be empty");
+    }
+
+    #[test]
+    fn rejects_username_with_spaces() {
+        let mut c = valid();
+        c.user.name = "two words".to_string();
+        rejected_because(&c, "cannot contain spaces");
+    }
+
+    #[test]
+    fn rejects_usernames_outside_the_posix_portable_set() {
+        for bad in [
+            "Tester",          // uppercase
+            "1tester",         // leading digit
+            "-tester",         // leading hyphen
+            "tester;rm -rf /", // shell metacharacters
+            "tes.ter",         // dot
+            "tester$",         // dollar
+        ] {
+            let mut c = valid();
+            c.user.name = bad.to_string();
+            assert!(
+                c.validate_rules().is_err(),
+                "username {:?} should be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_usernames() {
+        for good in ["tester", "_svc", "user1", "my-user", "a"] {
+            let mut c = valid();
+            c.user.name = good.to_string();
+            assert!(
+                c.validate_rules().is_ok(),
+                "username {:?} should be accepted",
+                good
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_password() {
+        let mut c = valid();
+        c.user.password = Secret::new("");
+        rejected_because(&c, "Password cannot be empty");
+    }
+
+    #[test]
+    fn rejects_sudoer_without_the_wheel_group() {
+        let mut c = valid();
+        c.user.sudoer = true;
+        c.user.groups = vec!["video".to_string(), "audio".to_string()];
+        rejected_because(&c, "wheel");
+    }
+
+    #[test]
+    fn allows_non_sudoer_without_wheel() {
+        let mut c = valid();
+        c.user.sudoer = false;
+        c.user.groups = vec!["video".to_string()];
+        assert!(c.validate_rules().is_ok());
+    }
+
+    // ── hostname ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_invalid_hostnames() {
+        for bad in [
+            "",
+            "-lead",
+            "trail-",
+            "has space",
+            "under_score",
+            &"x".repeat(64),
+        ] {
+            let mut c = valid();
+            c.system.hostname = bad.to_string();
+            assert!(
+                c.validate_rules().is_err(),
+                "hostname {:?} should be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_hostnames() {
+        for good in ["artix", "my-box", "box1", "a", &"x".repeat(63)] {
+            let mut c = valid();
+            c.system.hostname = good.to_string();
+            assert!(
+                c.validate_rules().is_ok(),
+                "hostname {:?} should be accepted",
+                good
+            );
+        }
+    }
+
+    // ── encryption ───────────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_encryption_without_a_passphrase() {
+        let mut c = valid();
+        c.disk.encryption = true;
+        c.disk.encryption_password = None;
+        rejected_because(&c, "Encryption password required");
+    }
+
+    #[test]
+    fn rejects_integrity_without_encryption() {
+        let mut c = valid();
+        c.disk.encryption = false;
+        c.disk.integrity = true;
+        rejected_because(&c, "integrity");
+    }
+
+    #[test]
+    fn rejects_boot_encryption_without_encryption() {
+        let mut c = valid();
+        c.disk.encryption = false;
+        c.disk.boot_encryption = true;
+        rejected_because(&c, "encryption");
+    }
+
+    #[test]
+    fn rejects_boot_encryption_with_zfs_boot() {
+        let mut c = valid();
+        c.disk.encryption = true;
+        c.disk.encryption_password = Some(Secret::new("pw"));
+        c.disk.boot_encryption = true;
+        c.disk.boot_filesystem = Filesystem::Zfs;
+        rejected_because(&c, "zfs");
+    }
+
+    #[test]
+    fn rejects_per_partition_encryption_without_global_encryption() {
+        let mut c = valid();
+        c.disk.encryption = false;
+        c.disk.partitions[0].encryption = Some(true);
+        assert!(c.validate_rules().is_err());
+    }
+
+    // ── filesystem / layout ──────────────────────────────────────────────
+
+    #[test]
+    fn rejects_subvolumes_on_non_btrfs() {
+        let mut c = valid();
+        c.disk.filesystem = Filesystem::Ext4;
+        c.disk.use_subvolumes = true;
+        rejected_because(&c, "btrfs");
+    }
+
+    #[test]
+    fn rejects_lvm_thin_with_zfs() {
+        let mut c = valid();
+        c.disk.filesystem = Filesystem::Zfs;
+        c.disk.use_subvolumes = false;
+        c.disk.use_lvm_thin = true;
+        assert!(c.validate_rules().is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_thin_pool_percent() {
+        for bad in [0u8, 101, 255] {
+            let mut c = valid();
+            c.disk.lvm_thin_pool_percent = bad;
+            assert!(
+                c.validate_rules().is_err(),
+                "thin pool percent {} should be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_thin_pool_percent_at_the_boundaries() {
+        for good in [1u8, 50, 100] {
+            let mut c = valid();
+            c.disk.lvm_thin_pool_percent = good;
+            assert!(c.validate_rules().is_ok(), "percent {} should pass", good);
+        }
+    }
+
+    #[test]
+    fn rejects_swap_file_on_filesystems_that_cannot_host_one() {
+        for fs in [Filesystem::Xfs, Filesystem::Zfs, Filesystem::F2fs] {
+            let mut c = valid();
+            c.disk.use_subvolumes = false;
+            c.disk.filesystem = fs.clone();
+            c.disk.swap_type = SwapType::FileZram;
+            assert!(
+                c.validate_rules().is_err(),
+                "swap file on {:?} should be rejected",
+                fs
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_swap_file_on_btrfs_and_ext4() {
+        for fs in [Filesystem::Btrfs, Filesystem::Ext4] {
+            let mut c = valid();
+            c.disk.filesystem = fs.clone();
+            c.disk.use_subvolumes = fs == Filesystem::Btrfs;
+            c.disk.swap_type = SwapType::FileZram;
+            assert!(
+                c.validate_rules().is_ok(),
+                "swap file on {:?} should be accepted",
+                fs
+            );
+        }
+    }
+
+    // ── partitions ───────────────────────────────────────────────────────
+
+    fn part(mount: &str, size: u64) -> CustomPartitionEntry {
+        CustomPartitionEntry {
+            mount_point: mount.to_string(),
+            size_mib: size,
+            label: None,
+            encryption: None,
+        }
+    }
+
+    #[test]
+    fn rejects_an_empty_partition_list() {
+        let mut c = valid();
+        c.disk.partitions = vec![];
+        rejected_because(&c, "at least one partition");
+    }
+
+    #[test]
+    fn requires_exactly_one_root_partition() {
+        let mut c = valid();
+        c.disk.partitions = vec![part("/home", 0)];
+        assert!(c.validate_rules().is_err(), "no root partition");
+
+        c.disk.partitions = vec![part("/", 1024), part("/", 0)];
+        assert!(c.validate_rules().is_err(), "two root partitions");
+    }
+
+    #[test]
+    fn rejects_relative_mount_points() {
+        let mut c = valid();
+        c.disk.partitions = vec![part("/", 0), part("home", 1024)];
+        assert!(c.validate_rules().is_err());
+    }
+
+    #[test]
+    fn rejects_reserved_mount_points() {
+        for reserved in ["/boot", "/boot/efi"] {
+            let mut c = valid();
+            c.disk.partitions = vec![part("/", 0), part(reserved, 1024)];
+            assert!(
+                c.validate_rules().is_err(),
+                "{} is managed by the installer and must be rejected",
+                reserved
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_mount_points() {
+        let mut c = valid();
+        c.disk.partitions = vec![part("/", 0), part("/var", 1024), part("/var", 2048)];
+        assert!(c.validate_rules().is_err());
+    }
+
+    #[test]
+    fn rejects_more_than_one_remainder_partition() {
+        let mut c = valid();
+        c.disk.partitions = vec![part("/", 0), part("/home", 0)];
+        assert!(c.validate_rules().is_err());
+    }
+
+    // ── package interdependencies ────────────────────────────────────────
+
+    #[test]
+    fn iwd_backend_requires_yay_for_its_gui_frontend() {
+        let mut c = valid();
+        c.network.backend = NetworkBackend::Iwd;
+        c.packages.install_yay = false;
+        rejected_because(&c, "yay");
+
+        c.packages.install_yay = true;
+        assert!(c.validate_rules().is_ok());
+    }
+
+    #[test]
+    fn aur_only_packages_require_yay() {
+        let cases: Vec<(&str, fn(&mut DeploymentConfig))> = vec![
+            ("hhd", |c| c.packages.install_hhd = true),
+            ("evdevhook2", |c| c.packages.install_evdevhook2 = true),
+            ("aur extras", |c| {
+                c.packages.extra_packages.aur = vec!["some-aur-pkg".to_string()]
+            }),
+        ];
+        for (name, apply) in cases {
+            let mut c = valid();
+            apply(&mut c);
+            c.packages.install_yay = false;
+            assert!(
+                c.validate_rules().is_err(),
+                "{} without yay should fail",
+                name
+            );
+
+            let mut c = valid();
+            apply(&mut c);
+            c.packages.install_yay = true;
+            assert!(c.validate_rules().is_ok(), "{} with yay should pass", name);
+        }
+    }
+
+    #[test]
+    fn decky_loader_requires_both_gaming_and_yay() {
+        let mut c = valid();
+        c.packages.install_decky_loader = true;
+        c.packages.install_gaming = false;
+        c.packages.install_yay = true;
+        assert!(c.validate_rules().is_err(), "decky without gaming");
+
+        let mut c = valid();
+        c.packages.install_decky_loader = true;
+        c.packages.install_gaming = true;
+        c.packages.install_yay = false;
+        assert!(c.validate_rules().is_err(), "decky without yay");
+
+        let mut c = valid();
+        c.packages.install_decky_loader = true;
+        c.packages.install_gaming = true;
+        c.packages.install_yay = true;
+        assert!(c.validate_rules().is_ok());
+    }
+
+    #[test]
+    fn btrfs_tools_require_yay_and_a_btrfs_filesystem() {
+        let mut c = valid();
+        c.packages.install_btrfs_tools = true;
+        c.packages.install_yay = false;
+        assert!(c.validate_rules().is_err(), "btrfs tools without yay");
+
+        let mut c = valid();
+        c.packages.install_btrfs_tools = true;
+        c.packages.install_yay = true;
+        c.disk.filesystem = Filesystem::Ext4;
+        c.disk.use_subvolumes = false;
+        assert!(c.validate_rules().is_err(), "btrfs tools on ext4");
+    }
+
+    #[test]
+    fn grub_btrfs_requires_btrfs_subvolumes_and_no_lvm_thin() {
+        let mut c = valid();
+        c.packages.install_grub_btrfs = true;
+        c.disk.filesystem = Filesystem::Ext4;
+        c.disk.use_subvolumes = false;
+        assert!(c.validate_rules().is_err(), "grub-btrfs on ext4");
+
+        let mut c = valid();
+        c.packages.install_grub_btrfs = true;
+        c.disk.use_subvolumes = false;
+        assert!(c.validate_rules().is_err(), "grub-btrfs without subvolumes");
+
+        let mut c = valid();
+        c.packages.install_grub_btrfs = true;
+        c.disk.use_lvm_thin = true;
+        assert!(c.validate_rules().is_err(), "grub-btrfs with lvm thin");
+    }
+
+    #[test]
+    fn session_switching_requires_gaming_and_a_desktop() {
+        let mut c = valid();
+        c.packages.install_session_switching = true;
+        c.packages.install_gaming = false;
+        assert!(
+            c.validate_rules().is_err(),
+            "session switching without gaming"
+        );
+
+        let mut c = valid();
+        c.packages.install_session_switching = true;
+        c.packages.install_gaming = true;
+        c.desktop.environment = DesktopEnvironment::None;
+        assert!(
+            c.validate_rules().is_err(),
+            "session switching without a DE"
+        );
+    }
+
+    #[test]
+    fn session_switching_requires_greetd_and_networkmanager() {
+        let mut c = valid();
+        c.packages.install_session_switching = true;
+        c.packages.install_gaming = true;
+        c.desktop.display_manager = DisplayManager::Sddm;
+        assert!(
+            c.validate_rules().is_err(),
+            "session switching needs greetd"
+        );
+
+        let mut c = valid();
+        c.packages.install_session_switching = true;
+        c.packages.install_gaming = true;
+        c.packages.install_yay = true;
+        c.network.backend = NetworkBackend::Iwd;
+        assert!(
+            c.validate_rules().is_err(),
+            "session switching needs NetworkManager for Steam's Wi-Fi UI"
+        );
+    }
+
+    // ── secureboot ───────────────────────────────────────────────────────
+
+    #[test]
+    fn manual_secureboot_keys_require_a_path() {
+        let mut c = valid();
+        c.system.secureboot = true;
+        c.system.secureboot_method = SecureBootMethod::ManualKeys;
+        c.system.secureboot_keys_path = None;
+        rejected_because(&c, "keys");
+
+        c.system.secureboot_keys_path = Some("/etc/secureboot/keys".to_string());
+        assert!(c.validate_rules().is_ok());
+    }
+
+    // ── wifi pre-seeding ─────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_a_wifi_password_with_no_ssid() {
+        let mut c = valid();
+        c.network.wifi_ssid = None;
+        c.network.wifi_password = Some(Secret::new("12345678"));
+        assert!(c.validate_rules().is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_ssid_lengths() {
+        for bad in ["", &"x".repeat(33)] {
+            let mut c = valid();
+            c.network.wifi_ssid = Some(bad.to_string());
+            assert!(
+                c.validate_rules().is_err(),
+                "ssid {:?} should be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ssids_that_would_be_unsafe_as_filenames() {
+        let mut c = valid();
+        c.network.wifi_ssid = Some("net/work".to_string());
+        assert!(c.validate_rules().is_err());
+    }
+
+    #[test]
+    fn rejects_psk_lengths_outside_the_wpa_range() {
+        for bad in ["short", &"x".repeat(64)] {
+            let mut c = valid();
+            c.network.wifi_ssid = Some("somenet".to_string());
+            c.network.wifi_password = Some(Secret::new(bad));
+            assert!(
+                c.validate_rules().is_err(),
+                "psk {:?} should be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_a_well_formed_wifi_preseed() {
+        let mut c = valid();
+        c.network.wifi_ssid = Some("somenet".to_string());
+        c.network.wifi_password = Some(Secret::new("correcthorse"));
+        assert!(c.validate_rules().is_ok());
+    }
+
+    #[test]
+    fn accepts_an_open_network_with_no_psk() {
+        let mut c = valid();
+        c.network.wifi_ssid = Some("somenet".to_string());
+        c.network.wifi_password = None;
+        assert!(c.validate_rules().is_ok());
     }
 
     // ── CustomPartitionEntry::effective_label ────────────────────────────────
