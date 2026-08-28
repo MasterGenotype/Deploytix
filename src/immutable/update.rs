@@ -78,14 +78,80 @@ pub fn unmount_set_cmd(id: &str) -> String {
     format!("umount -R {target} 2>/dev/null || true; rmdir {target} 2>/dev/null || true")
 }
 
-/// The pacman invocation for the transaction: a full upgrade, or installing the
-/// named packages on top of a sync.
-pub fn pacman_cmd(extra_packages: &[String]) -> String {
-    if extra_packages.is_empty() {
-        "pacman -Syu --noconfirm".to_string()
-    } else {
-        format!("pacman -Syu --noconfirm {}", extra_packages.join(" "))
+/// Staging dir under the shared `/var` (rbind-mounted into the set) where local
+/// package files are copied so the chroot can reach them by absolute path.
+pub const PKG_STAGE_DIR: &str = "/var/cache/deploytix-update";
+
+/// Whether an update arg is a local package file (installed with `pacman -U`)
+/// rather than a repo package name (installed with `pacman -S`).
+fn is_local_pkg(arg: &str) -> bool {
+    arg.ends_with(".pkg.tar.zst")
+        || arg.ends_with(".pkg.tar.xz")
+        || std::path::Path::new(arg).is_file()
+}
+
+/// Split update args into (local package files, repo package names).
+pub fn classify_args(extra: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut names = Vec::new();
+    for a in extra {
+        if is_local_pkg(a) {
+            files.push(a.clone());
+        } else {
+            names.push(a.clone());
+        }
     }
+    (files, names)
+}
+
+/// Build the ordered pacman invocation(s) for a transaction. `staged_files` are
+/// absolute paths valid *inside the chroot*; `names` are repo package names.
+///
+/// - nothing → full `pacman -Syu`;
+/// - repo names → `pacman -Syu --noconfirm <names>`;
+/// - local files → `pacman -U --noconfirm <files>` (no DB sync, so it works
+///   offline / without configured repos — which is why `-Syu <file>` failed with
+///   a "missing database" error).
+pub fn pacman_cmds(staged_files: &[String], names: &[String]) -> Vec<String> {
+    let mut cmds = Vec::new();
+    if staged_files.is_empty() && names.is_empty() {
+        cmds.push("pacman -Syu --noconfirm".to_string());
+        return cmds;
+    }
+    if !names.is_empty() {
+        cmds.push(format!("pacman -Syu --noconfirm {}", names.join(" ")));
+    }
+    if !staged_files.is_empty() {
+        cmds.push(format!("pacman -U --noconfirm {}", staged_files.join(" ")));
+    }
+    cmds
+}
+
+/// Copy local package files into the shared `/var` staging dir so `pacman -U`
+/// can reach them inside the chroot. Returns their absolute in-chroot paths.
+fn stage_local_pkgs(cmd: &CommandRunner, files: &[String]) -> Result<Vec<String>> {
+    let staged: Result<Vec<String>> = files
+        .iter()
+        .map(|f| {
+            std::path::Path::new(f)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| format!("{PKG_STAGE_DIR}/{n}"))
+                .ok_or_else(|| DeploytixError::ConfigError(format!("bad package path: {f}")))
+        })
+        .collect();
+    let staged = staged?;
+    if cmd.is_dry_run() {
+        return Ok(staged);
+    }
+    std::fs::create_dir_all(PKG_STAGE_DIR)?;
+    for (src, dest) in files.iter().zip(staged.iter()) {
+        let abs = std::fs::canonicalize(src).map_err(|e| {
+            DeploytixError::ConfigError(format!("package file not found: {src}: {e}"))
+        })?;
+        std::fs::copy(&abs, dest)?;
+    }
+    Ok(staged)
 }
 
 /// Confirm we are on an immutable deploytix system before updating.
@@ -143,19 +209,29 @@ pub fn run_update(
     info!("[immutable] Building transactional update set");
     let id = snapshot::create_set(cmd, &devices, /* readonly = */ false)?;
 
+    let (local_files, repo_names) = classify_args(extra_packages);
+
     // Everything from here is unwound on failure so a bad update leaves nothing.
     let result = (|| -> Result<()> {
         cmd.run("sh", &["-c", &mount_set_cmd(&devices, &id)])?;
         let target = target_dir(&id);
+        // Local .pkg.tar.zst files are copied into the shared /var so the chroot
+        // can reach them by absolute path and install them with `pacman -U`.
+        let staged = stage_local_pkgs(cmd, &local_files)?;
         info!("[immutable] Running pacman in set {}", id);
-        cmd.run_in_chroot(&target, &pacman_cmd(extra_packages))?;
+        for pac in pacman_cmds(&staged, &repo_names) {
+            cmd.run_in_chroot(&target, &pac)?;
+        }
         // Regenerate the (shared) initramfs from within the updated set.
         cmd.run_in_chroot(&target, "mkinitcpio -P")?;
         Ok(())
     })();
 
-    // Always release the chroot mounts.
+    // Always release the chroot mounts and clear the package staging dir.
     let _ = cmd.run("sh", &["-c", &unmount_set_cmd(&id)]);
+    if !cmd.is_dry_run() {
+        let _ = std::fs::remove_dir_all(PKG_STAGE_DIR);
+    }
 
     match result {
         Ok(()) => {
@@ -222,12 +298,32 @@ mod tests {
     }
 
     #[test]
-    fn pacman_cmd_full_upgrade_vs_targeted() {
-        assert_eq!(pacman_cmd(&[]), "pacman -Syu --noconfirm");
+    fn pacman_cmds_full_upgrade_vs_repo_names_vs_local_files() {
+        // No args → full upgrade.
+        assert_eq!(pacman_cmds(&[], &[]), vec!["pacman -Syu --noconfirm"]);
+        // Repo names → -S.
         assert_eq!(
-            pacman_cmd(&["vim".to_string(), "git".to_string()]),
-            "pacman -Syu --noconfirm vim git"
+            pacman_cmds(&[], &["vim".to_string(), "git".to_string()]),
+            vec!["pacman -Syu --noconfirm vim git"]
         );
+        // Local files → -U (no DB sync).
+        assert_eq!(
+            pacman_cmds(
+                &["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()],
+                &[]
+            ),
+            vec!["pacman -U --noconfirm /var/cache/deploytix-update/a.pkg.tar.zst"]
+        );
+    }
+
+    #[test]
+    fn classify_splits_files_from_names() {
+        let (files, names) = classify_args(&[
+            "vim".to_string(),
+            "pkg/deploytix-git-1-x86_64.pkg.tar.zst".to_string(),
+        ]);
+        assert_eq!(files, vec!["pkg/deploytix-git-1-x86_64.pkg.tar.zst"]);
+        assert_eq!(names, vec!["vim"]);
     }
 
     #[test]
