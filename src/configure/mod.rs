@@ -17,3 +17,4 @@ pub mod services;
 pub mod session_switching;
 pub mod swap;
 pub mod users;
+pub mod verity;

@@ -20,8 +20,8 @@ use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
 use crate::install::crypttab::generate_crypttab_multi_volume;
 use crate::install::fstab::{
-    append_swap_file_entry, generate_fstab_lvm_thin, generate_fstab_multi_volume,
-    LvmThinFstabParams, MultiVolumeFstabParams,
+    append_swap_file_entry, generate_fstab_lvm_ab, generate_fstab_lvm_thin,
+    generate_fstab_multi_volume, LvmAbFstabParams, LvmThinFstabParams, MultiVolumeFstabParams,
 };
 use crate::install::{
     generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_zfs,
@@ -83,6 +83,8 @@ pub struct Installer {
     keyfiles: Vec<VolumeKeyfile>,
     /// LVM thin volumes for LvmThin layout
     lvm_thin_volumes: Vec<ThinVolumeDef>,
+    /// Immutable A/B logical volumes (LVM immutable backend only)
+    ab_volumes: Vec<crate::disk::lvm::AbLvDef>,
     /// LUKS container for LVM PV (LvmThin layout)
     luks_lvm_container: Option<LuksContainer>,
     /// Skip interactive confirmation prompt (e.g. when GUI already confirmed)
@@ -101,6 +103,7 @@ impl Installer {
             luks_boot_container: None,
             keyfiles: Vec::new(),
             lvm_thin_volumes: Vec::new(),
+            ab_volumes: Vec::new(),
             luks_lvm_container: None,
             skip_confirm: false,
             progress_cb: None,
@@ -199,8 +202,17 @@ impl Installer {
         self.report_progress(0.10, "Partitioning disk...");
         self.partition_disk()?;
 
+        let uses_immutable_ab = self.config.immutable_lvm_ab();
+
         // Phase 2.5: Encryption layer (if enabled)
-        if uses_lvm_thin {
+        if uses_immutable_ab {
+            self.report_progress(0.15, "Setting up LVM immutable A/B provisioning...");
+            self.setup_lvm_thin()?; // creates PV/VG/pool/LUKS/boot; A/B volume set
+            self.report_progress(0.22, "Formatting A/B slot volumes...");
+            self.format_lvm_ab_volumes()?;
+            self.report_progress(0.28, "Mounting slot A for installation...");
+            self.mount_lvm_ab_volumes()?;
+        } else if uses_lvm_thin {
             self.report_progress(0.15, "Setting up LVM thin provisioning...");
             self.setup_lvm_thin()?;
             self.report_progress(0.22, "Formatting LVM volumes...");
@@ -234,7 +246,9 @@ impl Installer {
 
         // Phase 3.5: Generate fstab
         self.report_progress(0.55, "Generating fstab...");
-        if uses_lvm_thin {
+        if uses_immutable_ab {
+            self.generate_fstab_lvm_ab()?;
+        } else if uses_lvm_thin {
             self.generate_fstab_lvm_thin()?;
         } else if uses_multi_luks {
             self.generate_fstab_multi_volume()?;
@@ -268,8 +282,9 @@ impl Installer {
         self.report_progress(0.65, "Configuring system...");
         self.configure_system()?;
 
-        // Phase 4.5: Custom hooks (for encrypted systems)
-        if uses_encryption {
+        // Phase 4.5: Custom hooks (encrypted systems, and the LVM immutable A/B
+        // backend which needs the verity-ab hook even when unencrypted)
+        if uses_encryption || uses_immutable_ab {
             self.report_progress(0.75, "Installing custom hooks...");
             self.install_custom_hooks()?;
         }
@@ -1218,6 +1233,13 @@ impl Installer {
         // Regenerate initramfs
         self.cmd.run_in_chroot(INSTALL_ROOT, "mkinitcpio -P")?;
 
+        // Immutable A/B: clone slot A → B, seal both with dm-verity, write the
+        // slot-pointer state, and patch the boot pointer. Handles its own
+        // unmounting of slot A (verity requires the data device unmounted).
+        if self.config.immutable_lvm_ab() {
+            self.finalize_immutable_ab()?;
+        }
+
         // Unmount all partitions
         unmount_all(&self.cmd, INSTALL_ROOT)?;
 
@@ -1665,32 +1687,40 @@ impl Installer {
         self.report_progress(0.19, "Creating LVM thin pool and volumes...");
         lvm::create_thin_pool(&self.cmd, vg_name, pool_name, pool_percent)?;
 
-        // Create thin volumes from the layout's planned_thin_volumes (which
-        // reflect the actual partitions that were collapsed into the LVM PV).
-        // Falls back to default_thin_volumes() for legacy layouts that don't
-        // populate planned_thin_volumes.
-        let thin_volumes = if let Some(ref planned) = layout.planned_thin_volumes {
-            if planned.is_empty() {
-                lvm::default_thin_volumes()
-            } else {
-                planned
-                    .iter()
-                    .map(|pv| lvm::ThinVolumeDef {
-                        name: pv.name.clone(),
-                        virtual_size: pv.virtual_size.clone(),
-                        mount_point: pv.mount_point.clone(),
-                    })
-                    .collect()
-            }
+        // Immutable A/B backend uses a dedicated volume set (root_a/root_b +
+        // verity hash LVs + shared var/home/etc_overlay) rather than the plain
+        // thin volumes. Both paths then share the /boot-encryption setup below.
+        if self.config.immutable_lvm_ab() {
+            let ab = lvm::immutable_ab_thin_volumes();
+            lvm::create_ab_thin_volumes(&self.cmd, vg_name, pool_name, &ab)?;
+            self.ab_volumes = ab;
         } else {
-            lvm::default_thin_volumes()
-        };
-        lvm::create_all_thin_volumes(&self.cmd, vg_name, pool_name, &thin_volumes)?;
+            // Create thin volumes from the layout's planned_thin_volumes (which
+            // reflect the actual partitions that were collapsed into the LVM PV).
+            // Falls back to default_thin_volumes() for legacy layouts that don't
+            // populate planned_thin_volumes.
+            let thin_volumes = if let Some(ref planned) = layout.planned_thin_volumes {
+                if planned.is_empty() {
+                    lvm::default_thin_volumes()
+                } else {
+                    planned
+                        .iter()
+                        .map(|pv| lvm::ThinVolumeDef {
+                            name: pv.name.clone(),
+                            virtual_size: pv.virtual_size.clone(),
+                            mount_point: pv.mount_point.clone(),
+                        })
+                        .collect()
+                }
+            } else {
+                lvm::default_thin_volumes()
+            };
+            lvm::create_all_thin_volumes(&self.cmd, vg_name, pool_name, &thin_volumes)?;
+            self.lvm_thin_volumes = thin_volumes;
+        }
 
         // Activate VG to make LVs available
         lvm::activate_vg(&self.cmd, vg_name)?;
-
-        self.lvm_thin_volumes = thin_volumes;
 
         // Setup LUKS1 encryption on /boot partition if enabled
         if self.config.disk.boot_encryption {
@@ -1889,6 +1919,246 @@ impl Installer {
             boot_filesystem: &self.config.disk.boot_filesystem,
             install_root: INSTALL_ROOT,
         })
+    }
+
+    /// Format the immutable A/B slot volumes.
+    ///
+    /// Formats both root slots (slot A is installed into, slot B is cloned from
+    /// A at finalize), the persistent `var`/`home`, and the `/etc` overlay upper.
+    /// The dm-verity hash LVs are raw and must NOT be formatted. Boot/EFI/swap are
+    /// formatted as on the thin path.
+    fn format_lvm_ab_volumes(&self) -> Result<()> {
+        use crate::disk::lvm::AbVolumeRole;
+        info!("[Phase 2/6] Formatting immutable A/B slot volumes");
+
+        let layout = self.layout.as_ref().unwrap();
+        let vg_name = &self.config.disk.lvm_vg_name;
+
+        for vol in &self.ab_volumes {
+            if vol.role == AbVolumeRole::VerityHash {
+                continue; // raw hash-tree store — never formatted
+            }
+            let lv_device = lv_path(vg_name, &vol.name);
+            format_partition(
+                &self.cmd,
+                &lv_device,
+                &self.config.disk.filesystem,
+                Some(&vol.name),
+            )?;
+        }
+
+        // Swap / boot / EFI (identical to the thin path).
+        if self.config.disk.swap_type == SwapType::Partition {
+            if let Some(swap) = layout.partitions.iter().find(|p| p.is_swap) {
+                let swap_device = partition_path(&self.config.disk.device, swap.number);
+                format_swap(&self.cmd, &swap_device, Some("SWAP"))?;
+            }
+        }
+        if let Some(ref boot_container) = self.luks_boot_container {
+            format_boot_partition(
+                &self.cmd,
+                &boot_container.mapped_path,
+                &self.config.disk.boot_filesystem,
+            )?;
+        } else {
+            let boot_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.is_boot_fs)
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+                })?;
+            let boot_device = partition_path(&self.config.disk.device, boot_part.number);
+            format_boot_partition(&self.cmd, &boot_device, &self.config.disk.boot_filesystem)?;
+        }
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
+        let efi_device = partition_path(&self.config.disk.device, efi_part.number);
+        format_efi(&self.cmd, &efi_device)?;
+
+        info!("Immutable A/B slot volumes formatted");
+        Ok(())
+    }
+
+    /// Mount slot A (root image) at INSTALL_ROOT plus the persistent var/home for
+    /// installation. Slot B, the hash LVs, and the /etc overlay are left alone —
+    /// slot B is cloned and both slots sealed at finalize.
+    fn mount_lvm_ab_volumes(&self) -> Result<()> {
+        use crate::disk::lvm::{ab, AbVolumeRole};
+        info!("[Phase 2/6] Mounting slot A to {}", INSTALL_ROOT);
+
+        let vg_name = &self.config.disk.lvm_vg_name;
+        lvm::scan_and_activate(&self.cmd)?;
+
+        // Slot A is the install target.
+        let root_a = lv_path(vg_name, ab::ROOT_A);
+        if !self.cmd.is_dry_run() {
+            fs::create_dir_all(INSTALL_ROOT)?;
+        }
+        self.cmd.run("mount", &[&root_a, INSTALL_ROOT])?;
+        info!("Mounted {} (slot A) to {}", root_a, INSTALL_ROOT);
+
+        // Persistent writable data volumes (var, home).
+        for vol in &self.ab_volumes {
+            if vol.role != AbVolumeRole::Data {
+                continue;
+            }
+            let lv_device = lv_path(vg_name, &vol.name);
+            let mount_point = format!("{}{}", INSTALL_ROOT, vol.mount_point);
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&mount_point)?;
+            }
+            self.cmd.run("mount", &[&lv_device, &mount_point])?;
+            info!("Mounted {} -> {}", lv_device, mount_point);
+        }
+        Ok(())
+    }
+
+    /// Generate fstab for the immutable A/B layout.
+    fn generate_fstab_lvm_ab(&self) -> Result<()> {
+        info!("[Phase 3/6] Generating /etc/fstab for immutable A/B layout");
+        let layout = self.layout.as_ref().unwrap();
+        let boot_mapped = self
+            .luks_boot_container
+            .as_ref()
+            .map(|c| c.mapped_path.as_str());
+        generate_fstab_lvm_ab(&LvmAbFstabParams {
+            cmd: &self.cmd,
+            vg_name: &self.config.disk.lvm_vg_name,
+            volumes: &self.ab_volumes,
+            device: &self.config.disk.device,
+            layout,
+            filesystem: &self.config.disk.filesystem,
+            swap_type: &self.config.disk.swap_type,
+            boot_mapped_device: boot_mapped,
+            boot_filesystem: &self.config.disk.boot_filesystem,
+            install_root: INSTALL_ROOT,
+        })
+    }
+
+    /// Finalize the immutable A/B install: clone slot A → slot B, seal both slots
+    /// with dm-verity, write the slot-pointer state file, and patch the boot
+    /// pointer with slot A's real root hash. Runs after `mkinitcpio -P`, while
+    /// slot A is still mounted at INSTALL_ROOT.
+    fn finalize_immutable_ab(&self) -> Result<()> {
+        use crate::configure::verity;
+        use crate::disk::lvm::ab;
+        use crate::immutable::lvm_ab::SlotState;
+
+        info!("[Phase 6/6] Sealing immutable A/B slots (dm-verity)");
+        let vg = self.config.disk.lvm_vg_name.clone();
+        let root_a = lv_path(&vg, ab::ROOT_A);
+        let root_b = lv_path(&vg, ab::ROOT_B);
+        let hash_a = lv_path(&vg, ab::HASH_A);
+        let hash_b = lv_path(&vg, ab::HASH_B);
+
+        // 1. Clone slot A (the freshly installed image) into slot B so both slots
+        //    start identical. INSTALL_ROOT is slot A; mount B at a scratch dir and
+        //    rsync the root tree (excluding the separate var/home/boot mounts).
+        let clone = format!(
+            "set -e; b=/run/deploytix-clone; mkdir -p \"$b\"; mount {root_b} \"$b\"; \
+             rsync -aHAX --delete \
+               --exclude='/var/*' --exclude='/home/*' --exclude='/boot/*' \
+               --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
+               --exclude='/run/*' --exclude='/tmp/*' --exclude='/lost+found' \
+               {root}/ \"$b/\"; \
+             umount \"$b\"; rmdir \"$b\" 2>/dev/null || true",
+            root_b = root_b,
+            root = INSTALL_ROOT,
+        );
+        self.cmd.run("sh", &["-c", &clone])?;
+
+        // 2. Seal both slots. veritysetup requires the data device unmounted, so
+        //    slot A must be unmounted here; the pipeline's own unmount in finalize
+        //    handles INSTALL_ROOT, but verity needs it done first for slot A.
+        //    Unmount INSTALL_ROOT subtree now (best-effort) before sealing A.
+        let _ = self.cmd.run(
+            "sh",
+            &[
+                "-c",
+                &format!("umount -R {INSTALL_ROOT} 2>/dev/null || true"),
+            ],
+        );
+
+        let roothash_a = verity::format_verity(&self.cmd, &root_a, &hash_a)?;
+        let roothash_b = verity::format_verity(&self.cmd, &root_b, &hash_b)?;
+
+        // 3. Write the slot-pointer state file to the shared /boot. /boot was
+        //    unmounted with INSTALL_ROOT above; re-mount just /boot to write it.
+        let state = SlotState {
+            active: "A".to_string(),
+            vg: vg.clone(),
+            roothash_a: roothash_a.clone(),
+            roothash_b,
+        };
+        self.write_ab_state_and_pointer(&state, &roothash_a)?;
+
+        info!("Immutable A/B install sealed: active slot A");
+        Ok(())
+    }
+
+    /// Mount the shared /boot, write the A/B slot-state file, and patch the boot
+    /// pointer (grub.cfg + /etc/default/grub) with slot A's real root hash.
+    fn write_ab_state_and_pointer(
+        &self,
+        state: &crate::immutable::lvm_ab::SlotState,
+        roothash_a: &str,
+    ) -> Result<()> {
+        use crate::immutable::lvm_ab;
+
+        if self.cmd.is_dry_run() {
+            println!(
+                "  [dry-run] Would write {} and patch boot pointer (slot A, roothash {})",
+                lvm_ab::STATE_FILE,
+                &roothash_a[..roothash_a.len().min(12)]
+            );
+            return Ok(());
+        }
+
+        // Re-mount /boot (and its EFI child) at INSTALL_ROOT so we can write the
+        // state file and patch grub.cfg using the live absolute paths the engine
+        // expects, then unmount again.
+        let boot_dev = self
+            .luks_boot_container
+            .as_ref()
+            .map(|c| c.mapped_path.clone())
+            .unwrap_or_else(|| {
+                // Plain boot partition by BOOT label.
+                "/dev/disk/by-partlabel/BOOT".to_string()
+            });
+        let mount_boot = format!(
+            "mkdir -p {r}/boot; mount {dev} {r}/boot 2>/dev/null || true",
+            r = INSTALL_ROOT,
+            dev = boot_dev
+        );
+        self.cmd.run("sh", &["-c", &mount_boot])?;
+
+        // State file lives on /boot.
+        let state_path = format!("{}/boot/{}", INSTALL_ROOT, "deploytix-slots.conf");
+        fs::write(&state_path, state.to_conf())?;
+
+        // Patch the installed grub.cfg + /etc/default/grub (still on INSTALL_ROOT).
+        let grub_cfg = format!("{}/boot/grub/grub.cfg", INSTALL_ROOT);
+        let grub_default = format!("{}/etc/default/grub", INSTALL_ROOT);
+        let sed = format!(
+            "sed -i 's|deploytix.slot=[^ \"]*|deploytix.slot=A|g; \
+             s|deploytix.roothash=[^ \"]*|deploytix.roothash={h}|g' {cfg} {def} 2>/dev/null || true",
+            h = roothash_a,
+            cfg = grub_cfg,
+            def = grub_default,
+        );
+        self.cmd.run("sh", &["-c", &sed])?;
+
+        let _ = self.cmd.run(
+            "sh",
+            &[
+                "-c",
+                &format!("umount {r}/boot 2>/dev/null || true", r = INSTALL_ROOT),
+            ],
+        );
+        info!("A/B slot state written and boot pointer set to slot A");
+        Ok(())
     }
 
     /// Generate crypttab for LVM thin layout

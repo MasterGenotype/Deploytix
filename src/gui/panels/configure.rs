@@ -69,7 +69,7 @@ pub fn show(
 
         // ═══ Column 3: Packages & Gaming ══════════════════════════════
         column_heading(&mut cols[2], "Packages");
-        network_desktop::show_sections(&mut cols[2], packages, &disk.filesystem);
+        network_desktop::show_sections(&mut cols[2], packages, &disk.filesystem, disk.use_lvm_thin);
         sub_heading(&mut cols[2], "Gaming");
         handheld_gaming::show_sections(&mut cols[2], packages);
     });

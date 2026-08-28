@@ -5,7 +5,12 @@ use crate::gui::{state::PackagesState, theme, widgets};
 use egui::Ui;
 
 /// Render network & desktop sections.
-pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesystem: &Filesystem) {
+pub(crate) fn show_sections(
+    ui: &mut Ui,
+    packages: &mut PackagesState,
+    filesystem: &Filesystem,
+    use_lvm_thin: bool,
+) {
     widgets::section(ui, "Network", |ui| {
         // Steam's gamepad UI configures Wi-Fi through NetworkManager; the
         // standalone iwd backend would leave Game Mode network setup broken
@@ -282,6 +287,30 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
             }
         } else {
             packages.install_grub_btrfs = false;
+            if !use_lvm_thin {
+                packages.immutable_root = false;
+            }
+        }
+
+        // LVM thin backend: A/B dual-slot dm-verity immutable root. Offered when
+        // LVM thin is selected (grub-btrfs is not available on that layout).
+        if use_lvm_thin {
+            ui.checkbox(
+                &mut packages.immutable_root,
+                "Transactional immutable root (A/B dual-slot, dm-verity read-only /)",
+            );
+            if packages.immutable_root {
+                widgets::info_text(
+                    ui,
+                    "Two root LVs (A/B); each slot's root (including /usr) is mounted \
+                     read-only and dm-verity integrity-checked. `deploytix update` builds \
+                     the inactive slot and flips the boot pointer on reboot; \
+                     `deploytix rollback` flips back. Direct `pacman -Syu` is blocked.",
+                );
+            }
+            ui.add_space(theme::SPACING_XS);
+        } else if *filesystem != Filesystem::Btrfs {
+            // Neither backend applies.
             packages.immutable_root = false;
         }
     });
