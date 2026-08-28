@@ -1,88 +1,67 @@
-//! Pacman lockdown for the immutable model.
+//! Friendly "use `deploytix update`" nudge for the immutable model.
 //!
-//! On an immutable system `/usr` is read-only, so a direct `pacman -Syu` would
-//! fail partway with confusing errors. This installs a `PreTransaction` pacman
-//! hook that aborts install/upgrade/remove transactions while `/usr` is mounted
-//! read-only, pointing the user at `deploytix update` instead.
+//! **Enforcement is the read-only `/usr` mount, not this file.** On an immutable
+//! system `pacman -Syu` physically cannot modify `/usr`, so it fails — the point
+//! here is only to fail *early and helpfully*.
 //!
-//! The guard keys off the actual read-only state of `/usr`, so it correctly
-//! *allows* the `pacman` that `deploytix update` runs inside a writable set
-//! chroot (where `/usr` is mounted read-write).
+//! We deliberately do **not** use a pacman `PreTransaction` hook: `basestrap`/
+//! `pacstrap` run `pacman -r <newroot>`, which reads hooks from the *host's*
+//! hookdir but runs each hook's `Exec` chrooted into the (possibly empty) new
+//! root. A `Target = *` hook execing any binary therefore aborts every
+//! install-to-another-root — breaking ISO builds and deploytix's own deploys
+//! from an immutable machine. Instead we install a `/etc/profile.d` snippet that
+//! intercepts *interactive* `pacman` upgrade/install/remove and points the user
+//! at `deploytix update`. It never affects scripts, `sudo`, or `pacman -r`.
 
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
-/// Path (relative to a root) of the pacman lockdown hook. The `00-` prefix runs
-/// it before every other hook.
-pub const HOOK_REL: &str = "etc/pacman.d/hooks/00-deploytix-immutable.hook";
-/// Path (relative to a root) of the guard script the hook invokes.
-pub const GUARD_REL: &str = "usr/local/bin/deploytix-immutable-guard";
+/// Path (relative to a root) of the interactive nudge sourced by login shells.
+pub const PROFILE_REL: &str = "etc/profile.d/deploytix-immutable.sh";
 
-/// The pacman hook file contents.
-pub fn hook_contents() -> &'static str {
-    r#"[Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = *
-
-[Action]
-Description = Enforcing immutable root (use `deploytix update`)...
-When = PreTransaction
-Exec = /usr/local/bin/deploytix-immutable-guard
-AbortOnFail
-"#
-}
-
-/// The guard script contents. Exits non-zero (aborting the transaction) only
-/// when `/usr` is read-only — i.e. on the live immutable system, not inside a
-/// `deploytix update` chroot.
-pub fn guard_script() -> &'static str {
-    r#"#!/bin/sh
-# deploytix immutable-root guard. Blocks direct pacman on the read-only live
-# system; allows it inside a writable transactional-update chroot.
-usr_opts=""
-if command -v findmnt >/dev/null 2>&1; then
-    usr_opts=$(findmnt -no OPTIONS /usr 2>/dev/null)
-else
-    usr_opts=$(awk '$2=="/usr"{print $4}' /proc/mounts 2>/dev/null)
+/// The `/etc/profile.d` snippet. Guarded so it only activates on a live
+/// immutable system (pairing marker present *and* `/usr` mounted read-only), and
+/// only wraps interactive shells — `command pacman` bypasses it.
+pub fn profile_snippet() -> &'static str {
+    r#"# deploytix: nudge interactive pacman toward `deploytix update` on immutable
+# systems. Enforcement is the read-only /usr mount; this is only a friendly,
+# interactive-only hint (never affects scripts, sudo, or `pacman -r`).
+if [ -e /.deploytix-pair ]; then
+    _dpx_usr_ro=0
+    if command -v findmnt >/dev/null 2>&1; then
+        case ",$(findmnt -no OPTIONS /usr 2>/dev/null)," in *,ro,*) _dpx_usr_ro=1 ;; esac
+    fi
+    if [ "$_dpx_usr_ro" = 1 ]; then
+        pacman() {
+            case "$1" in
+                -S*|-U*|-R*|--sync|--upgrade|--remove)
+                    echo "deploytix: / and /usr are read-only (immutable system)." >&2
+                    echo "           Update transactionally with:  deploytix update" >&2
+                    echo "           (bypass for this shell:        command pacman ...)" >&2
+                    return 1 ;;
+            esac
+            command pacman "$@"
+        }
+    fi
+    unset _dpx_usr_ro
 fi
-case ",$usr_opts," in
-    *,ro,*)
-        echo "deploytix: / and /usr are read-only (immutable system)." >&2
-        echo "           Run system updates transactionally with:" >&2
-        echo "               deploytix update" >&2
-        echo "           (or, to install one-off packages: deploytix update <pkg>...)" >&2
-        exit 1
-        ;;
-esac
-exit 0
 "#
 }
 
-/// Install the pacman lockdown hook and guard script under `install_root`.
+/// Install the interactive nudge under `install_root`.
 pub fn install(cmd: &CommandRunner, install_root: &str) -> Result<()> {
-    info!("[immutable] Installing pacman lockdown hook");
+    info!("[immutable] Installing immutable-root shell nudge (/etc/profile.d)");
     if cmd.is_dry_run() {
-        println!("  [dry-run] Would write /{HOOK_REL} and /{GUARD_REL}");
+        println!("  [dry-run] Would write /{PROFILE_REL}");
         return Ok(());
     }
-
-    let guard_path = format!("{install_root}/{GUARD_REL}");
-    let hook_path = format!("{install_root}/{HOOK_REL}");
-    if let Some(parent) = std::path::Path::new(&guard_path).parent() {
+    let path = format!("{install_root}/{PROFILE_REL}");
+    if let Some(parent) = std::path::Path::new(&path).parent() {
         fs::create_dir_all(parent)?;
     }
-    if let Some(parent) = std::path::Path::new(&hook_path).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&guard_path, guard_script())?;
-    fs::set_permissions(&guard_path, fs::Permissions::from_mode(0o755))?;
-    fs::write(&hook_path, hook_contents())?;
+    fs::write(&path, profile_snippet())?;
     Ok(())
 }
 
@@ -91,26 +70,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_runs_pretransaction_and_aborts() {
-        let h = hook_contents();
-        assert!(h.contains("When = PreTransaction"));
-        assert!(h.contains("AbortOnFail"));
-        assert!(h.contains("Exec = /usr/local/bin/deploytix-immutable-guard"));
+    fn snippet_is_interactive_only_and_guarded() {
+        let s = profile_snippet();
+        // Guarded on the live immutable signals.
+        assert!(s.contains("/.deploytix-pair"));
+        assert!(s.contains("findmnt -no OPTIONS /usr"));
+        assert!(s.contains("*,ro,*"));
+        // Wraps the shell builtin (interactive only) and offers a bypass.
+        assert!(s.contains("pacman() {"));
+        assert!(s.contains("command pacman \"$@\""));
+        assert!(s.contains("deploytix update"));
     }
 
     #[test]
-    fn guard_blocks_on_ro_usr_and_is_valid_shell() {
-        let g = guard_script();
-        assert!(g.contains("findmnt -no OPTIONS /usr"));
-        assert!(g.contains("deploytix update"));
-        assert!(g.contains("*,ro,*)"));
+    fn snippet_is_valid_shell() {
         if let Ok(status) = std::process::Command::new("sh")
             .arg("-n")
             .arg("-c")
-            .arg(g)
+            .arg(profile_snippet())
             .status()
         {
-            assert!(status.success(), "guard script is not valid shell");
+            assert!(status.success(), "profile snippet is not valid shell");
         }
+    }
+
+    #[test]
+    fn install_is_dry_run_safe() {
+        let cmd = CommandRunner::new(true);
+        install(&cmd, "/mnt/target").unwrap();
     }
 }

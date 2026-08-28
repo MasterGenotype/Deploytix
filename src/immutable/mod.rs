@@ -5,8 +5,9 @@
 //! dedicated writable `@etc` subvolume, and the three are snapshotted as an
 //! atomic set (`{@, @usr, @etc}`) that rolls back together. Package updates are
 //! performed transactionally by [`update`] against a fresh writable snapshot set
-//! that only takes effect on reboot; direct `pacman -Syu` on the live read-only
-//! system is refused by a pacman hook.
+//! that only takes effect on reboot; direct `pacman -Syu` on the live system is
+//! prevented by the read-only `/usr` mount (with a friendly interactive nudge
+//! from [`lockdown`] toward `deploytix update`).
 //!
 //! This module owns the primitives shared across install, `deploytix update`,
 //! `deploytix rollback` and `deploytix migrate-immutable`.

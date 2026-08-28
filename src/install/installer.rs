@@ -353,10 +353,11 @@ impl Installer {
             self.install_grub_btrfs()?;
         }
 
-        // Phase 5.45: Immutable root — pacman lockdown so the read-only system
-        // is updated only via `deploytix update`.
+        // Phase 5.45: Immutable root — friendly interactive nudge toward
+        // `deploytix update` (enforcement is the read-only /usr mount; a pacman
+        // hook would break basestrap/pacman -r image builds and deploys).
         if self.config.packages.immutable_root {
-            self.report_progress(0.888, "Installing immutable-root pacman lockdown...");
+            self.report_progress(0.888, "Installing immutable-root shell nudge...");
             crate::immutable::lockdown::install(&self.cmd, INSTALL_ROOT)?;
         }
 

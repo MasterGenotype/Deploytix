@@ -109,7 +109,9 @@ When `immutable_root = true` (requires `install_grub_btrfs`), `/` and `/usr` are
 mounted read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr,
 @etc}` are snapshotted as atomic sets that roll back together. Updates go through
 `deploytix update` (new writable snapshot set + `pacman` in a chroot, activated on
-reboot); direct `pacman -Syu` on the live system is blocked by a pacman hook. The
+reboot); direct `pacman -Syu` on the live system is prevented by the read-only
+`/usr` mount (a `/etc/profile.d` snippet adds a friendly interactive nudge — not a
+pacman hook, which would break `basestrap`/`pacman -r` image builds and deploys). The
 `src/immutable/` module owns this (snapshot sets, boot pointer, update/rollback/
 migrate, lockdown). See `docs/IMMUTABLE_SYSTEM.md` for the full model.
 

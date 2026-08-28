@@ -150,7 +150,7 @@ A conventional system: `/` is read-write, you update with `pacman -Syu`, and the
 This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Expect the following:
 
 - **`/` and `/usr` are read-only.** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so they're covered too. `/etc` is a **writable** subvolume (`@etc`); `/var` and `/home` are writable and persistent. Stray writes to the rest of `/` (e.g. `/tmp`, `/root`) go to an **ephemeral overlay** and are cleared on reboot.
-- **You don't run `pacman -Syu` directly** — it's blocked with a message pointing you at `deploytix update`. Trying anyway just prints how to do it right; nothing breaks.
+- **You don't run `pacman -Syu` directly** — `/usr` is read-only, so it can't succeed anyway. Interactive shells get a friendly nudge toward `deploytix update` before it even tries; use `deploytix update` instead.
 - **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically.
 - **Rollback is instant and reversible.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot. Nothing is deleted, so you can roll "forward" again. Each set restores `{@, @usr, @etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
 - **Everyday example:**

@@ -151,15 +151,23 @@ migration but *before* reboot are lost (the copied `@etc` takes over on reboot).
 
 ---
 
-## Pacman lockdown
+## Direct-pacman prevention
 
-On an immutable system, `/usr` is read-only, so a direct `pacman -Syu` would fail
-partway. A `PreTransaction` pacman hook
-(`/etc/pacman.d/hooks/00-deploytix-immutable.hook`) runs a guard
-(`/usr/local/bin/deploytix-immutable-guard`) that aborts install/upgrade/remove
-transactions while `/usr` is read-only, pointing you at `deploytix update`. The
-guard keys off the actual read-only state of `/usr`, so it *allows* the `pacman`
-that `deploytix update` runs inside its writable set chroot.
+Enforcement is the **read-only `/usr` mount** itself: a direct `pacman -Syu` on
+the live system cannot modify `/usr`, so it fails. Use `deploytix update` instead.
+
+For a friendlier, earlier failure, installs drop a `/etc/profile.d`
+snippet (`deploytix-immutable.sh`) that intercepts *interactive* `pacman`
+upgrade/install/remove on an immutable system (pairing marker present **and**
+`/usr` read-only) and points you at `deploytix update`. `command pacman …`
+bypasses it.
+
+> **Why not a pacman `PreTransaction` hook?** `basestrap`/`pacstrap` run
+> `pacman -r <newroot>`, which reads hooks from the *host's* hookdir but runs each
+> hook's `Exec` chrooted into the new root. A `Target = *` hook execing any binary
+> therefore aborts every install-to-another-root — breaking ISO builds and
+> deploytix's own deploys from an immutable machine. So the lockdown is a
+> shell-level nudge, not a pacman hook.
 
 ---
 
@@ -194,7 +202,7 @@ that `deploytix update` runs inside its writable set chroot.
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
 | `deploytix migrate-immutable` | `src/immutable/migrate.rs` |
-| Pacman lockdown hook | `src/immutable/lockdown.rs` |
+| Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |
 | CLI subcommands | `src/main.rs` |
