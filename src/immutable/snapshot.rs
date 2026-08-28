@@ -16,8 +16,8 @@
 //! trio when booting that set — see the `mountcrypt` hook.
 //!
 //! These primitives are the shared foundation for `deploytix update`
-//! (writable set + `pacman` + boot pointer), `deploytix rollback` (repoint at an
-//! older set) and `deploytix migrate-immutable`.
+//! (writable set + `pacman` + boot pointer) and `deploytix rollback` (repoint at
+//! an older set).
 
 use crate::immutable::PAIR_MARKER;
 use crate::utils::command::CommandRunner;

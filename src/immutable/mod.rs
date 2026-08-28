@@ -9,8 +9,8 @@
 //! prevented by the read-only `/usr` mount (with a friendly interactive nudge
 //! from [`lockdown`] toward `deploytix update`).
 //!
-//! This module owns the primitives shared across install, `deploytix update`,
-//! `deploytix rollback` and `deploytix migrate-immutable`.
+//! This module owns the primitives shared across install, `deploytix update`
+//! and `deploytix rollback`.
 //!
 //! ## Subvolume roles (root btrfs; `@usr` may live on a separate `Crypt-Usr`)
 //! | Subvol | Mount | State | Snapshotted |

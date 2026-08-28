@@ -80,7 +80,8 @@ pub fn resolve_target(cmd: &CommandRunner, selection: Option<&str>) -> Result<St
 pub fn run_rollback(cmd: &CommandRunner, selection: Option<&str>, reboot: bool) -> Result<()> {
     let pointer = resolve_target(cmd, selection)?;
     info!("[immutable] Rolling back: default boot -> {}", pointer);
-    boot::set_boot_pointer(cmd, &pointer)?;
+    let devices = detect_devices();
+    boot::activate_target(cmd, &devices, &pointer)?;
     info!(
         "[immutable] Rollback staged. Reboot to activate {}.",
         pointer

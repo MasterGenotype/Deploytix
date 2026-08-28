@@ -235,7 +235,7 @@ pub fn run_update(
 
     match result {
         Ok(()) => {
-            boot::set_boot_pointer(cmd, &snapshot::set_root_subvol(&id))?;
+            boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
             let running = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
                 .unwrap_or_else(|| "@".to_string());
             prune_sets(cmd, &devices, opts.keep_sets, &running, &id)?;

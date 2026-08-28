@@ -98,7 +98,6 @@ deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
 deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
-deploytix migrate-immutable -c config              # Convert running system to immutable
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
@@ -112,8 +111,10 @@ mounted read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr,
 reboot); direct `pacman -Syu` on the live system is prevented by the read-only
 `/usr` mount (a `/etc/profile.d` snippet adds a friendly interactive nudge — not a
 pacman hook, which would break `basestrap`/`pacman -r` image builds and deploys). The
-`src/immutable/` module owns this (snapshot sets, boot pointer, update/rollback/
-migrate, lockdown). See `docs/IMMUTABLE_SYSTEM.md` for the full model.
+`src/immutable/` module owns this (snapshot sets, boot pointer, update/rollback,
+lockdown). Boot-pointer changes regenerate grub.cfg inside a scratch chroot of the
+target set — never against the live overlay `/`, where `grub-probe` would fail. See
+`docs/IMMUTABLE_SYSTEM.md` for the full model.
 
 ## Reference Materials
 

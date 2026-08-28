@@ -128,7 +128,7 @@ struct Cli {
     verbose: bool,
 
     /// Preview actions without changing the system (dry-run). Applies to
-    /// `update`, `rollback`, and `migrate-immutable`.
+    /// `update` and `rollback`.
     #[arg(short = 'n', long, global = true)]
     dry_run: bool,
 

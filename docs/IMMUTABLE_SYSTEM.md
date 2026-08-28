@@ -17,8 +17,7 @@ style of openSUSE MicroOS / Aeon, adapted to Artix + pacman. When enabled:
 
 Enable it at install time with the wizard prompt *"Enable transactional immutable
 root?"* or `immutable_root = true` in the config's `[packages]` (requires
-`install_grub_btrfs = true`). Convert an existing install with
-`deploytix migrate-immutable`.
+`install_grub_btrfs = true`).
 
 ---
 
@@ -79,6 +78,15 @@ The live system's `@` carries `usr=@usr` / `etc=@etc`.
 Because the pointer + marker drive everything, switching systems is just a
 pointer move + `grub-mkconfig`.
 
+> **Regenerating grub off an overlay root.** On a booted immutable system `/` is
+> an overlayfs, and `grub-probe` aborts with *"failed to get canonical path of
+> `overlay'"* if run against it — producing an empty grub.cfg. So `update` and
+> `rollback` never run `grub-mkconfig` against the live `/`. Instead they mount
+> the target `{root,usr,etc}` set at a scratch chroot (a **real** btrfs root
+> where `grub-probe` works), point that root's `/etc/default/grub` at itself, and
+> run `grub-mkconfig` from inside the chroot to write the shared
+> `/boot/grub/grub.cfg`. See `activate_target` in `src/immutable/boot.rs`.
+
 ---
 
 ## Updating: `deploytix update`
@@ -122,32 +130,6 @@ deploytix rollback <id> --reboot # activate immediately
 Rollback only moves the boot pointer + regenerates grub.cfg — nothing is deleted,
 so it is itself reversible (roll "forward" to a newer set). The interactive
 grub-btrfs menu remains as a manual recovery path.
-
----
-
-## Migrating an existing system: `deploytix migrate-immutable`
-
-Converts a running (mutable) btrfs + subvolume deploytix install in place:
-
-```
-deploytix -n migrate-immutable -c /path/to/original-config.toml   # dry-run FIRST
-deploytix    migrate-immutable -c /path/to/original-config.toml
-```
-
-It re-derives the disk layout from the original config (reusing the exact fstab
-and initramfs generators), then on the live system:
-
-1. creates `@etc` and copies the current `/etc` into it;
-2. ensures the `@overlay` scratch subvolume exists;
-3. regenerates `/etc/fstab` (ro `/`+`/usr`, rw `@etc`) and the `mountcrypt`
-   initramfs hook in immutable mode;
-4. writes the live `.deploytix-pair` marker and installs the pacman lockdown;
-5. rebuilds the initramfs and confirms the boot pointer targets `@`.
-
-The switch to read-only `/`+`/usr` happens on the **next boot**. **Run the
-dry-run first, and ideally take a fresh snapshot/backup before the real run** —
-it rewrites the live `/etc/fstab` and initramfs. Any `/etc` edits made *after*
-migration but *before* reboot are lost (the copied `@etc` takes over on reboot).
 
 ---
 
@@ -201,7 +183,6 @@ bypasses it.
 | Boot pointer (grub) | `src/immutable/boot.rs` |
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
-| `deploytix migrate-immutable` | `src/immutable/migrate.rs` |
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |
