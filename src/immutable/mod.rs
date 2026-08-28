@@ -26,6 +26,7 @@
 pub mod boot;
 pub mod etc;
 pub mod lockdown;
+pub mod lvm_ab;
 pub mod rollback;
 pub mod snapshot;
 pub mod update;

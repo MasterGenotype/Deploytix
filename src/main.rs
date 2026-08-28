@@ -380,29 +380,56 @@ fn cmd_install(
 /// `deploytix update` — transactional system update.
 fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> Result<()> {
     use deploytix::immutable::update::{run_update, UpdateOptions};
+    use deploytix::immutable::{lvm_ab, lvm_ab::detect as is_lvm_ab};
     use deploytix::utils::command::CommandRunner;
 
     if !dry_run && !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
     }
     let cmd = CommandRunner::new(dry_run);
-    run_update(
-        &cmd,
-        &packages,
-        &UpdateOptions {
-            keep_sets: keep,
-            reboot,
-        },
-    )?;
+    // Backend dispatch: LVM A/B systems carry the slot-state file on /boot; the
+    // btrfs backend is signalled by the `.deploytix-pair` marker at `/`.
+    if is_lvm_ab() {
+        lvm_ab::run_update(
+            &cmd,
+            &packages,
+            &UpdateOptions {
+                keep_sets: keep,
+                reboot,
+            },
+        )?;
+    } else {
+        run_update(
+            &cmd,
+            &packages,
+            &UpdateOptions {
+                keep_sets: keep,
+                reboot,
+            },
+        )?;
+    }
     Ok(())
 }
 
-/// `deploytix rollback` — return to a previous snapshot set.
+/// `deploytix rollback` — return to a previous snapshot set (btrfs) or the other
+/// slot (LVM A/B).
 fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool) -> Result<()> {
     use deploytix::immutable::rollback::{print_targets, run_rollback};
+    use deploytix::immutable::{lvm_ab, lvm_ab::detect as is_lvm_ab};
     use deploytix::utils::command::CommandRunner;
 
     let cmd = CommandRunner::new(dry_run);
+    if is_lvm_ab() {
+        if list {
+            lvm_ab::print_slots(&cmd)?;
+            return Ok(());
+        }
+        if !dry_run && !nix::unistd::geteuid().is_root() {
+            return Err(DeploytixError::NotRoot.into());
+        }
+        lvm_ab::run_rollback(&cmd, target.as_deref(), reboot)?;
+        return Ok(());
+    }
     if list {
         print_targets(&cmd)?;
         return Ok(());

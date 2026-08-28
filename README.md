@@ -167,6 +167,17 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
 
 See **[docs/IMMUTABLE_SYSTEM.md](docs/IMMUTABLE_SYSTEM.md)** for the full model (subvolume roles, the `.deploytix-pair` marker, the boot pointer, and caveats).
 
+#### On LVM thin: A/B dual-slot with dm-verity
+
+The description above is the **btrfs** backend. If you enable `immutable_root` on an **LVM thin** layout (`use_lvm_thin = true`) you get the LVM-native backend instead — same `deploytix update`/`rollback` commands, different mechanism:
+
+- Two root logical volumes (`root_a`/`root_b`, each including `/usr`) alternate. The active slot is **read-only and dm-verity integrity-checked** — on-disk tampering causes an I/O error, not corrupt data.
+- `deploytix update` builds the **inactive** slot (rsync the running root → seal it with a fresh dm-verity hash) and flips the boot pointer on reboot; `deploytix rollback` flips back. The running slot is never touched.
+- `/etc` is a writable overlay; `/var` and `/home` are shared and persistent.
+- Recovery: no auto boot-count fallback — edit `deploytix.slot`/`deploytix.roothash` at the GRUB prompt, or boot the good slot and `deploytix rollback`.
+
+See **[docs/IMMUTABLE_LVM_AB.md](docs/IMMUTABLE_LVM_AB.md)** for the full A/B model.
+
 ## Configuration
 
 Example `deploytix.toml`:

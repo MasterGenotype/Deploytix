@@ -44,6 +44,149 @@ pub fn default_thin_volumes() -> Vec<ThinVolumeDef> {
     ]
 }
 
+// ── Immutable A/B dm-verity layout ───────────────────────────────────────────
+//
+// The LVM immutable backend uses two read-only root slots (`root_a`, `root_b`),
+// a dm-verity Merkle-tree store per slot (`hash_a`, `hash_b`), persistent
+// writable `var`/`home`, and a writable `/etc` overlay upper (`etc_overlay`).
+// See `src/immutable/lvm_ab.rs` and `docs/IMMUTABLE_LVM_AB.md`.
+
+/// Logical-volume names for the immutable A/B layout (shared by the installer
+/// and the `deploytix update`/`rollback` LVM engine).
+pub mod ab {
+    /// Slot A root image (OS + `/usr`).
+    pub const ROOT_A: &str = "root_a";
+    /// Slot B root image (OS + `/usr`).
+    pub const ROOT_B: &str = "root_b";
+    /// dm-verity hash tree for slot A.
+    pub const HASH_A: &str = "hash_a";
+    /// dm-verity hash tree for slot B.
+    pub const HASH_B: &str = "hash_b";
+    /// Persistent writable `/var`.
+    pub const VAR: &str = "var";
+    /// Persistent writable `/home`.
+    pub const HOME: &str = "home";
+    /// Writable overlay upper for `/etc`.
+    pub const ETC_OVERLAY: &str = "etc_overlay";
+
+    /// The root/hash LV names for a slot letter (`"A"`/`"B"`).
+    pub fn slot_lvs(slot: &str) -> Option<(&'static str, &'static str)> {
+        match slot {
+            "A" | "a" => Some((ROOT_A, HASH_A)),
+            "B" | "b" => Some((ROOT_B, HASH_B)),
+            _ => None,
+        }
+    }
+
+    /// The other slot letter.
+    pub fn other_slot(slot: &str) -> &'static str {
+        match slot {
+            "A" | "a" => "B",
+            _ => "A",
+        }
+    }
+}
+
+/// Role of an LV in the immutable A/B layout, which governs how the installer
+/// treats it (formatting/mounting/verity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbVolumeRole {
+    /// Slot root image: formatted with the chosen fs. Slot A is installed into;
+    /// slot B is cloned from A. Read-only + dm-verity at boot.
+    SlotRoot,
+    /// dm-verity hash-tree store: raw block device, never formatted or mounted.
+    VerityHash,
+    /// Persistent writable data volume (formatted + mounted at `mount_point`).
+    Data,
+    /// Writable `/etc` overlay upper (formatted; mounted via overlayfs).
+    EtcOverlay,
+}
+
+/// One LV in the immutable A/B layout.
+#[derive(Debug, Clone)]
+pub struct AbLvDef {
+    /// Logical volume name.
+    pub name: String,
+    /// Virtual (thin) size.
+    pub virtual_size: String,
+    /// Role, governing installer handling.
+    pub role: AbVolumeRole,
+    /// Mount point for `Data`/`EtcOverlay`/`SlotRoot`; empty for `VerityHash`.
+    pub mount_point: String,
+}
+
+/// The immutable A/B dm-verity thin-volume layout.
+///
+/// `root_a`/`root_b` hold the OS image (including `/usr`); `hash_a`/`hash_b`
+/// hold the dm-verity trees; `var`/`home` are persistent; `etc_overlay` backs
+/// the writable `/etc` overlay.
+pub fn immutable_ab_thin_volumes() -> Vec<AbLvDef> {
+    vec![
+        AbLvDef {
+            name: ab::ROOT_A.to_string(),
+            virtual_size: "40G".to_string(),
+            role: AbVolumeRole::SlotRoot,
+            mount_point: "/".to_string(),
+        },
+        AbLvDef {
+            name: ab::ROOT_B.to_string(),
+            virtual_size: "40G".to_string(),
+            role: AbVolumeRole::SlotRoot,
+            mount_point: "/".to_string(),
+        },
+        AbLvDef {
+            name: ab::HASH_A.to_string(),
+            virtual_size: "1G".to_string(),
+            role: AbVolumeRole::VerityHash,
+            mount_point: String::new(),
+        },
+        AbLvDef {
+            name: ab::HASH_B.to_string(),
+            virtual_size: "1G".to_string(),
+            role: AbVolumeRole::VerityHash,
+            mount_point: String::new(),
+        },
+        AbLvDef {
+            name: ab::VAR.to_string(),
+            virtual_size: "30G".to_string(),
+            role: AbVolumeRole::Data,
+            mount_point: "/var".to_string(),
+        },
+        AbLvDef {
+            name: ab::HOME.to_string(),
+            virtual_size: "200G".to_string(),
+            role: AbVolumeRole::Data,
+            mount_point: "/home".to_string(),
+        },
+        AbLvDef {
+            name: ab::ETC_OVERLAY.to_string(),
+            virtual_size: "2G".to_string(),
+            role: AbVolumeRole::EtcOverlay,
+            mount_point: "/etc".to_string(),
+        },
+    ]
+}
+
+/// Create all LVs in the immutable A/B layout (thin LVs only; formatting and
+/// verity are handled by the installer).
+pub fn create_ab_thin_volumes(
+    cmd: &CommandRunner,
+    vg_name: &str,
+    pool_name: &str,
+    volumes: &[AbLvDef],
+) -> Result<()> {
+    info!(
+        "Creating {} immutable A/B thin volumes in {}/{}",
+        volumes.len(),
+        vg_name,
+        pool_name
+    );
+    for vol in volumes {
+        create_thin_lv(cmd, vg_name, pool_name, &vol.name, &vol.virtual_size)?;
+    }
+    Ok(())
+}
+
 /// Create a physical volume on a device
 pub fn create_pv(cmd: &CommandRunner, device: &str) -> Result<()> {
     info!("Creating LVM physical volume on {}", device);
@@ -330,5 +473,58 @@ pub fn get_thin_pool_usage(vg_name: &str, pool_name: &str) -> Result<(f64, f64)>
         Ok((data_percent, meta_percent))
     } else {
         Ok((0.0, 0.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mapper_path_doubles_hyphens() {
+        assert_eq!(
+            lv_mapper_path("my-vg", "root_a"),
+            "/dev/mapper/my--vg-root_a"
+        );
+        assert_eq!(lv_path("vg0", "root_a"), "/dev/vg0/root_a");
+    }
+
+    #[test]
+    fn ab_slot_lvs_and_other() {
+        assert_eq!(ab::slot_lvs("A"), Some((ab::ROOT_A, ab::HASH_A)));
+        assert_eq!(ab::slot_lvs("b"), Some((ab::ROOT_B, ab::HASH_B)));
+        assert_eq!(ab::slot_lvs("C"), None);
+        assert_eq!(ab::other_slot("A"), "B");
+        assert_eq!(ab::other_slot("B"), "A");
+    }
+
+    #[test]
+    fn ab_layout_has_both_slots_hashes_and_shared_state() {
+        let vols = immutable_ab_thin_volumes();
+        let roots: Vec<_> = vols
+            .iter()
+            .filter(|v| v.role == AbVolumeRole::SlotRoot)
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(roots, vec![ab::ROOT_A, ab::ROOT_B]);
+
+        let hashes: Vec<_> = vols
+            .iter()
+            .filter(|v| v.role == AbVolumeRole::VerityHash)
+            .collect();
+        assert_eq!(hashes.len(), 2);
+        // Hash stores are raw block devices — never mounted.
+        assert!(hashes.iter().all(|v| v.mount_point.is_empty()));
+
+        // Persistent + overlay state present exactly once each.
+        assert!(vols
+            .iter()
+            .any(|v| v.name == ab::VAR && v.mount_point == "/var"));
+        assert!(vols
+            .iter()
+            .any(|v| v.name == ab::HOME && v.mount_point == "/home"));
+        assert!(vols
+            .iter()
+            .any(|v| v.role == AbVolumeRole::EtcOverlay && v.mount_point == "/etc"));
     }
 }

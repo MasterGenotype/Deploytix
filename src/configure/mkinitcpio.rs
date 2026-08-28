@@ -59,6 +59,12 @@ pub fn construct_modules(config: &DeploymentConfig) -> Vec<String> {
         modules.extend(["dm_thin_pool".to_string()]);
     }
 
+    // LVM immutable A/B backend: dm-verity for the read-only root slots plus
+    // overlay for the writable /etc overlay the verity-ab hook layers.
+    if config.immutable_lvm_ab() {
+        modules.extend(["dm_verity".to_string(), "overlay".to_string()]);
+    }
+
     // Read-only snapshot booting on multi-LUKS layouts: mountcrypt layers a
     // tmpfs overlay over RO snapshot roots and needs the overlay module in
     // the initramfs. (Unencrypted layouts get it via the grub-btrfs package's
@@ -108,6 +114,18 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("mountcrypt".to_string());
         // Note: filesystems hook is NOT needed when using mountcrypt
         // as mountcrypt handles all mounting
+    } else if config.immutable_lvm_ab() {
+        // LVM immutable A/B: LUKS unlock (if encrypted), LVM activates, then the
+        // custom verity-ab hook opens the active slot's dm-verity device, mounts
+        // it read-only as /, layers the /etc overlay, and mounts var/home.
+        // It replaces filesystems/usr entirely (like mountcrypt does).
+        if uses_encryption {
+            hooks.push("encrypt".to_string());
+        }
+        if config.disk.boot_encryption {
+            hooks.push("crypttab-unlock".to_string());
+        }
+        hooks.push("verity-ab".to_string());
     } else if uses_lvm_thin {
         // LVM Thin: LUKS unlock (single container), then LVM activates, then filesystems
         if uses_encryption {
@@ -188,8 +206,13 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
 }
 
 /// Construct BINARIES array
-pub fn construct_binaries(_config: &DeploymentConfig) -> Vec<String> {
-    vec!["lsblk".to_string()]
+pub fn construct_binaries(config: &DeploymentConfig) -> Vec<String> {
+    let mut binaries = vec!["lsblk".to_string()];
+    // The verity-ab hook opens the active slot's dm-verity device at boot.
+    if config.immutable_lvm_ab() {
+        binaries.push("veritysetup".to_string());
+    }
+    binaries
 }
 
 /// Construct FILES array.
@@ -343,6 +366,63 @@ mod tests {
         // Must NOT include the standard encrypt or filesystems hooks
         assert!(!hooks.contains(&"encrypt".to_string()));
         assert!(!hooks.contains(&"filesystems".to_string()));
+    }
+
+    fn config_lvm_ab(encryption: bool) -> DeploymentConfig {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.use_lvm_thin = true;
+        cfg.disk.encryption = encryption;
+        cfg.disk.boot_encryption = false;
+        if encryption {
+            cfg.disk.encryption_password = Some("test".to_string());
+        }
+        cfg.packages.install_grub_btrfs = false;
+        cfg.packages.immutable_root = true;
+        assert!(cfg.immutable_lvm_ab());
+        cfg
+    }
+
+    #[test]
+    fn lvm_ab_uses_verity_hook_and_dm_verity_module() {
+        let cfg = config_lvm_ab(true);
+        let hooks = construct_hooks(&cfg);
+        // Custom verity-ab handler replaces filesystems/usr, after lvm2 + encrypt.
+        assert!(hooks.contains(&"lvm2".to_string()));
+        assert!(hooks.contains(&"encrypt".to_string()));
+        assert!(hooks.contains(&"verity-ab".to_string()));
+        assert!(!hooks.contains(&"filesystems".to_string()));
+        assert!(!hooks.contains(&"usr".to_string()));
+        // lvm2 and encrypt must precede verity-ab.
+        let vpos = hooks.iter().position(|h| h == "verity-ab").unwrap();
+        assert!(hooks.iter().position(|h| h == "lvm2").unwrap() < vpos);
+        assert!(hooks.iter().position(|h| h == "encrypt").unwrap() < vpos);
+
+        let modules = construct_modules(&cfg);
+        assert!(modules.contains(&"dm_verity".to_string()));
+        assert!(modules.contains(&"overlay".to_string()));
+
+        let binaries = construct_binaries(&cfg);
+        assert!(binaries.contains(&"veritysetup".to_string()));
+    }
+
+    #[test]
+    fn lvm_ab_unencrypted_still_uses_verity_hook_without_encrypt() {
+        let cfg = config_lvm_ab(false);
+        let hooks = construct_hooks(&cfg);
+        assert!(hooks.contains(&"verity-ab".to_string()));
+        assert!(!hooks.contains(&"encrypt".to_string()));
+        assert!(!hooks.contains(&"filesystems".to_string()));
+    }
+
+    #[test]
+    fn plain_lvm_thin_has_no_verity_artifacts() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.use_lvm_thin = true;
+        cfg.packages.immutable_root = false;
+        assert!(!cfg.immutable_lvm_ab());
+        assert!(!construct_hooks(&cfg).contains(&"verity-ab".to_string()));
+        assert!(!construct_modules(&cfg).contains(&"dm_verity".to_string()));
+        assert!(!construct_binaries(&cfg).contains(&"veritysetup".to_string()));
     }
 
     #[test]

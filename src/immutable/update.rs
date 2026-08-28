@@ -129,7 +129,7 @@ pub fn pacman_cmds(staged_files: &[String], names: &[String]) -> Vec<String> {
 
 /// Copy local package files into the shared `/var` staging dir so `pacman -U`
 /// can reach them inside the chroot. Returns their absolute in-chroot paths.
-fn stage_local_pkgs(cmd: &CommandRunner, files: &[String]) -> Result<Vec<String>> {
+pub(crate) fn stage_local_pkgs(cmd: &CommandRunner, files: &[String]) -> Result<Vec<String>> {
     let staged: Result<Vec<String>> = files
         .iter()
         .map(|f| {

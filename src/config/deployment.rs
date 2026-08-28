@@ -247,12 +247,18 @@ pub struct PackagesConfig {
     /// Requires: btrfs filesystem + subvolumes; incompatible with use_lvm_thin.
     #[serde(default)]
     pub install_grub_btrfs: bool,
-    /// Transactional immutable root: mount `/` and `/usr` read-only, keep `/etc`
-    /// on a dedicated writable `@etc` subvolume, and snapshot `{@, @usr, @etc}`
-    /// as an atomic set that rolls back together. Package updates go through
-    /// `deploytix update` (a new writable snapshot set applied on reboot);
-    /// direct `pacman -Syu` on the live system is blocked.
-    /// Requires: install_grub_btrfs = true (snapshot/boot machinery).
+    /// Transactional immutable root with a read-only, integrity-checked OS and
+    /// atomic updates via `deploytix update` (applied on reboot); direct
+    /// `pacman -Syu` on the live system is blocked. Two backends, selected by the
+    /// disk layout:
+    ///  - **btrfs** (`install_grub_btrfs = true`): mount `/` and `/usr` read-only,
+    ///    keep `/etc` on a writable `@etc` subvolume, and snapshot `{@, @usr, @etc}`
+    ///    as an atomic set that rolls back together.
+    ///  - **LVM thin** (`use_lvm_thin = true`): A/B dual-slot; each slot's root LV
+    ///    (including `/usr`) is read-only and dm-verity protected. Updates build the
+    ///    inactive slot and flip the boot pointer; `deploytix rollback` flips back.
+    ///
+    /// Requires: install_grub_btrfs = true OR use_lvm_thin = true.
     #[serde(default)]
     pub immutable_root: bool,
     /// Apply gaming/handheld sysctl performance tweaks.
@@ -719,6 +725,18 @@ impl DeploymentConfig {
         Ok(config)
     }
 
+    /// Whether the immutable root uses the **btrfs** snapshot backend
+    /// (read-only `/`+`/usr`, paired `{@,@usr,@etc}` snapshot sets).
+    pub fn immutable_btrfs(&self) -> bool {
+        self.packages.immutable_root && self.packages.install_grub_btrfs
+    }
+
+    /// Whether the immutable root uses the **LVM A/B dm-verity** backend
+    /// (two read-only, integrity-checked root slots; atomic slot flips).
+    pub fn immutable_lvm_ab(&self) -> bool {
+        self.packages.immutable_root && self.disk.use_lvm_thin
+    }
+
     /// Serialise the config to TOML and write it to `path`, creating
     /// any missing parent directories.  Used by the post-install
     /// extras step to persist user-entered extras for later re-runs.
@@ -1089,10 +1107,16 @@ impl DeploymentConfig {
                 false
             };
 
-        // Transactional immutable root — builds on grub-btrfs snapshots.
+        // Transactional immutable root — btrfs backend builds on grub-btrfs
+        // snapshots; LVM thin backend uses A/B dual-slot dm-verity roots.
         let immutable_root = if install_grub_btrfs {
             prompt_confirm(
                 "Enable transactional immutable root? (read-only /usr + /, atomic paired snapshots, `deploytix update`)",
+                false,
+            )?
+        } else if use_lvm_thin {
+            prompt_confirm(
+                "Enable transactional immutable root? (A/B dual-slot, dm-verity read-only /, `deploytix update`)",
                 false,
             )?
         } else {
@@ -1579,11 +1603,18 @@ impl DeploymentConfig {
             }
         }
 
-        // Transactional immutable root is layered on the grub-btrfs snapshot
-        // machinery (paired snapshots, snapshot boot entries, snapper configs).
-        if self.packages.immutable_root && !self.packages.install_grub_btrfs {
+        // Transactional immutable root has two backends:
+        //  - btrfs: layered on grub-btrfs snapshot machinery (paired snapshots,
+        //    snapshot boot entries, snapper configs) → requires install_grub_btrfs.
+        //  - LVM thin: A/B dual-slot with dm-verity read-only roots → requires
+        //    use_lvm_thin (dm-verity is implied).
+        // Exactly one backend must apply.
+        if self.packages.immutable_root
+            && !self.packages.install_grub_btrfs
+            && !self.disk.use_lvm_thin
+        {
             return Err(DeploytixError::ValidationError(
-                "immutable_root requires install_grub_btrfs = true (paired snapshots and snapshot boot)".to_string(),
+                "immutable_root requires either install_grub_btrfs = true (btrfs snapshot backend) or use_lvm_thin = true (LVM A/B dm-verity backend)".to_string(),
             ));
         }
 

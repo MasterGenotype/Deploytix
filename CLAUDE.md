@@ -104,17 +104,31 @@ Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
 
 ## Transactional Immutable Root
 
-When `immutable_root = true` (requires `install_grub_btrfs`), `/` and `/usr` are
-mounted read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr,
-@etc}` are snapshotted as atomic sets that roll back together. Updates go through
-`deploytix update` (new writable snapshot set + `pacman` in a chroot, activated on
-reboot); direct `pacman -Syu` on the live system is prevented by the read-only
-`/usr` mount (a `/etc/profile.d` snippet adds a friendly interactive nudge — not a
-pacman hook, which would break `basestrap`/`pacman -r` image builds and deploys). The
-`src/immutable/` module owns this (snapshot sets, boot pointer, update/rollback,
-lockdown). Boot-pointer changes regenerate grub.cfg inside a scratch chroot of the
-target set — never against the live overlay `/`, where `grub-probe` would fail. See
-`docs/IMMUTABLE_SYSTEM.md` for the full model.
+`immutable_root = true` gives a read-only, integrity-checked OS with atomic
+`deploytix update`/`rollback`. Two backends, chosen by the disk layout (they are
+mutually exclusive), share the `deploytix update`/`rollback` CLI via runtime
+dispatch in `src/main.rs` (`immutable::lvm_ab::detect()`):
+
+**btrfs backend** (requires `install_grub_btrfs`). `/` and `/usr` are mounted
+read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr, @etc}` are
+snapshotted as atomic sets that roll back together. Updates build a new writable
+snapshot set + `pacman` in a chroot, activated on reboot. Boot-pointer changes
+regenerate grub.cfg inside a scratch chroot of the target set — never against the
+live overlay `/`, where `grub-probe` would fail. `src/immutable/` (snapshot sets,
+boot pointer, update/rollback, lockdown). See `docs/IMMUTABLE_SYSTEM.md`.
+
+**LVM A/B backend** (requires `use_lvm_thin`). A/B dual-slot with **dm-verity**
+read-only roots: two root LVs (`root_a`/`root_b`, each including `/usr`) alternate,
+integrity-checked against a per-slot hash LV. `/etc` is a writable overlay;
+`/var`/`home` are shared. `deploytix update` rsyncs the active root into the
+inactive slot, `pacman`s it in a chroot, `veritysetup format`s a fresh hash, and
+repoints the boot pointer (a sed of `deploytix.slot=`/`deploytix.roothash=` in
+`grub.cfg` — no grub-mkconfig). `src/immutable/lvm_ab.rs`, `src/configure/verity.rs`,
+the `verity-ab` hook in `src/configure/hooks.rs`. See `docs/IMMUTABLE_LVM_AB.md`.
+
+Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
+interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`
+image builds and deploys).
 
 ## Reference Materials
 
