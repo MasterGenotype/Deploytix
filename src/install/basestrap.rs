@@ -202,8 +202,10 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         }
     }
 
-    // Encryption tools (if enabled)
-    if config.disk.encryption {
+    // Encryption tools (if enabled). The LVM immutable A/B backend also needs
+    // cryptsetup even when unencrypted: it provides veritysetup, which the
+    // verity-ab initramfs hook runs at boot to open the dm-verity root.
+    if config.disk.encryption || config.immutable_lvm_ab() {
         packages.push("cryptsetup".to_string());
     }
 

@@ -1603,18 +1603,38 @@ impl DeploymentConfig {
             }
         }
 
-        // Transactional immutable root has two backends:
-        //  - btrfs: layered on grub-btrfs snapshot machinery (paired snapshots,
-        //    snapshot boot entries, snapper configs) → requires install_grub_btrfs.
-        //  - LVM thin: A/B dual-slot with dm-verity read-only roots → requires
-        //    use_lvm_thin (dm-verity is implied).
-        // Exactly one backend must apply.
+        self.validate_immutable_backend()?;
+
+        Ok(())
+    }
+
+    /// Backend rules for the transactional immutable root (device-independent, so
+    /// unit-testable on its own). Called from [`Self::validate`].
+    ///
+    /// Two backends:
+    ///  - **btrfs**: grub-btrfs snapshot machinery → requires `install_grub_btrfs`.
+    ///  - **LVM thin**: A/B dual-slot dm-verity → requires `use_lvm_thin`.
+    ///
+    /// Exactly one must apply, and the LVM A/B backend is incompatible with the
+    /// sbctl-SecureBoot standalone-GRUB mode (which embeds grub.cfg in a signed
+    /// EFI binary the on-disk boot-pointer edit cannot reach).
+    pub(crate) fn validate_immutable_backend(&self) -> Result<()> {
         if self.packages.immutable_root
             && !self.packages.install_grub_btrfs
             && !self.disk.use_lvm_thin
         {
             return Err(DeploytixError::ValidationError(
                 "immutable_root requires either install_grub_btrfs = true (btrfs snapshot backend) or use_lvm_thin = true (LVM A/B dm-verity backend)".to_string(),
+            ));
+        }
+
+        if self.immutable_lvm_ab()
+            && self.system.secureboot
+            && self.system.secureboot_method == SecureBootMethod::Sbctl
+            && self.disk.encryption
+        {
+            return Err(DeploytixError::ValidationError(
+                "immutable_root on LVM (A/B dm-verity) is not supported with sbctl SecureBoot on an encrypted disk: that mode embeds grub.cfg in a signed standalone EFI binary, so the A/B boot-pointer edit cannot take effect. Use a different SecureBoot method, disk encryption without sbctl, or the btrfs immutable backend.".to_string(),
             ));
         }
 
@@ -1625,6 +1645,71 @@ impl DeploymentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── immutable backend selection + validation ─────────────────────────────
+
+    /// A minimal LVM-immutable-A/B config that passes the earlier validation
+    /// gates (network/user/encryption), so validate() reaches the A/B rules.
+    fn lvm_ab_config() -> DeploymentConfig {
+        let mut c = DeploymentConfig::sample();
+        c.disk.use_lvm_thin = true;
+        c.disk.use_subvolumes = false;
+        c.packages.install_grub_btrfs = false;
+        c.packages.immutable_root = true;
+        c.packages.install_yay = true; // iwd backend needs yay
+        c
+    }
+
+    #[test]
+    fn backend_selectors_are_mutually_exclusive() {
+        let ab = lvm_ab_config();
+        assert!(ab.immutable_lvm_ab());
+        assert!(!ab.immutable_btrfs());
+
+        let mut btrfs = DeploymentConfig::sample();
+        btrfs.disk.use_subvolumes = true;
+        btrfs.packages.install_grub_btrfs = true;
+        btrfs.packages.immutable_root = true;
+        assert!(btrfs.immutable_btrfs());
+        assert!(!btrfs.immutable_lvm_ab());
+    }
+
+    #[test]
+    fn immutable_requires_a_backend() {
+        let mut c = DeploymentConfig::sample();
+        c.packages.immutable_root = true;
+        c.packages.install_grub_btrfs = false;
+        c.disk.use_lvm_thin = false;
+        let err = c.validate_immutable_backend().unwrap_err().to_string();
+        assert!(err.contains("immutable_root requires"), "got: {err}");
+    }
+
+    #[test]
+    fn lvm_ab_backend_rules_pass() {
+        assert!(lvm_ab_config().validate_immutable_backend().is_ok());
+    }
+
+    #[test]
+    fn lvm_ab_rejected_with_sbctl_secureboot_on_encrypted_disk() {
+        let mut c = lvm_ab_config();
+        c.disk.encryption = true;
+        c.disk.encryption_password = Some("pw".into());
+        c.system.secureboot = true;
+        c.system.secureboot_method = SecureBootMethod::Sbctl;
+        let err = c.validate_immutable_backend().unwrap_err().to_string();
+        assert!(err.contains("sbctl SecureBoot"), "got: {err}");
+    }
+
+    #[test]
+    fn lvm_ab_allowed_with_non_sbctl_secureboot() {
+        let mut c = lvm_ab_config();
+        c.disk.encryption = true;
+        c.disk.encryption_password = Some("pw".into());
+        c.system.secureboot = true;
+        c.system.secureboot_method = SecureBootMethod::ManualKeys;
+        // The A/B+sbctl rule must not trip for ManualKeys.
+        assert!(c.validate_immutable_backend().is_ok());
+    }
 
     // ── CustomPartitionEntry::effective_label ────────────────────────────────
 
