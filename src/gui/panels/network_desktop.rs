@@ -259,8 +259,30 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState, filesyste
                 );
             }
             ui.add_space(theme::SPACING_XS);
+
+            // Transactional immutable root builds on the grub-btrfs snapshot
+            // machinery, so it is only offered when grub-btrfs is enabled.
+            if packages.install_grub_btrfs {
+                ui.checkbox(
+                    &mut packages.immutable_root,
+                    "Transactional immutable root (read-only /usr + /)",
+                );
+                if packages.immutable_root {
+                    widgets::info_text(
+                        ui,
+                        "Mounts / and /usr read-only, keeps /etc on a writable @etc \
+                         subvolume, and snapshots {@, @usr, @etc} as atomic sets. \
+                         Updates go through `deploytix update` (a new snapshot set \
+                         applied on reboot); direct `pacman -Syu` is blocked.",
+                    );
+                }
+                ui.add_space(theme::SPACING_XS);
+            } else {
+                packages.immutable_root = false;
+            }
         } else {
             packages.install_grub_btrfs = false;
+            packages.immutable_root = false;
         }
     });
 }

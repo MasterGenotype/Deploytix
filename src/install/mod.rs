@@ -3,7 +3,7 @@
 mod basestrap;
 mod chroot;
 pub mod crypttab;
-mod fstab;
+pub mod fstab;
 mod installer;
 
 pub use basestrap::*;

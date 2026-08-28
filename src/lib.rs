@@ -5,6 +5,7 @@ pub mod config;
 pub mod configure;
 pub mod desktop;
 pub mod disk;
+pub mod immutable;
 pub mod install;
 pub mod pkgdeps;
 pub mod rehearsal;

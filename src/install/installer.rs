@@ -353,6 +353,13 @@ impl Installer {
             self.install_grub_btrfs()?;
         }
 
+        // Phase 5.45: Immutable root — pacman lockdown so the read-only system
+        // is updated only via `deploytix update`.
+        if self.config.packages.immutable_root {
+            self.report_progress(0.888, "Installing immutable-root pacman lockdown...");
+            crate::immutable::lockdown::install(&self.cmd, INSTALL_ROOT)?;
+        }
+
         // Phase 5.5: User autostart entries (unconditional, after user creation)
         self.report_progress(0.89, "Installing user autostart entries...");
         self.install_autostart_entries()?;
@@ -698,6 +705,23 @@ impl Installer {
             &self.config.disk.boot_filesystem,
         )?;
 
+        // Immutable root: /etc lives on its own writable @etc subvolume, mounted
+        // before basestrap so the base system's /etc is written into it.
+        if self.config.packages.immutable_root {
+            let root_part = layout
+                .partitions
+                .iter()
+                .find(|p| p.name == "ROOT")
+                .ok_or_else(|| {
+                    DeploytixError::ConfigError(
+                        "No ROOT partition found for immutable @etc setup".to_string(),
+                    )
+                })?;
+            let root_fs_device = partition_path(&self.config.disk.device, root_part.number);
+            crate::immutable::etc::create_and_mount_etc(&self.cmd, &root_fs_device, INSTALL_ROOT)?;
+            crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
+        }
+
         Ok(())
     }
 
@@ -742,6 +766,7 @@ impl Installer {
             INSTALL_ROOT,
             &self.config.disk.filesystem,
             &self.config.disk.boot_filesystem,
+            self.config.packages.immutable_root,
         )?;
 
         Ok(())
@@ -1442,6 +1467,17 @@ impl Installer {
             mount_btrfs_subvolumes(&self.cmd, &container.mapped_path, &svols, INSTALL_ROOT)?;
         }
 
+        // Immutable root: /etc lives on its own writable @etc subvolume on the
+        // root btrfs (Crypt-Root), mounted before basestrap.
+        if self.config.packages.immutable_root {
+            crate::immutable::etc::create_and_mount_etc(
+                &self.cmd,
+                &root_container.mapped_path,
+                INSTALL_ROOT,
+            )?;
+            crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
+        }
+
         Ok(())
     }
 
@@ -1523,6 +1559,7 @@ impl Installer {
             boot_filesystem: &self.config.disk.boot_filesystem,
             swap_type: &self.config.disk.swap_type,
             install_root: INSTALL_ROOT,
+            immutable: self.config.packages.immutable_root,
         })
     }
 

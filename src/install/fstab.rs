@@ -90,6 +90,7 @@ pub fn generate_fstab(
     install_root: &str,
     filesystem: &Filesystem,
     boot_filesystem: &Filesystem,
+    immutable: bool,
 ) -> Result<()> {
     // Check if this layout uses subvolumes
     if layout.uses_subvolumes() {
@@ -100,6 +101,7 @@ pub fn generate_fstab(
             install_root,
             filesystem,
             boot_filesystem,
+            immutable,
         );
     }
 
@@ -204,6 +206,7 @@ fn generate_fstab_with_subvolumes(
     install_root: &str,
     filesystem: &Filesystem,
     boot_filesystem: &Filesystem,
+    immutable: bool,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
         crate::utils::error::DeploytixError::ConfigError(
@@ -253,9 +256,23 @@ fn generate_fstab_with_subvolumes(
     // Add subvolume entries
     for sv in subvolumes {
         let pass = 0; // btrfs: no boot-time fsck
+                      // Immutable model: `/` and `/usr` are mounted read-only.
+        let opts = if immutable && crate::immutable::is_readonly_mount(&sv.mount_point) {
+            format!("{},ro", sv.mount_options)
+        } else {
+            sv.mount_options.clone()
+        };
         content.push_str(&format!(
             "UUID={}  {}  btrfs  subvol={},{}  0  {}\n",
-            root_uuid, sv.mount_point, sv.name, sv.mount_options, pass,
+            root_uuid, sv.mount_point, sv.name, opts, pass,
+        ));
+    }
+    // Immutable model: /etc lives on a dedicated writable @etc subvolume on the
+    // root partition, kept out of the read-only root.
+    if immutable {
+        content.push_str(&format!(
+            "UUID={}  /etc  btrfs  subvol=@etc,rw,noatime,compress=zstd  0  0\n",
+            root_uuid,
         ));
     }
 
@@ -345,6 +362,9 @@ pub struct MultiVolumeFstabParams<'a> {
     pub boot_filesystem: &'a Filesystem,
     pub swap_type: &'a SwapType,
     pub install_root: &'a str,
+    /// Transactional immutable root: mount `/` and `/usr` read-only and add a
+    /// writable `@etc` subvolume mounted at `/etc`.
+    pub immutable: bool,
 }
 
 pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()> {
@@ -394,10 +414,26 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
             let fs_uuid = get_partition_uuid(&container.mapped_path)?;
             let svols = multi_volume_subvolumes(&container.volume_name);
             for sv in &svols {
+                // Immutable model: `/` and `/usr` are mounted read-only.
+                let opts =
+                    if params.immutable && crate::immutable::is_readonly_mount(&sv.mount_point) {
+                        format!("{},ro", sv.mount_options)
+                    } else {
+                        sv.mount_options.clone()
+                    };
                 content.push_str(&format!(
                     "# {} (LUKS encrypted)\n\
                      UUID={}  {}  btrfs  subvol={},{}  0  0\n\n",
-                    container.volume_name, fs_uuid, sv.mount_point, sv.name, sv.mount_options,
+                    container.volume_name, fs_uuid, sv.mount_point, sv.name, opts,
+                ));
+            }
+            // Immutable model: /etc lives on a dedicated writable @etc subvolume
+            // on the root btrfs, kept out of the read-only root.
+            if params.immutable && container.volume_name == "Root" {
+                content.push_str(&format!(
+                    "# {} (writable /etc for immutable root)\n\
+                     UUID={}  /etc  btrfs  subvol=@etc,rw,noatime,compress=zstd  0  0\n\n",
+                    container.volume_name, fs_uuid,
                 ));
             }
         }

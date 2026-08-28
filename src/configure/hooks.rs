@@ -407,6 +407,14 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     let mut volume_mounts = String::new();
     let use_subvolumes = layout.uses_subvolumes();
 
+    // Immutable root: `/` and `/usr` are mounted read-only, /etc lives on a
+    // writable @etc subvolume, and the live boot is layered with the same
+    // ephemeral overlay the snapshot boots use (so /tmp, /root, etc. stay
+    // writable over the read-only root).
+    let immutable = config.packages.immutable_root;
+    // `,ro` suffix for read-only mounts under the immutable model.
+    let ro_suffix = if immutable { ",ro" } else { "" };
+
     // Root must always be first
     let has_root = luks_data_parts.iter().any(|p| is_root_partition(p));
     if has_root {
@@ -424,7 +432,7 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 
     # Mount root first (required)
     echo "[mountcrypt] === Mounting root (subvol=$root_subvol) ==="
-    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol=${{root_subvol}},{sv_opts}"; then
+    if ! mount_volume "/dev/mapper/Crypt-Root" "$new_root" "root" "subvol=${{root_subvol}},{sv_opts}{ro_suffix}"; then
         echo "[mountcrypt] FATAL: Cannot mount root filesystem (subvol=$root_subvol)" >&2
         if [ "$root_subvol" != "{sv_name}" ]; then
             echo "[mountcrypt] HINT: snapper snapshots are read-only by default; this mount tried rw." >&2
@@ -437,7 +445,69 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
 "#,
                 sv_name = root_svols[0].name,
                 sv_opts = root_svols[0].mount_options,
+                ro_suffix = ro_suffix,
             ));
+
+            // Under the immutable model the live `@` boot is also read-only, so
+            // the overlay must be layered for it too (the rw-probe below detects
+            // the ro mount and layers the ephemeral overlay). Otherwise only
+            // non-default (snapshot) subvols get the overlay.
+            let overlay_guard = if immutable {
+                "true".to_string()
+            } else {
+                format!("[ \"$root_subvol\" != \"{}\" ]", root_svols[0].name)
+            };
+            // Immutable model: once the overlay is active, resolve the paired
+            // /usr and /etc subvolumes from the `.deploytix-pair` marker inside
+            // the booted root and mount them — /usr read-only, /etc read-write.
+            //
+            // The marker is what makes rollback consistent: booting a snapshot
+            // set (rootflags=subvol=@deploytix-sets/<id>/root) picks up that
+            // set's matching /usr and /etc rather than the live ones. The live
+            // `@` boot's marker names `@usr`/`@etc`, so the default boot is
+            // unchanged. `/usr`'s device is fixed by the layout (its own LUKS
+            // container when present, else the root btrfs).
+            let usr_device = luks_data_parts
+                .iter()
+                .find(|p| p.mount_point.as_deref() == Some("/usr"))
+                .map(|p| {
+                    let mut c = p.name.chars();
+                    let title = match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().to_string() + &c.as_str().to_lowercase(),
+                    };
+                    format!("/dev/mapper/Crypt-{}", title)
+                })
+                .unwrap_or_else(|| "/dev/mapper/Crypt-Root".to_string());
+            let etc_mount = if immutable {
+                format!(
+                    r#"
+    # Immutable root: resolve paired /usr and /etc from the boot marker.
+    _pair_usr=@usr
+    _pair_etc=@etc
+    if [ -r "$new_root/.deploytix-pair" ]; then
+        while IFS='=' read -r _k _v; do
+            case "$_k" in
+                usr) [ -n "$_v" ] && _pair_usr="$_v" ;;
+                etc) [ -n "$_v" ] && _pair_etc="$_v" ;;
+            esac
+        done < "$new_root/.deploytix-pair"
+    fi
+    echo "[mountcrypt] Immutable pair: usr=$_pair_usr etc=$_pair_etc"
+    echo "[mountcrypt] === Mounting /usr (subvol=$_pair_usr, ro) ==="
+    if ! mount_volume "{usr_device}" "$new_root/usr" "usr" "subvol=$_pair_usr,noatime,compress=zstd,ro"; then
+        echo "[mountcrypt] ERROR: Failed to mount /usr" >&2
+        ret=1
+    fi
+    echo "[mountcrypt] === Mounting /etc (subvol=$_pair_etc, rw) ==="
+    mount_volume "/dev/mapper/Crypt-Root" "$new_root/etc" "etc" "subvol=$_pair_etc,noatime,compress=zstd" || \
+        echo "[mountcrypt] WARNING: failed to mount /etc" >&2
+"#,
+                    usr_device = usr_device,
+                )
+            } else {
+                String::new()
+            };
 
             // Read-only snapshot boot support. The stock grub-btrfs-overlayfs
             // latehook is NOT usable here: by latehook time this handler has
@@ -453,26 +523,49 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
                     r#"
     # RO snapshot boot (grub-btrfs): snapper snapshots are read-only by
     # default. btrfs mounts a RO subvolume rw-at-the-vfs-level, so probe with
-    # an actual write and layer a tmpfs-backed overlayfs when it fails.
-    if [ "$root_subvol" != "{sv_name}" ]; then
+    # an actual write and layer an overlayfs when it fails.
+    #
+    # The upperdir is a dedicated writable @overlay subvolume on the root
+    # btrfs: disk-backed (tens of GB free, not the ~50%-of-RAM tmpfs ceiling)
+    # yet still ephemeral because upper/work are wiped on every boot. Temp and
+    # build-heavy work (/tmp, /etc, /root all live in the overlay upper) then
+    # has real disk to spend instead of competing for RAM. Falls back to a
+    # tmpfs upper when @overlay is absent (installs predating this subvolume).
+    if {overlay_guard}; then
         if touch "$new_root/.deploytix-rw-probe" 2>/dev/null; then
             rm -f "$new_root/.deploytix-rw-probe"
         else
-            echo "[mountcrypt] Root subvol $root_subvol is read-only; layering tmpfs overlay (changes are ephemeral)"
+            echo "[mountcrypt] Root subvol $root_subvol is read-only; layering overlay (changes are ephemeral)"
             mkdir -p /run/deploytix-overlay
             mount -t tmpfs -o mode=0755 deploytix-overlay /run/deploytix-overlay
-            mkdir -p /run/deploytix-overlay/upper /run/deploytix-overlay/work /run/deploytix-overlay/lower
+            mkdir -p /run/deploytix-overlay/lower /run/deploytix-overlay/scratch
             mount --move "$new_root" /run/deploytix-overlay/lower
-            if mount -t overlay overlay -o lowerdir=/run/deploytix-overlay/lower,upperdir=/run/deploytix-overlay/upper,workdir=/run/deploytix-overlay/work "$new_root"; then
-                echo "[mountcrypt] Overlay root active"
+            # Prefer a disk-backed ephemeral upper on the @overlay subvolume;
+            # wipe last boot's contents so changes stay non-persistent.
+            if mount -t btrfs -o subvol=@overlay,rw,noatime,compress=zstd /dev/mapper/Crypt-Root /run/deploytix-overlay/scratch 2>/dev/null; then
+                rm -rf /run/deploytix-overlay/scratch/upper /run/deploytix-overlay/scratch/work
+                mkdir -p /run/deploytix-overlay/scratch/upper /run/deploytix-overlay/scratch/work
+                _dpx_upper=/run/deploytix-overlay/scratch/upper
+                _dpx_work=/run/deploytix-overlay/scratch/work
+                echo "[mountcrypt] Overlay upper is disk-backed (@overlay subvolume)"
+            else
+                echo "[mountcrypt] @overlay subvolume unavailable; falling back to tmpfs (RAM) upper" >&2
+                mkdir -p /run/deploytix-overlay/upper /run/deploytix-overlay/work
+                _dpx_upper=/run/deploytix-overlay/upper
+                _dpx_work=/run/deploytix-overlay/work
+            fi
+            if mount -t overlay overlay -o "lowerdir=/run/deploytix-overlay/lower,upperdir=$_dpx_upper,workdir=$_dpx_work" "$new_root"; then
+                echo "[mountcrypt] Overlay root active (upper=$_dpx_upper)"
             else
                 echo "[mountcrypt] WARNING: overlay mount failed; restoring direct (read-only) root mount" >&2
+                umount /run/deploytix-overlay/scratch 2>/dev/null || true
                 mount --move /run/deploytix-overlay/lower "$new_root"
             fi
         fi
     fi
-"#,
-                    sv_name = root_svols[0].name,
+{etc_mount}"#,
+                    overlay_guard = overlay_guard,
+                    etc_mount = etc_mount,
                 ));
             }
         } else {
@@ -510,6 +603,11 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
         if use_subvolumes {
             let svols = multi_volume_subvolumes(&title);
             for sv in &svols {
+                // Immutable model: /usr is mounted from the boot marker (ro) in
+                // the pairing block above, so skip it in this generic loop.
+                if immutable && sv.mount_point == "/usr" {
+                    continue;
+                }
                 // /usr failure is a hard error; everything else is a warning
                 let severity = if sv.mount_point == "/usr" {
                     "ERROR"
@@ -676,10 +774,12 @@ mount_volume() {{
         return 0
     fi
 
-    # Build mount options
-    local opts="rw"
-    if [ -n "$extra_opts" ]; then
-        opts="$opts,$extra_opts"
+    # Build mount options. When extra_opts is given it fully controls the
+    # options (mount defaults to rw unless it contains "ro"); this lets callers
+    # request read-only mounts (immutable /, /usr). Bare mounts default to rw.
+    local opts="$extra_opts"
+    if [ -z "$opts" ]; then
+        opts="rw"
     fi
 
     # Create mount point and mount
@@ -1206,6 +1306,93 @@ mod tests {
             "Overlay must be layered before /usr is mounted into the root"
         );
         assert!(hook.hook_content.contains("/run/deploytix-overlay"));
+
+        // The upperdir must prefer the disk-backed @overlay subvolume (wiped
+        // each boot for ephemerality) and fall back to a tmpfs upper when the
+        // subvolume is absent, so temp/build writes are not RAM-capped.
+        assert!(
+            hook.hook_content
+                .contains("mount -t btrfs -o subvol=@overlay,rw,noatime,compress=zstd /dev/mapper/Crypt-Root /run/deploytix-overlay/scratch"),
+            "overlay upper must be backed by the @overlay subvolume"
+        );
+        assert!(
+            hook.hook_content.contains(
+                "rm -rf /run/deploytix-overlay/scratch/upper /run/deploytix-overlay/scratch/work"
+            ),
+            "disk-backed upper must be wiped each boot to stay ephemeral"
+        );
+        assert!(
+            hook.hook_content
+                .contains("falling back to tmpfs (RAM) upper"),
+            "must retain a tmpfs fallback for installs without @overlay"
+        );
+    }
+
+    #[test]
+    fn mountcrypt_hook_immutable_mounts_ro_root_usr_and_etc() {
+        let mut layout = standard_encrypted_layout();
+        layout.subvolumes = Some(multi_volume_subvolumes("Root"));
+
+        let mut cfg = config_encrypted(true);
+        cfg.packages.install_grub_btrfs = true;
+        cfg.packages.immutable_root = true;
+        let hook = generate_mountcrypt_hook(&cfg, &layout);
+
+        // Root is mounted read-only.
+        assert!(
+            hook.hook_content
+                .contains("subvol=${root_subvol},defaults,noatime,compress=zstd,ro"),
+            "immutable root must be mounted read-only"
+        );
+        // The pairing marker is consulted to resolve /usr and /etc subvols.
+        assert!(
+            hook.hook_content.contains("$new_root/.deploytix-pair"),
+            "immutable boot must read the pairing marker"
+        );
+        // /usr is mounted read-only from the paired subvol.
+        assert!(
+            hook.hook_content
+                .contains("subvol=$_pair_usr,noatime,compress=zstd,ro"),
+            "immutable /usr must be mounted read-only from the paired subvol"
+        );
+        // /etc is mounted read-write from the paired subvol.
+        assert!(
+            hook.hook_content.contains(
+                "mount_volume \"/dev/mapper/Crypt-Root\" \"$new_root/etc\" \"etc\" \"subvol=$_pair_etc,noatime,compress=zstd\""
+            ),
+            "immutable /etc must be mounted rw from the paired subvol"
+        );
+        // /usr must NOT also be mounted by the generic volume loop.
+        assert!(
+            !hook
+                .hook_content
+                .contains("=== Mounting /usr (subvol=@usr) ==="),
+            "immutable /usr must not be double-mounted by the generic loop"
+        );
+        // The overlay is layered unconditionally (the rw-probe of the ro root
+        // triggers it) rather than only for non-default subvols.
+        assert!(
+            hook.hook_content.contains("if true; then"),
+            "immutable boot must always attempt the ephemeral overlay"
+        );
+
+        // And it must still be valid shell.
+        let path = std::env::temp_dir().join(format!(
+            "deploytix-mountcrypt-immutable-syntax-{}",
+            std::process::id()
+        ));
+        fs::write(&path, &hook.hook_content).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&path)
+            .status();
+        let _ = fs::remove_file(&path);
+        if let Ok(status) = status {
+            assert!(
+                status.success(),
+                "generated immutable mountcrypt hook fails sh -n syntax check"
+            );
+        }
     }
 
     #[test]

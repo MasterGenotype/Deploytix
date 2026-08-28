@@ -96,9 +96,22 @@ deploytix list-disks [--all]                 # List available disks
 deploytix validate <config>                  # Validate config file
 deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
+deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
+deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
+deploytix migrate-immutable -c config              # Convert running system to immutable
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
+
+## Transactional Immutable Root
+
+When `immutable_root = true` (requires `install_grub_btrfs`), `/` and `/usr` are
+mounted read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr,
+@etc}` are snapshotted as atomic sets that roll back together. Updates go through
+`deploytix update` (new writable snapshot set + `pacman` in a chroot, activated on
+reboot); direct `pacman -Syu` on the live system is blocked by a pacman hook. The
+`src/immutable/` module owns this (snapshot sets, boot pointer, update/rollback/
+migrate, lockdown). See `docs/IMMUTABLE_SYSTEM.md` for the full model.
 
 ## Reference Materials
 

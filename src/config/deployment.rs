@@ -247,6 +247,14 @@ pub struct PackagesConfig {
     /// Requires: btrfs filesystem + subvolumes; incompatible with use_lvm_thin.
     #[serde(default)]
     pub install_grub_btrfs: bool,
+    /// Transactional immutable root: mount `/` and `/usr` read-only, keep `/etc`
+    /// on a dedicated writable `@etc` subvolume, and snapshot `{@, @usr, @etc}`
+    /// as an atomic set that rolls back together. Package updates go through
+    /// `deploytix update` (a new writable snapshot set applied on reboot);
+    /// direct `pacman -Syu` on the live system is blocked.
+    /// Requires: install_grub_btrfs = true (snapshot/boot machinery).
+    #[serde(default)]
+    pub immutable_root: bool,
     /// Apply gaming/handheld sysctl performance tweaks.
     /// Writes /etc/sysctl.d/99-gaming.conf with vm.max_map_count, swappiness, etc.
     #[serde(default)]
@@ -1081,6 +1089,16 @@ impl DeploymentConfig {
                 false
             };
 
+        // Transactional immutable root — builds on grub-btrfs snapshots.
+        let immutable_root = if install_grub_btrfs {
+            prompt_confirm(
+                "Enable transactional immutable root? (read-only /usr + /, atomic paired snapshots, `deploytix update`)",
+                false,
+            )?
+        } else {
+            false
+        };
+
         // sysctl gaming tweaks (standalone — no prerequisites)
         let sysctl_gaming_tweaks = prompt_confirm(
             "Apply gaming sysctl performance tweaks? (vm.max_map_count, swappiness, etc.)",
@@ -1181,6 +1199,7 @@ impl DeploymentConfig {
                 install_session_switching,
                 install_btrfs_tools,
                 install_grub_btrfs,
+                immutable_root,
                 sysctl_gaming_tweaks,
                 sysctl_network_performance,
                 install_hhd,
@@ -1558,6 +1577,14 @@ impl DeploymentConfig {
                     "grub-btrfs is not supported with use_lvm_thin = true".to_string(),
                 ));
             }
+        }
+
+        // Transactional immutable root is layered on the grub-btrfs snapshot
+        // machinery (paired snapshots, snapshot boot entries, snapper configs).
+        if self.packages.immutable_root && !self.packages.install_grub_btrfs {
+            return Err(DeploytixError::ValidationError(
+                "immutable_root requires install_grub_btrfs = true (paired snapshots and snapshot boot)".to_string(),
+            ));
         }
 
         Ok(())

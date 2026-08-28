@@ -127,6 +127,11 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Preview actions without changing the system (dry-run). Applies to
+    /// `update`, `rollback`, and `migrate-immutable`.
+    #[arg(short = 'n', long, global = true)]
+    dry_run: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -206,6 +211,37 @@ enum Commands {
         action: DepsCommand,
     },
 
+    /// Transactional system update (immutable root): build a new snapshot set,
+    /// upgrade inside it, and activate it on reboot.
+    Update {
+        /// Extra packages to install on top of a full sync/upgrade.
+        #[arg(trailing_var_arg = true)]
+        packages: Vec<String>,
+
+        /// Number of previous snapshot sets to keep when pruning.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+
+        /// Reboot automatically once the update is staged.
+        #[arg(long)]
+        reboot: bool,
+    },
+
+    /// Roll back to a previous snapshot set (immutable root).
+    Rollback {
+        /// Snapshot set id to roll back to, or `@` for the base install.
+        /// Omit to step back one set from the current one.
+        target: Option<String>,
+
+        /// List available rollback targets and exit.
+        #[arg(long)]
+        list: bool,
+
+        /// Reboot automatically once the rollback is staged.
+        #[arg(long)]
+        reboot: bool,
+    },
+
     /// Generate desktop file for the GUI launcher
     GenerateDesktopFile {
         /// Desktop environment (kde, gnome, xfce, none)
@@ -278,6 +314,20 @@ fn main() -> Result<()> {
         Some(Commands::Deps { action }) => {
             cmd_deps(action)?;
         }
+        Some(Commands::Update {
+            packages,
+            keep,
+            reboot,
+        }) => {
+            cmd_update(packages, keep, reboot, cli.dry_run)?;
+        }
+        Some(Commands::Rollback {
+            target,
+            list,
+            reboot,
+        }) => {
+            cmd_rollback(target, list, reboot, cli.dry_run)?;
+        }
         Some(Commands::GenerateDesktopFile { de, bindir, output }) => {
             cmd_generate_desktop_file(de, bindir, output)?;
         }
@@ -324,6 +374,43 @@ fn cmd_install(
     }
     installer.run()?;
 
+    Ok(())
+}
+
+/// `deploytix update` — transactional system update.
+fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> Result<()> {
+    use deploytix::immutable::update::{run_update, UpdateOptions};
+    use deploytix::utils::command::CommandRunner;
+
+    if !dry_run && !nix::unistd::geteuid().is_root() {
+        return Err(DeploytixError::NotRoot.into());
+    }
+    let cmd = CommandRunner::new(dry_run);
+    run_update(
+        &cmd,
+        &packages,
+        &UpdateOptions {
+            keep_sets: keep,
+            reboot,
+        },
+    )?;
+    Ok(())
+}
+
+/// `deploytix rollback` — return to a previous snapshot set.
+fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool) -> Result<()> {
+    use deploytix::immutable::rollback::{print_targets, run_rollback};
+    use deploytix::utils::command::CommandRunner;
+
+    let cmd = CommandRunner::new(dry_run);
+    if list {
+        print_targets(&cmd)?;
+        return Ok(());
+    }
+    if !dry_run && !nix::unistd::geteuid().is_root() {
+        return Err(DeploytixError::NotRoot.into());
+    }
+    run_rollback(&cmd, target.as_deref(), reboot)?;
     Ok(())
 }
 

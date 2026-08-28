@@ -136,6 +136,7 @@ impl DeploytixGui {
                 install_session_switching: self.packages.install_session_switching,
                 install_btrfs_tools: self.packages.install_btrfs_tools,
                 install_grub_btrfs: self.packages.install_grub_btrfs,
+                immutable_root: self.packages.immutable_root,
                 sysctl_gaming_tweaks: self.packages.sysctl_gaming_tweaks,
                 sysctl_network_performance: self.packages.sysctl_network_performance,
                 install_hhd: self.packages.install_hhd,

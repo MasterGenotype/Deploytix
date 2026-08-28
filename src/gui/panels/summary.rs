@@ -163,6 +163,15 @@ pub fn show(
                             "Disabled"
                         },
                     );
+                    row(
+                        ui,
+                        "Immutable root",
+                        if packages.immutable_root {
+                            "Enabled (read-only /usr + /, transactional updates)"
+                        } else {
+                            "Disabled"
+                        },
+                    );
                 });
         });
 

@@ -58,6 +58,7 @@ pub fn install_grub_btrfs(
     }
 
     configure_snapper_root(cmd, root_fs_device, install_root)?;
+    create_overlay_subvolume(cmd, root_fs_device, install_root)?;
     write_grub_btrfs_config(cmd, config, install_root)?;
     write_grub_btrfsd_service(cmd, config, install_root)?;
 
@@ -107,6 +108,44 @@ fn create_snapshots_subvolume_cmd(root_fs_device: &str) -> String {
          ret=$?; umount /mnt; exit $ret",
         dev = root_fs_device
     )
+}
+
+/// Shell command that creates the top-level `@overlay` subvolume on
+/// `root_fs_device` (mounted by `subvolid=5`, the filesystem root).
+///
+/// This subvolume holds the overlayfs upperdir/workdir used when booting a
+/// read-only snapshot (see the mountcrypt hook). Keeping the scratch on disk
+/// instead of a tmpfs frees snapshot-boot writes (`/tmp`, `/etc`, `/root`,
+/// builds) from the ~50%-of-RAM tmpfs ceiling; the hook wipes it each boot so
+/// changes remain ephemeral. Idempotent: a pre-existing `@overlay` is fine.
+fn create_overlay_subvolume_cmd(root_fs_device: &str) -> String {
+    format!(
+        "mkdir -p /mnt && mount -t btrfs -o subvolid=5 {dev} /mnt && \
+         test -e /mnt/@overlay || btrfs subvolume create /mnt/@overlay; \
+         ret=$?; umount /mnt; exit $ret",
+        dev = root_fs_device
+    )
+}
+
+/// Create the top-level `@overlay` subvolume for the snapshot-boot overlayfs
+/// upperdir. Gated behind grub-btrfs like the rest of the snapshot machinery.
+fn create_overlay_subvolume(
+    cmd: &CommandRunner,
+    root_fs_device: &str,
+    install_root: &str,
+) -> Result<()> {
+    info!("Creating top-level @overlay subvolume for snapshot-boot overlay upperdir");
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would create top-level @overlay subvolume on {}",
+            root_fs_device
+        );
+        return Ok(());
+    }
+
+    cmd.run_in_chroot(install_root, &create_overlay_subvolume_cmd(root_fs_device))?;
+    Ok(())
 }
 
 /// Create the snapper config for `/` with a top-level `@snapshots` subvolume
@@ -457,6 +496,27 @@ mod tests {
         assert!(cmd.contains("create /mnt/@snapshots && chmod 750 /mnt/@snapshots"));
         assert!(cmd.contains("umount /mnt"));
         assert!(cmd.contains("mount -t btrfs -o subvolid=5 /dev/mapper/Crypt-Root /mnt"));
+
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .status();
+        if let Ok(status) = status {
+            assert!(status.success(), "generated command is not valid shell");
+        }
+    }
+
+    #[test]
+    fn overlay_subvolume_created_idempotently_at_fs_root() {
+        let cmd = create_overlay_subvolume_cmd("/dev/mapper/Crypt-Root");
+
+        // Created at the filesystem root (subvolid=5), like @snapshots, so it
+        // is a top-level sibling of @ rather than nested under a snapshot.
+        assert!(cmd.contains("mount -t btrfs -o subvolid=5 /dev/mapper/Crypt-Root /mnt"));
+        // Idempotent: a pre-existing @overlay must not error a re-run.
+        assert!(cmd.contains("test -e /mnt/@overlay || btrfs subvolume create /mnt/@overlay"));
+        assert!(cmd.contains("umount /mnt"));
 
         let status = std::process::Command::new("sh")
             .arg("-n")
