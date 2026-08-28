@@ -102,8 +102,13 @@ deploytix cleanup [-d /dev/sdX] [--wipe]            # Unmount and optionally wip
 deploytix deps <subcommand>                         # Package dependency tracking
 deploytix generate-desktop-file [--de kde] [-o f]   # Generate .desktop launcher
 
+# Immutable-root systems (see "Living with a Deployed System")
+deploytix update [pkgs...] [--keep N] [--reboot]    # Transactional update
+deploytix rollback [id|@] [--list] [--reboot]       # Roll back to a snapshot set
+
 # Global flags
 deploytix -v ...       # Verbose output
+deploytix -n ...       # Dry-run (preview; applies to update/rollback)
 ```
 
 ## Installation Pipeline
@@ -127,6 +132,40 @@ The installer executes a **feature-driven pipeline** where each step checks its 
 **Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, Handheld Daemon, Decky Loader, and evdevhook2.
 
 **Phase 6 — Finalize.** Regenerates the initramfs, unmounts all filesystems in reverse order, exports ZFS pools if applicable, and closes all LUKS containers.
+
+## Living with a Deployed System
+
+What day-to-day life looks like on a machine deploytix installed depends on whether you enabled snapshots and the immutable root.
+
+### Standard install (no grub-btrfs)
+
+A conventional system: `/` is read-write, you update with `pacman -Syu`, and there's nothing special to learn. If you chose btrfs, your data still lives on subvolumes (`@`, `@home`, `@var`, …) so you *can* add snapper later, but nothing is enforced.
+
+### With snapshots (`install_grub_btrfs`)
+
+`snapper` takes read-only snapshots of `/` (`@`) and GRUB grows an **"Artix Linux snapshots"** submenu. If an update breaks the system you can pick an older snapshot from GRUB to boot into it. Booting a read-only snapshot layers a **disk-backed ephemeral overlay** over it, so the system is usable but changes made while booted into a snapshot are discarded on reboot. `/usr`, `/var`, and `/home` remain live. This is a recovery aid, not full immutability.
+
+### Transactional immutable root (`immutable_root`)
+
+This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Expect the following:
+
+- **`/` and `/usr` are read-only.** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so they're covered too. `/etc` is a **writable** subvolume (`@etc`); `/var` and `/home` are writable and persistent. Stray writes to the rest of `/` (e.g. `/tmp`, `/root`) go to an **ephemeral overlay** and are cleared on reboot.
+- **You don't run `pacman -Syu` directly** — it's blocked with a message pointing you at `deploytix update`. Trying anyway just prints how to do it right; nothing breaks.
+- **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically.
+- **Rollback is instant and reversible.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot. Nothing is deleted, so you can roll "forward" again. Each set restores `{@, @usr, @etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
+- **Everyday example:**
+
+  ```bash
+  sudo deploytix update              # stage a full upgrade in a new set
+  sudo reboot                        # activate it
+  # ...something's off?
+  sudo deploytix rollback            # step back to the previous set
+  sudo reboot
+  ```
+
+- **Recovery if a staged update won't boot:** pick the previous entry (or a `snapshot`) from the GRUB menu, then `sudo deploytix rollback` to make it the default. `/boot` (kernel + initramfs) is a shared partition, so a rollback restores userspace but keeps the most recently installed kernel — the boot machinery is version-independent, so this is safe; only kernel *contents* aren't rolled back.
+
+See **[docs/IMMUTABLE_SYSTEM.md](docs/IMMUTABLE_SYSTEM.md)** for the full model (subvolume roles, the `.deploytix-pair` marker, the boot pointer, and caveats).
 
 ## Configuration
 
