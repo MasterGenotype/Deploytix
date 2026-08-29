@@ -1,6 +1,6 @@
 //! LUKS keyfile generation and management
 
-use crate::configure::encryption::{run_cryptsetup, Credential, LuksContainer};
+use crate::configure::encryption::{run_cryptsetup, AdoptSpec, Credential, LuksContainer};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::fs;
@@ -144,6 +144,7 @@ pub fn setup_keyfiles_for_volumes(
     containers: &[LuksContainer],
     password: &str,
     install_root: &str,
+    adopt: Option<&AdoptSpec>,
 ) -> Result<Vec<VolumeKeyfile>> {
     info!(
         "Setting up keyfiles for {} encrypted volumes",
@@ -170,8 +171,17 @@ pub fn setup_keyfiles_for_volumes(
         // Generate the keyfile
         generate_keyfile(cmd, &keyfile_full)?;
 
-        // Add keyfile to LUKS container
-        add_keyfile_to_luks(cmd, &container.device, password, &keyfile_full)?;
+        // An adopted container does not know the install's password — it was
+        // created by a previous install. Unlock it with the credential the
+        // user supplied instead. Either way the container ends up holding
+        // this install's freshly generated keyfile, so the resulting
+        // crypttab and initramfs are the same as a fresh install's.
+        match adopt.filter(|a| a.matches(&volume_name)) {
+            Some(spec) => {
+                add_keyfile_to_luks_with(cmd, &container.device, &spec.credential, &keyfile_full)?
+            }
+            None => add_keyfile_to_luks(cmd, &container.device, password, &keyfile_full)?,
+        }
 
         keyfiles.push(VolumeKeyfile {
             volume_name,

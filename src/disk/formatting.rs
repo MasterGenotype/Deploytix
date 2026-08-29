@@ -218,6 +218,18 @@ pub fn format_all_partitions(
     for part in &layout.partitions {
         let part_path = partition_path(device, part.number);
 
+        // A pinned partition is preserved from the table that was already on
+        // the disk. Its whole purpose is that its contents survive, so it is
+        // never formatted — for the encrypted case the same rule is applied
+        // to the mapped container by the installer.
+        if part.pinned.is_some() {
+            info!(
+                "Preserving {} ({}) — pinned from the existing table, not formatting",
+                part_path, part.name
+            );
+            continue;
+        }
+
         if part.is_efi {
             format_efi(cmd, &part_path)?;
         } else if part.is_bios_boot && !part.is_boot_fs {

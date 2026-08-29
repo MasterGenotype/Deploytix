@@ -4,7 +4,7 @@ use crate::config::DeploymentConfig;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tracing::info;
 
 /// Create user account
@@ -34,7 +34,11 @@ pub fn create_user(
     // Build groups string
     let groups_str = groups.join(",");
 
-    let useradd_cmd = format!("useradd -m -G {} -s /bin/bash {}", groups_str, username);
+    let useradd_cmd = build_useradd_command(
+        username,
+        &groups_str,
+        existing_home_ownership(config, install_root, username),
+    );
     cmd.run_in_chroot(install_root, &useradd_cmd)?;
 
     // Set password using chpasswd, passing credentials via a temp file to
@@ -62,6 +66,66 @@ pub fn create_user(
 
     info!("User {} created successfully", username);
     Ok(())
+}
+
+/// Owner of an existing home directory that a recovery install must adopt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeOwnership {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Read the owner of `/home/<user>` when this run is preserving an existing
+/// home, so the new account can take the UID and GID that already own the
+/// files.
+///
+/// Returns `None` for an ordinary install, or when the directory is not
+/// there — in both cases the account is created normally.
+fn existing_home_ownership(
+    config: &DeploymentConfig,
+    install_root: &str,
+    username: &str,
+) -> Option<HomeOwnership> {
+    if !config.disk.recovery.reuse_home {
+        return None;
+    }
+
+    let home = format!("{}/home/{}", install_root, username);
+    let meta = fs::metadata(&home).ok()?;
+    let ownership = HomeOwnership {
+        uid: meta.uid(),
+        gid: meta.gid(),
+    };
+    info!(
+        "Recovery install: adopting uid {} / gid {} from the existing /home/{}",
+        ownership.uid, ownership.gid, username
+    );
+    Some(ownership)
+}
+
+/// Build the `useradd` invocation for this account.
+///
+/// With an existing home, the account takes over the UID and GID that own
+/// the files already there and `-M` keeps useradd from touching the
+/// directory. Without that, the new account gets whatever UID happens to be
+/// free — usually 1000, so it works by luck on a blank system and silently
+/// leaves the user unable to read their own data when it does not.
+fn build_useradd_command(
+    username: &str,
+    groups_str: &str,
+    existing: Option<HomeOwnership>,
+) -> String {
+    match existing {
+        Some(HomeOwnership { uid, gid }) => format!(
+            "groupadd -g {gid} {username} 2>/dev/null || true; \
+             useradd -M -u {uid} -g {gid} -G {groups} -s /bin/bash {username}",
+            gid = gid,
+            uid = uid,
+            groups = groups_str,
+            username = username,
+        ),
+        None => format!("useradd -m -G {} -s /bin/bash {}", groups_str, username),
+    }
 }
 
 /// Write /etc/security/limits.d drop-in to raise the nofile limit.
@@ -180,4 +244,46 @@ pub fn lock_root_account(cmd: &CommandRunner, install_root: &str) -> Result<()> 
     cmd.run_in_chroot(install_root, "passwd -l root")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ordinary_install_creates_the_home_directory() {
+        let cmd = build_useradd_command("gamer", "wheel,video", None);
+        assert_eq!(cmd, "useradd -m -G wheel,video -s /bin/bash gamer");
+    }
+
+    /// A recovery install must take the UID and GID that already own the
+    /// preserved files, or the user cannot read their own data — and `-M`
+    /// keeps useradd from touching the directory that is already there.
+    #[test]
+    fn a_preserved_home_hands_its_uid_and_gid_to_the_new_account() {
+        let cmd = build_useradd_command(
+            "gamer",
+            "wheel,video",
+            Some(HomeOwnership {
+                uid: 1007,
+                gid: 1007,
+            }),
+        );
+        assert!(cmd.contains("groupadd -g 1007 gamer"));
+        assert!(cmd.contains("useradd -M -u 1007 -g 1007 -G wheel,video -s /bin/bash gamer"));
+        assert!(
+            !cmd.contains("useradd -m"),
+            "must not recreate the home: {}",
+            cmd
+        );
+    }
+
+    /// An unusual UID from the old install is carried over verbatim rather
+    /// than normalised to 1000.
+    #[test]
+    fn a_non_default_uid_is_carried_over_verbatim() {
+        let cmd =
+            build_useradd_command("gamer", "wheel", Some(HomeOwnership { uid: 2345, gid: 60 }));
+        assert!(cmd.contains("-u 2345 -g 60"), "unexpected command: {}", cmd);
+    }
 }

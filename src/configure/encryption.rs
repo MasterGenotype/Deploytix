@@ -230,6 +230,28 @@ pub enum Credential {
     Passphrase(String),
 }
 
+/// A volume to adopt rather than create during a recovery install.
+///
+/// The named container is opened with `credential` instead of being
+/// `luksFormat`ed, so its data survives the reinstall. Only one volume is
+/// adoptable today (`/home`); the field is named rather than positional so
+/// the rest of the pipeline can match on it without knowing which.
+#[derive(Debug, Clone)]
+pub struct AdoptSpec {
+    /// Title-case volume name, matching [`LuksContainer::volume_name`]
+    /// (e.g. `"Home"`).
+    pub volume_name: String,
+    /// The credential that unlocks the existing container.
+    pub credential: Credential,
+}
+
+impl AdoptSpec {
+    /// Whether this spec names `volume_name`.
+    pub fn matches(&self, volume_name: &str) -> bool {
+        self.volume_name.eq_ignore_ascii_case(volume_name)
+    }
+}
+
 impl std::fmt::Debug for Credential {
     /// Redacts the passphrase — this type ends up in error paths and logs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -713,6 +735,7 @@ pub fn setup_multi_volume_encryption(
     config: &DeploymentConfig,
     device: &str,
     luks_partitions: &[(u32, &str)], // (partition_number, name)
+    adopt: Option<&AdoptSpec>,
 ) -> Result<Vec<LuksContainer>> {
     if !config.disk.encryption {
         return Err(DeploytixError::ConfigError(
@@ -747,30 +770,44 @@ pub fn setup_multi_volume_encryption(
             );
         }
 
-        if cmd.is_dry_run() {
-            let integrity_flag = if integrity {
-                " --integrity hmac-sha256"
-            } else {
-                ""
-            };
-            println!(
-                "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
-                integrity_flag, luks_device
-            );
-            println!(
-                "  [dry-run] cryptsetup open {} {}",
-                luks_device, mapper_name
-            );
-        } else {
-            // Format LUKS container (with or without integrity)
-            if integrity {
-                luks_format_integrity(&luks_device, password)?;
-            } else {
-                luks_format(&luks_device, password)?;
+        // A volume named by `adopt` already exists and is being preserved:
+        // open it, never format it. luksFormat would write a fresh header
+        // and destroy every keyslot along with access to the data.
+        match adopt.filter(|a| a.matches(&volume_name)) {
+            Some(spec) => {
+                info!(
+                    "Adopting existing LUKS container {} as {} (not reformatting)",
+                    luks_device, mapper_name
+                );
+                open_luks_with(cmd, &luks_device, &mapper_name, &spec.credential)?;
             }
+            None => {
+                if cmd.is_dry_run() {
+                    let integrity_flag = if integrity {
+                        " --integrity hmac-sha256"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
+                        integrity_flag, luks_device
+                    );
+                    println!(
+                        "  [dry-run] cryptsetup open {} {}",
+                        luks_device, mapper_name
+                    );
+                } else {
+                    // Format LUKS container (with or without integrity)
+                    if integrity {
+                        luks_format_integrity(&luks_device, password)?;
+                    } else {
+                        luks_format(&luks_device, password)?;
+                    }
 
-            // Open LUKS container
-            luks_open(&luks_device, &mapper_name, password)?;
+                    // Open LUKS container
+                    luks_open(&luks_device, &mapper_name, password)?;
+                }
+            }
         }
 
         info!(
@@ -914,5 +951,31 @@ mod tests {
             .expect_err("an unrelated keyfile must be rejected")
             .to_string();
         assert!(err.contains("does not unlock"), "unexpected error: {}", err);
+    }
+
+    // ── AdoptSpec ────────────────────────────────────────────────────────
+
+    #[test]
+    fn adopt_matches_the_named_volume_case_insensitively() {
+        let spec = AdoptSpec {
+            volume_name: "Home".to_string(),
+            credential: Credential::Keyfile("/tmp/home.key".to_string()),
+        };
+        assert!(spec.matches("Home"));
+        assert!(spec.matches("home"));
+        assert!(spec.matches("HOME"));
+    }
+
+    /// Matching the wrong volume would reformat a container that should have
+    /// been adopted, or adopt one that should have been created.
+    #[test]
+    fn adopt_does_not_match_other_volumes() {
+        let spec = AdoptSpec {
+            volume_name: "Home".to_string(),
+            credential: Credential::Keyfile("/tmp/home.key".to_string()),
+        };
+        for other in ["Root", "Usr", "Var", "Boot"] {
+            assert!(!spec.matches(other), "must not match {}", other);
+        }
     }
 }

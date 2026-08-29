@@ -90,6 +90,9 @@ impl DeploytixGui {
                 swap_file_size_mib: 0,
                 zram_algorithm: "zstd".to_string(),
                 partitions: self.disk.partitions.clone(),
+                // The GUI has no recovery-install panel yet; recovery is
+                // driven from the config file or `deploytix install --reuse-home`.
+                recovery: crate::config::RecoveryConfig::default(),
             },
             system: SystemConfig {
                 init: self.system.init_system.clone(),

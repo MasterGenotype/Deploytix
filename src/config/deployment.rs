@@ -63,6 +63,36 @@ impl CustomPartitionEntry {
     }
 }
 
+/// Options for a recovery install: reinstall onto a disk while adopting
+/// volumes that are already there rather than recreating them.
+///
+/// Everything here is opt-in and defaults off, so an ordinary install is
+/// unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RecoveryConfig {
+    /// Reuse the existing `/home` volume instead of recreating it.
+    ///
+    /// The HOME partition keeps its exact on-disk extent, its LUKS container
+    /// is opened rather than reformatted, and its filesystem is not touched.
+    #[serde(default)]
+    pub reuse_home: bool,
+
+    /// Path — **on the installer host**, not the target — to the keyfile
+    /// that unlocks the existing HOME LUKS container.
+    ///
+    /// This is not the same thing as the per-volume keyfiles deploytix
+    /// generates under `/etc/cryptsetup-keys.d` and bakes into the target's
+    /// initramfs. This one is read once, to open the container being
+    /// adopted; the target still gets its own freshly generated keyfile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_keyfile: Option<String>,
+
+    /// Prompt for the HOME passphrase when no keyfile is given, or when the
+    /// keyfile is rejected.
+    #[serde(default = "default_true")]
+    pub allow_passphrase_fallback: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskConfig {
     /// Target device path (e.g., /dev/sda)
@@ -138,6 +168,11 @@ pub struct DiskConfig {
     /// `swap_type == Partition`.
     #[serde(default = "default_partitions")]
     pub partitions: Vec<CustomPartitionEntry>,
+
+    /// Recovery-install options (reusing an existing /home). Defaults to
+    /// off, so an ordinary install behaves exactly as before.
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1198,6 +1233,7 @@ impl DeploymentConfig {
                 swap_file_size_mib: 0, // Auto-calculate
                 zram_algorithm: default_zram_algorithm(),
                 partitions,
+                recovery: RecoveryConfig::default(),
             },
             system: SystemConfig {
                 init,
@@ -1270,6 +1306,7 @@ impl DeploymentConfig {
                 swap_file_size_mib: 0,
                 zram_algorithm: default_zram_algorithm(),
                 partitions: default_partitions(),
+                recovery: RecoveryConfig::default(),
             },
             system: SystemConfig {
                 init: InitSystem::Runit,
@@ -1329,6 +1366,63 @@ impl DeploymentConfig {
         }
 
         warnings
+    }
+
+    /// Validate the recovery-install options.
+    ///
+    /// Split out of [`validate`](Self::validate) so it is unit-testable:
+    /// `validate` requires a real block device, these rules do not.
+    fn validate_recovery(&self, partitions: &[CustomPartitionEntry]) -> Result<()> {
+        // ── Recovery install (reusing an existing /home) ──────────────
+        if self.disk.recovery.reuse_home {
+            // There has to be a /home volume in the target layout for an
+            // existing one to be adopted into.
+            if !partitions.iter().any(|p| p.mount_point == "/home") {
+                return Err(DeploytixError::ValidationError(
+                    "recovery.reuse_home requires a /home entry in disk.partitions".to_string(),
+                ));
+            }
+
+            // The LVM backends place home inside a volume group, so adopting
+            // it means adopting an existing VG rather than a partition —
+            // a different problem, deliberately out of scope.
+            if self.disk.use_lvm_thin {
+                return Err(DeploytixError::ValidationError(
+                    "recovery.reuse_home is not supported with use_lvm_thin \
+                 (home lives inside the volume group, not on its own partition)"
+                        .to_string(),
+                ));
+            }
+
+            // An encrypted home cannot be adopted without a way in.
+            if self.disk.encryption
+                && self.disk.recovery.home_keyfile.is_none()
+                && !self.disk.recovery.allow_passphrase_fallback
+            {
+                return Err(DeploytixError::ValidationError(
+                    "recovery.reuse_home on an encrypted disk needs \
+                 recovery.home_keyfile or recovery.allow_passphrase_fallback"
+                        .to_string(),
+                ));
+            }
+
+            // Fail here rather than after the disk has been repartitioned.
+            if let Some(keyfile) = &self.disk.recovery.home_keyfile {
+                if !Path::new(keyfile).is_file() {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "recovery.home_keyfile '{}' does not exist or is not a \
+                     regular file on this host",
+                        keyfile
+                    )));
+                }
+            }
+        } else if self.disk.recovery.home_keyfile.is_some() {
+            return Err(DeploytixError::ValidationError(
+                "recovery.home_keyfile is set but recovery.reuse_home is false".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Validate the configuration
@@ -1491,6 +1585,8 @@ impl DeploymentConfig {
                 "Only one partition may have size_mib = 0 (remainder)".to_string(),
             ));
         }
+
+        self.validate_recovery(partitions)?;
 
         // Per-partition encryption requires global encryption
         for p in partitions {
@@ -1818,5 +1914,95 @@ mod tests {
         cfg.packages.install_session_switching = false;
         cfg.network.wifi_ssid = None;
         assert!(cfg.warnings().is_empty());
+    }
+
+    // ── Recovery install validation ──────────────────────────────────────
+
+    fn recovery_config() -> DeploymentConfig {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.recovery.reuse_home = true;
+        cfg.disk.recovery.allow_passphrase_fallback = true;
+        cfg.disk.recovery.home_keyfile = None;
+        cfg
+    }
+
+    #[test]
+    fn recovery_accepts_a_layout_with_a_home_partition() {
+        let cfg = recovery_config();
+        assert!(cfg.validate_recovery(&cfg.disk.partitions).is_ok());
+    }
+
+    #[test]
+    fn recovery_requires_a_home_partition_to_adopt_into() {
+        let mut cfg = recovery_config();
+        cfg.disk.partitions.retain(|p| p.mount_point != "/home");
+        let err = cfg
+            .validate_recovery(&cfg.disk.partitions)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/home entry"), "unexpected error: {}", err);
+    }
+
+    /// The LVM backends put home inside the volume group, so there is no
+    /// partition to preserve — a different problem, deliberately refused.
+    #[test]
+    fn recovery_is_refused_for_lvm_thin() {
+        let mut cfg = recovery_config();
+        cfg.disk.use_lvm_thin = true;
+        let err = cfg
+            .validate_recovery(&cfg.disk.partitions)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("use_lvm_thin"), "unexpected error: {}", err);
+    }
+
+    /// An encrypted home cannot be adopted with no way to open it.
+    #[test]
+    fn recovery_on_an_encrypted_disk_needs_a_credential() {
+        let mut cfg = recovery_config();
+        cfg.disk.recovery.allow_passphrase_fallback = false;
+        let err = cfg
+            .validate_recovery(&cfg.disk.partitions)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("home_keyfile"), "unexpected error: {}", err);
+    }
+
+    /// Catch an unreadable keyfile now, not after the disk is repartitioned.
+    #[test]
+    fn a_missing_keyfile_is_rejected_at_validation_time() {
+        let mut cfg = recovery_config();
+        cfg.disk.recovery.home_keyfile = Some("/nonexistent/home.key".to_string());
+        let err = cfg
+            .validate_recovery(&cfg.disk.partitions)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not exist"), "unexpected error: {}", err);
+    }
+
+    /// A keyfile without reuse_home means the disk gets erased despite the
+    /// user clearly intending to keep something. Refuse rather than proceed.
+    #[test]
+    fn a_keyfile_without_reuse_home_is_refused() {
+        let mut cfg = recovery_config();
+        cfg.disk.recovery.reuse_home = false;
+        cfg.disk.recovery.home_keyfile = Some("/tmp/good.key".to_string());
+        let err = cfg
+            .validate_recovery(&cfg.disk.partitions)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reuse_home is false"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn an_ordinary_config_passes_recovery_validation_untouched() {
+        let cfg = DeploymentConfig::sample();
+        assert!(!cfg.disk.recovery.reuse_home);
+        assert!(cfg.validate_recovery(&cfg.disk.partitions).is_ok());
     }
 }

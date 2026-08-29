@@ -160,6 +160,16 @@ enum Commands {
         /// Mutually exclusive with `--interactive`.
         #[arg(long, conflicts_with = "interactive")]
         no_interactive: bool,
+
+        /// Recovery install: keep the existing /home volume instead of
+        /// recreating it. Everything else on the disk is still erased.
+        #[arg(long)]
+        reuse_home: bool,
+
+        /// Keyfile on THIS host that unlocks the existing HOME LUKS
+        /// container. Implies --reuse-home.
+        #[arg(long)]
+        home_keyfile: Option<String>,
     },
 
     /// List available disks for installation
@@ -296,6 +306,8 @@ fn main() -> Result<()> {
             device,
             interactive,
             no_interactive,
+            reuse_home,
+            home_keyfile,
         }) => {
             // Activation: explicit flag wins; otherwise interactive ON
             // when no config file is supplied, OFF when -c is given.
@@ -306,7 +318,15 @@ fn main() -> Result<()> {
             } else {
                 config.is_none()
             };
-            cmd_install(config, device, interactive_resolved)?;
+            cmd_install(
+                config,
+                device,
+                interactive_resolved,
+                RecoveryOverrides {
+                    reuse_home,
+                    home_keyfile,
+                },
+            )?;
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
@@ -351,17 +371,52 @@ fn main() -> Result<()> {
         }
         None => {
             // Default: run interactive wizard with full interactive review
-            cmd_install(None, None, true)?;
+            cmd_install(
+                None,
+                None,
+                true,
+                RecoveryOverrides {
+                    reuse_home: false,
+                    home_keyfile: None,
+                },
+            )?;
         }
     }
 
     Ok(())
 }
 
+/// Recovery-install options supplied on the command line.
+///
+/// Applied on top of whatever the config file says, so a stored config can
+/// be reused for both an ordinary and a recovery install.
+struct RecoveryOverrides {
+    reuse_home: bool,
+    home_keyfile: Option<String>,
+}
+
+impl RecoveryOverrides {
+    /// Fold these flags into a loaded configuration.
+    ///
+    /// `--home-keyfile` implies `--reuse-home`: supplying the credential for
+    /// a volume you did not ask to preserve is never what was meant, and the
+    /// alternative is a silently ordinary install that erases it.
+    fn apply(self, config: &mut DeploymentConfig) {
+        if self.reuse_home {
+            config.disk.recovery.reuse_home = true;
+        }
+        if let Some(keyfile) = self.home_keyfile {
+            config.disk.recovery.reuse_home = true;
+            config.disk.recovery.home_keyfile = Some(keyfile);
+        }
+    }
+}
+
 fn cmd_install(
     config_path: Option<String>,
     device: Option<String>,
     interactive: bool,
+    recovery: RecoveryOverrides,
 ) -> Result<()> {
     use install::Installer;
 
@@ -378,6 +433,9 @@ fn cmd_install(
         info!("Starting interactive configuration wizard");
         DeploymentConfig::from_wizard(device)?
     };
+
+    let mut config = config;
+    recovery.apply(&mut config);
 
     // Validate configuration
     config.validate()?;

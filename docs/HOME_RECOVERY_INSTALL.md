@@ -5,7 +5,9 @@ Reinstall the system onto an existing disk while keeping the existing
 supplies the keyfile (or passphrase) that unlocks the existing HOME
 container; deploytix adopts that container instead of recreating it.
 
-Status: **design only**. Nothing in this document is implemented.
+Status: steps 1-6 of section 8 are **implemented**; step 7 (reconciling the
+stale `preserve_home` references) is outstanding. Section 1's findings are
+kept as the record of why the work took this shape.
 
 ---
 
@@ -327,18 +329,39 @@ and is owned by the new user.
 
 ## 8. Implementation order
 
-1. `src/disk/existing.rs` + `deploytix inspect` — read-only, useful alone.
-2. Keyfile-unlock variants of `open_luks` and `add_keyfile_to_luks`.
-3. Idempotent `create_btrfs_subvolumes`.
-4. `RecoveryConfig` + validation rules.
-5. Pinned extents in the layout, sfdisk, and selective `wipefs`.
-6. `VolumeAction::Adopt`, skip-format, UID/GID adoption in `create_user`.
-7. Reconcile the stale `preserve_home` references in `README.md`,
-   `CLAUDE.md`, `deploytix.toml` and `docs/deploytix-validation.md` against
-   what actually ships.
+1. ~~`src/disk/existing.rs` + `deploytix inspect`~~ — done.
+2. ~~Keyfile-unlock variants of `open_luks` and `add_keyfile_to_luks`~~ — done,
+   as `Credential` / `verify_luks_credential` / `open_luks_with` /
+   `add_keyfile_to_luks_with`.
+3. ~~Idempotent `create_btrfs_subvolumes`~~ — done.
+4. ~~`RecoveryConfig` + validation rules~~ — done, with the rules split into
+   `validate_recovery` so they are unit-testable without a block device.
+5. ~~Pinned extents in the layout, sfdisk, and selective `wipefs`~~ — done, as
+   `PartitionDef::pinned` / `PinnedExtent`, with `validate_placements`
+   rejecting any layout that would write over a preserved extent.
+6. ~~Adopt-not-create, skip-format, UID/GID adoption~~ — done, as
+   `AdoptSpec` threaded through the encryption and keyfile phases, plus
+   `build_useradd_command`.
+7. **Outstanding:** reconcile the stale `preserve_home` references in
+   `README.md`, `CLAUDE.md`, `deploytix.toml` and
+   `docs/deploytix-validation.md` against what actually ships. The
+   `preserve_home = false` key in `deploytix.toml` is still ignored by serde
+   and now sits confusingly beside the real `[disk.recovery]` section.
 
-Steps 1–3 are independently valuable and land without changing any existing
-install behaviour.
+### What shipped differently from the sketch
+
+- The adopt instruction is a single `AdoptSpec` rather than a general
+  `VolumeAction` enum. Only `/home` is adoptable today, and naming the
+  volume it applies to keeps the pipeline honest about that.
+- Pinning, not a separate "preserve" flag, is the single source of truth:
+  a pinned partition is never wiped (`apply_partitions`) and never formatted
+  (`format_all_partitions`), so the unencrypted case needed no extra
+  branching.
+- `PinnedExtent` carries the original GPT partition UUID, so anything
+  resolving the preserved partition by PARTUUID survives the reinstall.
+- The unencrypted path additionally requires the existing filesystem to
+  match `disk.filesystem`, checked in `prepare()`: the partition is mounted
+  as-is rather than formatted, so a mismatch cannot work.
 
 ---
 
