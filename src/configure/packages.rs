@@ -524,8 +524,78 @@ pub fn install_gaming_packages(
     let gaming_pkgs: Vec<String> = GAMING_PACKAGES.iter().map(|s| s.to_string()).collect();
     pacman_install_chroot_reviewed(cmd, install_root, "Gaming (Steam, etc.)", gaming_pkgs)?;
 
+    // Step 4: Seed the Steam client bootstrap into the user's home, so the
+    // gamepad UI has its runtime before the machine has ever been online.
+    seed_steam_bootstrap(cmd, config, install_root)?;
+
     info!("Gaming package installation complete");
     Ok(())
+}
+
+/// Extract the Steam client bootstrap into the user's Steam directory.
+///
+/// SteamOS images ship `bootstraplinux_ubuntu12_32.tar.xz` under
+/// `/etc/first-boot` and extract it into `~/.local/share/Steam` before Steam
+/// has ever run, so Game Mode comes up with its runtime already in place.
+/// Artix's `steam` package ships the same tarball at
+/// `/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz`; doing the extraction
+/// here rather than leaving it to Steam's first launch removes one network
+/// round-trip from the very first boot, which is precisely the boot on which
+/// no Wi-Fi credentials may exist yet.
+///
+/// Idempotent: a marker file inside the Steam directory means re-running the
+/// installer over an existing system does not re-extract over live state.
+fn seed_steam_bootstrap(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let username = &config.user.name;
+
+    info!("Seeding Steam client bootstrap for user {}", username);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would extract /usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz \
+             into /home/{}/.local/share/Steam",
+            username
+        );
+        return Ok(());
+    }
+
+    cmd.run_in_chroot(install_root, &steam_bootstrap_script(username))?;
+
+    Ok(())
+}
+
+/// Render the in-chroot script used by [`seed_steam_bootstrap`].
+///
+/// `set -e` is deliberately absent: a missing tarball or an unreadable
+/// archive must not fail the install — Steam still bootstraps itself on
+/// first launch, this only front-loads the work.
+fn steam_bootstrap_script(username: &str) -> String {
+    format!(
+        "BOOTSTRAP=/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz\n\
+         STEAMDIR=/home/{user}/.local/share/Steam\n\
+         MARKER=\"$STEAMDIR/.deploytix-bootstrap-seeded\"\n\
+         if [ ! -f \"$BOOTSTRAP\" ]; then\n\
+         echo 'steam bootstrap tarball not found; Steam will bootstrap itself on first launch'\n\
+         exit 0\n\
+         fi\n\
+         if [ -f \"$MARKER\" ]; then\n\
+         echo 'steam bootstrap already seeded; skipping'\n\
+         exit 0\n\
+         fi\n\
+         mkdir -p \"$STEAMDIR\"\n\
+         if tar xf \"$BOOTSTRAP\" -C \"$STEAMDIR\"; then\n\
+         touch \"$MARKER\"\n\
+         echo \"seeded steam bootstrap into $STEAMDIR\"\n\
+         else\n\
+         echo 'steam bootstrap extraction failed; Steam will retry on first launch'\n\
+         fi\n\
+         chown -R {user}:{user} /home/{user}/.local\n",
+        user = username
+    )
 }
 
 // ======================== yay AUR Helper ========================
@@ -1777,4 +1847,29 @@ fn write_evdevhook2_service(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod steam_bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn script_targets_the_users_steam_directory() {
+        let script = steam_bootstrap_script("gamer");
+        assert!(script.contains("STEAMDIR=/home/gamer/.local/share/Steam"));
+        assert!(script.contains("/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz"));
+        assert!(script.contains("chown -R gamer:gamer /home/gamer/.local"));
+    }
+
+    /// Re-running the installer must not re-extract over live Steam state,
+    /// and a missing tarball must not fail the install.
+    #[test]
+    fn script_is_idempotent_and_tolerates_a_missing_tarball() {
+        let script = steam_bootstrap_script("gamer");
+        assert!(script.contains(".deploytix-bootstrap-seeded"));
+        assert!(script.contains(r#"if [ -f "$MARKER" ]"#));
+        assert!(script.contains(r#"if [ ! -f "$BOOTSTRAP" ]"#));
+        // No `set -e`: extraction failure logs and continues.
+        assert!(!script.contains("set -e"));
+    }
 }

@@ -959,24 +959,6 @@ impl DeploymentConfig {
             IwdFrontend::default()
         };
 
-        // Optional Wi-Fi pre-seeding so the installed system has connectivity
-        // on first boot (needed for Steam's first-run bootstrap in Game Mode).
-        let (wifi_ssid, wifi_password) = if prompt_confirm(
-            "Pre-configure a Wi-Fi network on the installed system?",
-            false,
-        )? {
-            let ssid = prompt_input("Wi-Fi SSID", None)?;
-            let password = if prompt_confirm("Is the network password-protected (WPA-PSK)?", true)?
-            {
-                Some(prompt_password("Wi-Fi passphrase", true)?)
-            } else {
-                None
-            };
-            (Some(ssid), password)
-        } else {
-            (None, None)
-        };
-
         // Desktop
         let desktops = [
             DesktopEnvironment::None,
@@ -1081,6 +1063,35 @@ impl DeploymentConfig {
             );
             display_manager = DisplayManager::Greetd;
         }
+
+        // Optional Wi-Fi pre-seeding so the installed system has connectivity
+        // on first boot. Asked here, after Game Mode is decided, because it
+        // matters far more there: Steam's gamepad UI is drawn by
+        // steamwebhelper, which cannot start on a never-signed-in client with
+        // no network — so the OOBE page that would let the user configure
+        // Wi-Fi never appears. Default to yes when Game Mode is enabled.
+        if install_session_switching {
+            println!(
+                "  Note: Game Mode's first boot needs network access before Steam \
+                 can show its own network-setup page. Pre-seed Wi-Fi here unless \
+                 this machine will be on ethernet at first boot."
+            );
+        }
+        let (wifi_ssid, wifi_password) = if prompt_confirm(
+            "Pre-configure a Wi-Fi network on the installed system?",
+            install_session_switching,
+        )? {
+            let ssid = prompt_input("Wi-Fi SSID", None)?;
+            let password = if prompt_confirm("Is the network password-protected (WPA-PSK)?", true)?
+            {
+                Some(prompt_password("Wi-Fi passphrase", true)?)
+            } else {
+                None
+            };
+            (Some(ssid), password)
+        } else {
+            (None, None)
+        };
 
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
@@ -1290,6 +1301,34 @@ impl DeploymentConfig {
             },
             packages: PackagesConfig::default(),
         }
+    }
+
+    /// Non-fatal configuration advisories.
+    ///
+    /// Separate from [`validate`](Self::validate), which only ever returns
+    /// hard errors. These are conditions that produce a working install but
+    /// a poor first boot, so they are surfaced rather than enforced.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        // Game Mode's first boot needs the machine to already be online.
+        // Steam's gamepad UI is rendered by steamwebhelper, which cannot
+        // initialise on a never-signed-in client with no network — so the
+        // OOBE page that would let the user *configure* Wi-Fi never draws.
+        // Pre-seeded credentials (or wired ethernet) break the deadlock.
+        if self.packages.install_session_switching && self.network.wifi_ssid.is_none() {
+            warnings.push(
+                "Game Mode is enabled but no Wi-Fi network is pre-seeded \
+                 (network.wifi_ssid is unset). Steam's gamepad UI needs network \
+                 access on first boot before its own network-setup page can be \
+                 shown, so a machine with no wired connection may reach Game Mode \
+                 with no way to get online. Set network.wifi_ssid / \
+                 network.wifi_password, or ensure ethernet is connected at first boot."
+                    .to_string(),
+            );
+        }
+
+        warnings
     }
 
     /// Validate the configuration
@@ -1752,4 +1791,32 @@ mod tests {
     // Recommended future improvement: extract the pure rule checks into a
     // separate `validate_config_rules()` helper so they can be unit-tested
     // without hardware.  See the test-coverage proposal document for details.
+    /// Game Mode's first boot needs the machine already online; flag the
+    /// config that would reach it with no way to connect.
+    #[test]
+    fn game_mode_without_preseeded_wifi_warns() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.packages.install_session_switching = true;
+        cfg.network.wifi_ssid = None;
+        assert!(cfg
+            .warnings()
+            .iter()
+            .any(|w| w.contains("no Wi-Fi network is pre-seeded")));
+    }
+
+    #[test]
+    fn game_mode_with_preseeded_wifi_is_quiet() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.packages.install_session_switching = true;
+        cfg.network.wifi_ssid = Some("home".to_string());
+        assert!(cfg.warnings().is_empty());
+    }
+
+    #[test]
+    fn no_game_mode_needs_no_wifi_warning() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.packages.install_session_switching = false;
+        cfg.network.wifi_ssid = None;
+        assert!(cfg.warnings().is_empty());
+    }
 }

@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 // Consume from the `deploytix` library crate rather than redeclaring
@@ -363,6 +363,7 @@ fn cmd_install(
 
     // Validate configuration
     config.validate()?;
+    print_config_warnings(&config);
 
     // Run installation
     let mut installer = Installer::new(config, false);
@@ -471,7 +472,19 @@ fn cmd_validate(config_path: &str) -> Result<()> {
     let config = DeploymentConfig::from_file(config_path)?;
     config.validate()?;
     println!("✓ Configuration is valid");
+    print_config_warnings(&config);
     Ok(())
+}
+
+/// Print the config's non-fatal advisories (see `DeploymentConfig::warnings`).
+///
+/// These do not block the install — they flag choices that produce a working
+/// system but a poor first boot.
+fn print_config_warnings(config: &DeploymentConfig) {
+    for warning in config.warnings() {
+        warn!("{}", warning);
+        eprintln!("⚠  {}", warning);
+    }
 }
 
 fn cmd_generate_config(output: &str) -> Result<()> {
