@@ -527,6 +527,21 @@ pub fn export_zfs_pools(cmd: &CommandRunner) -> Result<()> {
     Ok(())
 }
 
+/// Whether `path` is already a btrfs subvolume.
+///
+/// Probes with `btrfs subvolume show`, which succeeds only for a real
+/// subvolume — a plain directory of the same name returns non-zero, so a
+/// leftover directory is not mistaken for a subvolume. Run directly rather
+/// than through [`CommandRunner`] so an expected "not a subvolume" answer is
+/// not recorded as a failed command.
+fn subvolume_exists(path: &str) -> bool {
+    std::process::Command::new("btrfs")
+        .args(["subvolume", "show", path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Create btrfs subvolumes on a device
 ///
 /// Follows the canonical BTRFS subvolume setup order:
@@ -565,9 +580,17 @@ pub fn create_btrfs_subvolumes(
     // installation (common on NBD/loop devices with write-back caching).
     cmd.run("mount", &["-t", "btrfs", device, fs_mount])?;
 
-    // Create each subvolume inside the filesystem mountpoint
+    // Create each subvolume inside the filesystem mountpoint, skipping any
+    // that is already there. `btrfs subvolume create` fails with EEXIST, so
+    // without this probe the call cannot run against a filesystem that has
+    // been laid out before — which is exactly what a recovery install that
+    // adopts an existing volume presents.
     for sv in subvolumes {
         let subvol_path = format!("{}/{}", fs_mount, sv.name);
+        if subvolume_exists(&subvol_path) {
+            info!("Reusing existing subvolume: {}", sv.name);
+            continue;
+        }
         cmd.run("btrfs", &["subvolume", "create", &subvol_path])
             .map_err(|e| {
                 DeploytixError::FilesystemError(format!(
@@ -629,4 +652,37 @@ pub fn mount_btrfs_subvolumes(
 
     info!("All subvolumes mounted successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe must answer "not a subvolume" rather than panicking or
+    /// erroring for anything that is not one — a plain directory, a missing
+    /// path, or a host without btrfs-progs installed. Answering `false`
+    /// wrongly costs one failed `subvolume create`; answering `true` wrongly
+    /// would silently skip creating a subvolume the install needs.
+    #[test]
+    fn probe_reports_false_for_paths_that_are_not_subvolumes() {
+        assert!(!subvolume_exists("/nonexistent/path/@home"));
+        assert!(!subvolume_exists("/tmp"));
+    }
+
+    /// Confirms the probe distinguishes a real subvolume from a plain
+    /// directory of the same name. Ignored by default: it needs a mounted
+    /// btrfs filesystem, which many CI kernels lack.
+    ///
+    /// ```sh
+    /// truncate -s 256M /tmp/btr.img && mkfs.btrfs -q /tmp/btr.img
+    /// mkdir -p /tmp/btrmnt && mount -o loop /tmp/btr.img /tmp/btrmnt
+    /// btrfs subvolume create /tmp/btrmnt/@home && mkdir /tmp/btrmnt/plaindir
+    /// cargo test --lib probe_distinguishes_subvolume_from_directory -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a mounted btrfs filesystem at /tmp/btrmnt"]
+    fn probe_distinguishes_subvolume_from_directory() {
+        assert!(subvolume_exists("/tmp/btrmnt/@home"));
+        assert!(!subvolume_exists("/tmp/btrmnt/plaindir"));
+    }
 }

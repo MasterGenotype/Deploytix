@@ -169,6 +169,18 @@ enum Commands {
         all: bool,
     },
 
+    /// Inspect the partition table already on a disk, and show what a
+    /// home-preserving recovery install would keep versus destroy
+    Inspect {
+        /// Target disk device (e.g. /dev/sda)
+        device: String,
+
+        /// Check that this keyfile unlocks the existing HOME container,
+        /// without opening or modifying it
+        #[arg(long)]
+        home_keyfile: Option<String>,
+    },
+
     /// Validate a configuration file
     Validate {
         /// Path to configuration file
@@ -298,6 +310,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
+        }
+        Some(Commands::Inspect {
+            device,
+            home_keyfile,
+        }) => {
+            cmd_inspect(&device, home_keyfile.as_deref())?;
         }
         Some(Commands::Validate { config }) => {
             cmd_validate(&config)?;
@@ -463,6 +481,118 @@ fn cmd_list_disks(all: bool) -> Result<()> {
             dev.model.as_deref().unwrap_or("-"),
             dev.device_type
         );
+    }
+
+    Ok(())
+}
+
+/// Report the partition table already on a device.
+///
+/// Read-only: nothing here writes to the disk, opens a LUKS container, or
+/// mounts anything. It exists so a home-preserving recovery install can be
+/// rehearsed — confirm the right HOME partition is identified, and confirm
+/// the keyfile actually unlocks it — before any install is started.
+fn cmd_inspect(device: &str, home_keyfile: Option<&str>) -> Result<()> {
+    use deploytix::configure::encryption::{verify_luks_credential, Credential};
+    use deploytix::disk::detection::human_bytes;
+    use deploytix::disk::existing::{find_home_partition, read_partition_table, HomeMatch};
+    use deploytix::utils::command::CommandRunner;
+
+    let table = read_partition_table(device)?;
+
+    println!(
+        "Partition table on {} ({}, {}-byte sectors)\n",
+        table.device, table.label, table.sector_size
+    );
+    println!(
+        "{:<3} {:<16} {:>12} {:>14} {:>9}  {:<13} NAME",
+        "#", "DEVICE", "START", "SECTORS", "SIZE", "FS"
+    );
+    println!("{}", "-".repeat(80));
+
+    let home = find_home_partition(&table);
+    let home_node = match &home {
+        HomeMatch::Found(p) => Some(p.node.clone()),
+        _ => None,
+    };
+
+    for part in &table.partitions {
+        let marker = if Some(&part.node) == home_node.as_ref() {
+            "  <- home"
+        } else {
+            ""
+        };
+        println!(
+            "{:<3} {:<16} {:>12} {:>14} {:>9}  {:<13} {}{}",
+            part.number,
+            part.node,
+            part.start_sector,
+            part.size_sectors,
+            human_bytes(part.size_bytes(table.sector_size)),
+            part.fs_type.as_deref().unwrap_or("-"),
+            part.name.as_deref().unwrap_or("-"),
+            marker,
+        );
+    }
+
+    println!();
+    match &home {
+        HomeMatch::Found(p) => {
+            println!(
+                "A recovery install would PRESERVE {} ({}, {}) and ERASE everything else on {}.",
+                p.node,
+                human_bytes(p.size_bytes(table.sector_size)),
+                p.fs_type.as_deref().unwrap_or("unknown filesystem"),
+                table.device,
+            );
+        }
+        HomeMatch::NotFound => {
+            println!(
+                "No HOME partition found on {}. A recovery install cannot run against \
+                 this disk without one.",
+                table.device
+            );
+        }
+        HomeMatch::Ambiguous(candidates) => {
+            let nodes: Vec<&str> = candidates.iter().map(|p| p.node.as_str()).collect();
+            println!(
+                "Ambiguous: {} partitions are named HOME ({}). A recovery install will \
+                 refuse to guess between them.",
+                candidates.len(),
+                nodes.join(", "),
+            );
+        }
+    }
+
+    // Credential check. Deliberately the last thing reported, and never a
+    // reason to skip printing the table: knowing which partition was
+    // identified matters even when the keyfile is wrong.
+    if let Some(keyfile) = home_keyfile {
+        println!();
+        let HomeMatch::Found(part) = &home else {
+            eprintln!(
+                "⚠  Cannot test {}: no single HOME partition identified.",
+                keyfile
+            );
+            return Ok(());
+        };
+        if !part.is_luks() {
+            eprintln!(
+                "⚠  {} is not a LUKS container ({}); a keyfile does not apply.",
+                part.node,
+                part.fs_type.as_deref().unwrap_or("no filesystem signature"),
+            );
+            return Ok(());
+        }
+        let cmd = CommandRunner::new(false);
+        let credential = Credential::Keyfile(keyfile.to_string());
+        match verify_luks_credential(&cmd, &part.node, &credential) {
+            Ok(()) => println!("✓ {} unlocks {}", credential.describe(), part.node),
+            Err(e) => {
+                eprintln!("✗ {} does not unlock {}", credential.describe(), part.node);
+                return Err(e.into());
+            }
+        }
     }
 
     Ok(())

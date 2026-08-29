@@ -1,12 +1,10 @@
 //! LUKS keyfile generation and management
 
-use crate::configure::encryption::LuksContainer;
+use crate::configure::encryption::{run_cryptsetup, Credential, LuksContainer};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
 use tracing::info;
 
 /// Keyfile directory path (inside installed system)
@@ -57,41 +55,67 @@ pub fn generate_keyfile(cmd: &CommandRunner, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add a keyfile to an existing LUKS container (requires password)
+/// Add a keyfile to an existing LUKS container, unlocking with a password.
 pub fn add_keyfile_to_luks(
     cmd: &CommandRunner,
     device: &str,
     password: &str,
     keyfile: &str,
 ) -> Result<()> {
-    info!("Adding keyfile {} to LUKS device {}", keyfile, device);
+    add_keyfile_to_luks_with(
+        cmd,
+        device,
+        &Credential::Passphrase(password.to_string()),
+        keyfile,
+    )
+}
+
+/// Add a keyfile to an existing LUKS container, unlocking with any credential.
+///
+/// A home-preserving recovery install adopts the existing HOME container and
+/// must give the *new* system its own generated keyfile — unlocking with the
+/// credential the user supplied for the old one. The supplied credential is
+/// never installed into the target; only the freshly generated keyfile is,
+/// so the resulting crypttab and initramfs are identical to a fresh install's.
+pub fn add_keyfile_to_luks_with(
+    cmd: &CommandRunner,
+    device: &str,
+    unlock: &Credential,
+    keyfile: &str,
+) -> Result<()> {
+    info!(
+        "Adding keyfile {} to LUKS device {} (unlocking with {})",
+        keyfile,
+        device,
+        unlock.describe()
+    );
 
     if cmd.is_dry_run() {
-        println!("  [dry-run] cryptsetup luksAddKey {} {}", device, keyfile);
+        println!(
+            "  [dry-run] cryptsetup luksAddKey {} {} ({})",
+            device,
+            keyfile,
+            unlock.describe()
+        );
         return Ok(());
     }
 
-    // Use stdin to pass password securely
-    let mut child = Command::new("cryptsetup")
-        .args(["luksAddKey", device, keyfile])
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "cryptsetup luksAddKey".to_string(),
-            stderr: e.to_string(),
-        })?;
+    let output = run_cryptsetup(
+        &["luksAddKey", device, keyfile],
+        unlock,
+        "cryptsetup luksAddKey",
+    )?;
 
-    // Write password to stdin (with trailing newline for cryptsetup)
-    if let Some(ref mut stdin) = child.stdin {
-        writeln!(stdin, "{}", password)?;
-    }
-    drop(child.stdin.take());
-
-    let status = child.wait()?;
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DeploytixError::CommandFailed {
             command: "cryptsetup luksAddKey".to_string(),
-            stderr: format!("Failed to add keyfile to {}", device),
+            stderr: format!(
+                "Failed to add keyfile to {} using {}: {}",
+                device,
+                unlock.describe(),
+                stderr.trim()
+            ),
         });
     }
 
@@ -174,5 +198,50 @@ mod tests {
     fn test_keyfile_path() {
         assert_eq!(keyfile_path("Root"), "/etc/cryptsetup-keys.d/cryptroot.key");
         assert_eq!(keyfile_path("Usr"), "/etc/cryptsetup-keys.d/cryptusr.key");
+    }
+
+    #[test]
+    fn dry_run_add_touches_nothing() {
+        let cmd = CommandRunner::new(true);
+        let unlock = Credential::Keyfile("/nonexistent.key".to_string());
+        assert!(add_keyfile_to_luks_with(&cmd, "/dev/null", &unlock, "/tmp/new.key").is_ok());
+    }
+
+    /// Exercises the real `luksAddKey --key-file <unlock>` path that a
+    /// recovery install uses to give an adopted container the new system's
+    /// generated keyfile. Ignored by default; set up a scratch container
+    /// with:
+    ///
+    /// ```sh
+    /// truncate -s 32M /tmp/home.img
+    /// head -c 512 /dev/urandom > /tmp/good.key
+    /// head -c 512 /dev/urandom > /tmp/generated.key
+    /// cryptsetup luksFormat --type luks2 --batch-mode \
+    ///     --key-file /tmp/good.key /tmp/home.img
+    /// cargo test --lib adds_a_generated_keyfile_unlocking_with_a_keyfile -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs cryptsetup and a prepared LUKS container at /tmp/home.img"]
+    fn adds_a_generated_keyfile_unlocking_with_a_keyfile() {
+        use crate::configure::encryption::verify_luks_credential;
+
+        let cmd = CommandRunner::new(false);
+        let supplied = Credential::Keyfile("/tmp/good.key".to_string());
+        let generated = "/tmp/generated.key";
+
+        add_keyfile_to_luks_with(&cmd, "/tmp/home.img", &supplied, generated)
+            .expect("adding a keyfile while unlocking with a keyfile must succeed");
+
+        // The newly added keyfile is what the target's initramfs will use.
+        verify_luks_credential(
+            &cmd,
+            "/tmp/home.img",
+            &Credential::Keyfile(generated.to_string()),
+        )
+        .expect("the generated keyfile must unlock the container");
+
+        // The supplied credential is untouched, not replaced.
+        verify_luks_credential(&cmd, "/tmp/home.img", &supplied)
+            .expect("the supplied credential must still unlock the container");
     }
 }
