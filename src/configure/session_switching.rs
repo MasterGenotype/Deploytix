@@ -1,6 +1,6 @@
 //! Session switching scripts deployment (gamescope ↔ desktop mode via greetd)
 
-use crate::config::DeploymentConfig;
+use crate::config::{DeploymentConfig, DesktopEnvironment};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -16,6 +16,8 @@ const RETURN_TO_GAMEMODE: &str =
     include_str!("../resources/session_switching/return-to-gamemode.sh");
 const STEAM_GAMESCOPE_SESSION: &str =
     include_str!("../resources/session_switching/steam-gamescope-session.sh");
+const DESKTOP_SESSION_TEMPLATE: &str =
+    include_str!("../resources/session_switching/desktop-session.sh");
 const GAMESCOPE_SESSION_DESKTOP: &str =
     include_str!("../resources/session_switching/gamescope-session.desktop");
 const STEAMOS_SELECT_BRANCH: &str =
@@ -145,6 +147,121 @@ const DEPLOY_FILES: &[DeployFile] = &[
     },
 ];
 
+/// Per-desktop-environment facts needed to render `desktop-session`.
+struct DesktopSpec {
+    /// Primary session command installed for this desktop environment.
+    command: &'static str,
+    /// `XDG_CURRENT_DESKTOP` / `XDG_SESSION_DESKTOP` value.
+    name: &'static str,
+    /// `XDG_SESSION_TYPE`; empty for X11 desktops that set it themselves.
+    session_type: &'static str,
+    /// Alternates tried, in order, when `command` is not on PATH — a system
+    /// whose desktop was swapped after install still gets a usable session.
+    fallbacks: &'static [&'static str],
+    /// Teardown targets as `<x|f>:<pattern>` (`x` = exact process name,
+    /// `f` = full command line), matching the template's `_de_kill`.
+    procs: &'static [&'static str],
+}
+
+/// Processes torn down regardless of desktop environment.
+const COMMON_TEARDOWN: &[&str] = &[
+    "f:Xwayland :",
+    "x:pipewire",
+    "x:pipewire-pulse",
+    "x:wireplumber",
+];
+
+/// Resolve the desktop-session facts for a desktop environment.
+///
+/// `DesktopEnvironment::None` has no session to wrap and returns `None`;
+/// session switching already requires a desktop environment (enforced in
+/// `DeploymentConfig::validate`), so that case simply deploys nothing.
+fn desktop_spec(de: &DesktopEnvironment) -> Option<DesktopSpec> {
+    match de {
+        DesktopEnvironment::Kde => Some(DesktopSpec {
+            command: "startplasma-wayland",
+            name: "KDE",
+            session_type: "wayland",
+            fallbacks: &["gnome-session", "startxfce4"],
+            procs: &[
+                "x:startplasma-wayland",
+                "x:plasma_session",
+                "x:kwin_wayland",
+                "x:kwin_wayland_wrapper",
+                "x:kded6",
+                "f:kactivitymanagerd",
+                "f:xdg-desktop-portal-kde",
+            ],
+        }),
+        DesktopEnvironment::Gnome => Some(DesktopSpec {
+            command: "gnome-session",
+            name: "GNOME",
+            session_type: "wayland",
+            fallbacks: &["startplasma-wayland", "startxfce4"],
+            procs: &[
+                "x:gnome-session",
+                "x:gnome-session-binary",
+                "x:gnome-shell",
+                "x:gsd-media-keys",
+                "f:xdg-desktop-portal-gnome",
+            ],
+        }),
+        DesktopEnvironment::Xfce => Some(DesktopSpec {
+            command: "startxfce4",
+            name: "XFCE",
+            // startxfce4 brings up its own X server and exports
+            // XDG_SESSION_TYPE itself; forcing wayland here would break it.
+            session_type: "",
+            fallbacks: &["startplasma-wayland", "gnome-session"],
+            procs: &[
+                "x:startxfce4",
+                "x:xfce4-session",
+                "x:xfwm4",
+                "x:xfdesktop",
+                "x:xfce4-panel",
+                "f:xdg-desktop-portal-xfce",
+            ],
+        }),
+        DesktopEnvironment::None => None,
+    }
+}
+
+/// Render `/usr/local/bin/desktop-session` for the configured desktop.
+///
+/// Pure and deterministic: the same [`DesktopEnvironment`] always yields the
+/// same bytes, so re-running the installer over an existing system rewrites
+/// an identical file instead of accumulating drift.
+fn render_desktop_session(de: &DesktopEnvironment) -> Option<String> {
+    let spec = desktop_spec(de)?;
+
+    // Unquoted in the template's `for` list, so emit shell-quoted words.
+    let fallbacks = spec
+        .fallbacks
+        .iter()
+        .map(|f| format!("\"{}\"", f))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Newline-separated inside a double-quoted assignment; the template
+    // splits it back apart with `while IFS= read -r`.
+    let procs = spec
+        .procs
+        .iter()
+        .chain(COMMON_TEARDOWN.iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(
+        DESKTOP_SESSION_TEMPLATE
+            .replace("@DEPLOYTIX_DESKTOP_CMD@", spec.command)
+            .replace("@DEPLOYTIX_DESKTOP_NAME@", spec.name)
+            .replace("@DEPLOYTIX_SESSION_TYPE@", spec.session_type)
+            .replace("@DEPLOYTIX_DESKTOP_FALLBACKS@", &fallbacks)
+            .replace("@DEPLOYTIX_DE_PROCS@", &procs),
+    )
+}
+
 /// Deploy session switching scripts and configuration to the target system.
 ///
 /// Architecture: greetd runs `deploytix-session-manager` as its greeter.
@@ -176,6 +293,29 @@ pub fn setup_session_switching(
         info!("  Installed {} (mode {:o})", file.dest, file.mode);
     }
 
+    // `/usr/local/bin/desktop-session` is rendered from the chosen desktop
+    // environment rather than shipped verbatim, so its launch command,
+    // session-type exports and teardown process list match the desktop that
+    // was actually installed. It is the command deploytix-session-manager
+    // hands to greetd for the "desktop" sentinel: with no such file on disk,
+    // greetd's start_session exec fails instantly, the greeter is respawned,
+    // and the manager flip-flops between a dead desktop launch and a fresh
+    // gamescope launch — the loop in which Steam never stays on screen.
+    if let Some(content) = render_desktop_session(&config.desktop.environment) {
+        let path = format!("{}/usr/local/bin/desktop-session", install_root);
+        if let Some(parent) = Path::new(&path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, content)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        info!(
+            "  Installed usr/local/bin/desktop-session for {:?} (mode 755)",
+            config.desktop.environment
+        );
+    } else {
+        info!("  Skipping desktop-session (no desktop environment selected)");
+    }
+
     // Polkit rule granting the gamescope session user passwordless control of
     // NetworkManager, so Wi-Fi can be configured from Steam's Deck OOBE and
     // Settings > Internet (both drive NetworkManager over D-Bus). The rule is
@@ -203,4 +343,145 @@ pub fn setup_session_switching(
 
     info!("Session switching scripts deployed successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every script deploytix installs, keyed by the const that carries it.
+    const EMBEDDED_SCRIPTS: &[&str] = &[
+        SESSION_MANAGER,
+        SESSION_SELECT,
+        RETURN_TO_GAMEMODE,
+        STEAM_GAMESCOPE_SESSION,
+        STEAMOS_SELECT_BRANCH,
+        STEAMOS_UPDATE,
+        JUPITER_BIOSUPDATE,
+        RESTART_GREETD,
+        STEAM_LOGIN_CHECK,
+        STEAM_FIRST_LOGIN,
+        STEAM_FIRST_LOGIN_DESKTOP,
+    ];
+
+    /// Paths that come from packages rather than from deploytix.
+    const EXTERNALLY_PROVIDED: &[&str] = &[
+        "/usr/bin/env",       // shebang interpreter
+        "/usr/bin/bash",      // shebang interpreter
+        "/usr/bin/gamescope", // gamescope-git package
+    ];
+
+    /// Pull every `/usr/bin/...` and `/usr/local/bin/...` literal out of a script.
+    fn referenced_paths(script: &str) -> Vec<String> {
+        let is_path_char =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/');
+        let mut found = Vec::new();
+        let bytes: Vec<char> = script.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == '/' && (i == 0 || !is_path_char(bytes[i - 1])) {
+                let mut j = i;
+                while j < bytes.len() && is_path_char(bytes[j]) {
+                    j += 1;
+                }
+                let candidate: String = bytes[i..j].iter().collect();
+                let candidate = candidate.trim_end_matches('.').to_string();
+                if candidate.starts_with("/usr/bin/") || candidate.starts_with("/usr/local/bin/") {
+                    found.push(candidate);
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        found
+    }
+
+    /// Regression guard for the first-boot session loop: `desktop-session`
+    /// was referenced by deploytix-session-manager but never installed, so
+    /// greetd's start_session exec failed instantly and the greeter
+    /// respawned forever. Any executable a deployed script invokes by
+    /// absolute path must itself be deployed.
+    #[test]
+    fn every_referenced_helper_is_deployed() {
+        let mut deployed: Vec<String> = DEPLOY_FILES
+            .iter()
+            .map(|f| format!("/{}", f.dest))
+            .collect();
+        // Rendered separately from the DE template, not via DEPLOY_FILES.
+        deployed.push("/usr/local/bin/desktop-session".to_string());
+        // Symlink created by setup_session_switching().
+        deployed.push("/usr/bin/steamos-session-select".to_string());
+
+        for script in EMBEDDED_SCRIPTS {
+            for path in referenced_paths(script) {
+                if EXTERNALLY_PROVIDED.contains(&path.as_str()) {
+                    continue;
+                }
+                assert!(
+                    deployed.contains(&path),
+                    "{} is invoked by a deployed script but is never installed",
+                    path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_session_rendered_per_desktop_environment() {
+        for (de, cmd, name) in [
+            (DesktopEnvironment::Kde, "startplasma-wayland", "KDE"),
+            (DesktopEnvironment::Gnome, "gnome-session", "GNOME"),
+            (DesktopEnvironment::Xfce, "startxfce4", "XFCE"),
+        ] {
+            let rendered = render_desktop_session(&de).expect("desktop environment renders");
+            assert!(
+                rendered.contains(&format!("for _candidate in \"{}\"", cmd)),
+                "{:?} should launch {}",
+                de,
+                cmd
+            );
+            assert!(rendered.contains(&format!("XDG_CURRENT_DESKTOP=\"{}\"", name)));
+            // Common teardown targets are appended to every DE's list.
+            assert!(rendered.contains("x:wireplumber"));
+        }
+    }
+
+    #[test]
+    fn rendered_desktop_session_leaves_no_placeholders() {
+        for de in [
+            DesktopEnvironment::Kde,
+            DesktopEnvironment::Gnome,
+            DesktopEnvironment::Xfce,
+        ] {
+            let rendered = render_desktop_session(&de).unwrap();
+            assert!(
+                !rendered.contains("@DEPLOYTIX_"),
+                "{:?} left an unsubstituted placeholder",
+                de
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_session_teardown_is_desktop_specific() {
+        let kde = render_desktop_session(&DesktopEnvironment::Kde).unwrap();
+        let gnome = render_desktop_session(&DesktopEnvironment::Gnome).unwrap();
+        assert!(kde.contains("x:kwin_wayland") && !kde.contains("x:gnome-shell"));
+        assert!(gnome.contains("x:gnome-shell") && !gnome.contains("x:kwin_wayland"));
+    }
+
+    /// Rendering is pure, so re-running the installer converges on an
+    /// identical file rather than drifting.
+    #[test]
+    fn rendering_is_idempotent() {
+        let once = render_desktop_session(&DesktopEnvironment::Kde).unwrap();
+        let twice = render_desktop_session(&DesktopEnvironment::Kde).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn headless_config_renders_no_desktop_session() {
+        assert!(render_desktop_session(&DesktopEnvironment::None).is_none());
+    }
 }

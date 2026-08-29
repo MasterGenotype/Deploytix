@@ -19,6 +19,77 @@ exec >>"$_LOG_DIR/steam-gamescope-session.log" 2>&1
 echo "[steam-session] ==== starting at $(date -Is) pid=$$ uid=$(id -u) ===="
 echo "[steam-session] env: USER=${USER:-?} HOME=${HOME:-?} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-?} XDG_SEAT=${XDG_SEAT:-?} XDG_SESSION_ID=${XDG_SESSION_ID:-?} XDG_VTNR=${XDG_VTNR:-?}"
 
+# --------- 0.5 Short-session tracker ---------
+# Ported from ChimeraOS gamescope-session-plus, which uses the same 60s /
+# 5-strike thresholds. A session that dies in under $SHORT_SESSION_SECONDS
+# never presented a UI; $SHORT_SESSION_LIMIT of those in a row means the
+# client is broken rather than merely unlucky. Without this, a Steam that
+# cannot start (no network on first boot, so steamwebhelper — which *is*
+# the gamepad UI — never initialises) respawns through greetd forever and
+# nothing ever reaches the screen.
+SHORT_SESSION_SECONDS=60
+SHORT_SESSION_LIMIT=5
+SHORT_SESSION_TRACKER="$_LOG_DIR/deploytix-short-sessions"
+SENTINEL="${XDG_CONFIG_HOME:-$HOME/.config}/deploytix-session"
+
+# Point the next session at the desktop. deploytix-session-manager consumes
+# (and deletes) the sentinel on its next run.
+_route_to_desktop() {
+    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
+    if echo "desktop" > "$SENTINEL" 2>/dev/null; then
+        echo "[steam-session] Next session -> desktop"
+    else
+        echo >&2 "[steam-session] WARNING: could not write $SENTINEL (is \$HOME writable?)"
+    fi
+}
+
+# Repair what a half-finished Steam install most often loses, then hand the
+# user a desktop — where the steam-first-login autostart entry offers a
+# windowed sign-in and returns to gamemode afterwards.
+short_session_recover() {
+    echo "[steam-session] Recovering: clearing widevine cache, re-seeding Steam bootstrap"
+    mkdir -p "$HOME/.local/share/Steam" 2>/dev/null || true
+    rm -rf --one-file-system "$HOME/.local/share/Steam/config/widevine" 2>/dev/null || true
+    for _bootstrap in /usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz \
+                      /etc/first-boot/bootstraplinux_ubuntu12_32.tar.xz; do
+        [ -f "$_bootstrap" ] || continue
+        if tar xf "$_bootstrap" -C "$HOME/.local/share/Steam" 2>/dev/null; then
+            echo "[steam-session] Re-extracted $_bootstrap"
+            break
+        fi
+    done
+    _route_to_desktop
+}
+
+_short_session_count=0
+if [ -f "$SHORT_SESSION_TRACKER" ]; then
+    _short_session_count=$(wc -l < "$SHORT_SESSION_TRACKER" 2>/dev/null || echo 0)
+fi
+
+if [ "$_short_session_count" -ge "$SHORT_SESSION_LIMIT" ]; then
+    echo >&2 "[steam-session] $_short_session_count consecutive short sessions — Steam is not starting here."
+    short_session_recover
+    rm -f "$SHORT_SESSION_TRACKER"
+    exit 1
+fi
+
+_session_start=$(date +%s)
+
+# Record how long this session lasted: a short one adds a strike, a real
+# one clears the record. Returns non-zero for a short session, so callers
+# must invoke it as a condition or with `|| true` under `set -e`.
+_record_session_outcome() {
+    _elapsed=$(( $(date +%s) - _session_start ))
+    if [ "$_elapsed" -lt "$SHORT_SESSION_SECONDS" ]; then
+        echo "session failed after ${_elapsed}s" >> "$SHORT_SESSION_TRACKER" 2>/dev/null || true
+        echo "[steam-session] Short session (${_elapsed}s) — strike $((_short_session_count + 1))/$SHORT_SESSION_LIMIT"
+        return 1
+    fi
+    rm -f "$SHORT_SESSION_TRACKER"
+    echo "[steam-session] Session lasted ${_elapsed}s; short-session record cleared"
+    return 0
+}
+
 # --------- 1. Seat & Session Environment ---------
 # Select libseat backend adaptively:
 # - Prefer logind (elogind) when its D-Bus service is reachable; greetd's PAM
@@ -139,6 +210,7 @@ if read -r response_x_display response_wl_display <>"$socket"; then
     echo "[steam-session] Gamescope ready: DISPLAY=$DISPLAY GAMESCOPE_WAYLAND_DISPLAY=$GAMESCOPE_WAYLAND_DISPLAY"
 else
     echo >&2 "[steam-session] Gamescope failed to start"
+    _record_session_outcome || true
     kill -9 "$gamescope_pid" 2>/dev/null
     wait "$gamescope_pid" 2>/dev/null
     rm -rf "$tmpdir"
@@ -233,11 +305,18 @@ echo "[steam-session] Steam exited ($steam_ret)"
 # fully reliable there pre-login. Route the next session to the
 # desktop, where the steam-first-login autostart entry offers a
 # windowed sign-in and automatically returns to gamemode afterward.
-if ! /usr/bin/steam-login-check; then
-    SENTINEL="${XDG_CONFIG_HOME:-$HOME/.config}/deploytix-session"
-    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
-    echo "desktop" > "$SENTINEL"
-    echo "[steam-session] No Steam login on exit; next session -> desktop (first-login fallback)"
+#
+# Gated on the session having lasted long enough to be a sign-in attempt.
+# A Steam that exits in seconds never showed a login screen — it crashed —
+# and routing that to the desktop turns a crash into a session flip-flop.
+# Those are strikes for the short-session tracker to act on instead.
+if _record_session_outcome; then
+    if ! /usr/bin/steam-login-check; then
+        echo "[steam-session] No Steam login on exit; first-login fallback"
+        _route_to_desktop
+    fi
+else
+    echo "[steam-session] Exit was too fast to be a sign-in attempt; leaving session selection alone"
 fi
 
 exit "$steam_ret"

@@ -102,6 +102,18 @@ pub(crate) fn show_sections(
                 "Credentials are written to the installed system so it auto-connects \
                  on first boot. Leave the passphrase empty for an open network.",
             );
+        } else if packages.install_session_switching {
+            // Mirrors DeploymentConfig::warnings(): Steam's gamepad UI is drawn
+            // by steamwebhelper, which cannot start on a never-signed-in client
+            // with no network — so the OOBE page that would let the user set up
+            // Wi-Fi never appears.
+            widgets::info_text(
+                ui,
+                "\u{26a0} Game Mode is enabled with no Wi-Fi pre-seeded. Steam's gamepad \
+                 UI needs network access on first boot before it can show its own \
+                 network-setup page, so a machine with no wired connection may reach \
+                 Game Mode unable to get online.",
+            );
         }
 
         ui.add_space(theme::SPACING_XS);
