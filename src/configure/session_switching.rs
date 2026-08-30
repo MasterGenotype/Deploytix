@@ -77,6 +77,15 @@ const DEPLOY_FILES: &[DeployFile] = &[
     },
     // SteamOS tooling stubs probed by Steam when launched with -steamdeck
     // (required for the first-boot Deck OOBE / login screen in gamescope).
+    //
+    // They follow the real tools' interfaces rather than returning a
+    // constant: steamos-update distinguishes `check` from `now` and uses
+    // exit 7 ("already up to date") because a deploytix system is never
+    // updated through the SteamOS image path, and steamos-select-branch
+    // refuses a branch that does not exist here instead of reporting
+    // success for it. Each logs its invocation to
+    // ~/.local/state/deploytix-steamos-tooling.log, so what Steam actually
+    // asks for is observable rather than guessed at.
     DeployFile {
         dest: "usr/bin/steamos-update",
         content: STEAMOS_UPDATE,
