@@ -16,6 +16,7 @@ use crate::config::{DeploymentConfig, InitSystem};
 use crate::configure::bootloader::uses_standalone_grub;
 use crate::configure::packages::pacman_install_chroot_reviewed_status;
 use crate::disk::formatting::get_partition_uuid;
+use crate::immutable::snapshot::{self, ImmutableDevices};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
@@ -64,6 +65,96 @@ pub fn install_grub_btrfs(
 
     info!("grub-btrfs installation complete");
     Ok(true)
+}
+
+/// Take the baseline snapshot a freshly installed system needs for its GRUB
+/// snapshot menu to be non-empty.
+///
+/// Nothing else snapshots at install time: `snapper create-config` only writes
+/// a config, and paired sets are otherwise created by `deploytix update`. So
+/// without this the `41_snapshots-btrfs` generator finds zero snapshots, prints
+/// *"No snapshots found"*, and emits no entries — the fresh install boots with
+/// an empty (or absent) snapshot submenu.
+///
+/// The snapshot kind matches the layout, because they roll back differently:
+///
+/// - **Immutable**: a read-only paired set `{@, @usr, @etc}`. Its pairing
+///   marker makes the grub-btrfs entry mount the matching `/usr` and `/etc`, so
+///   the recovery entry is a coherent system rather than an old `/` over a live
+///   `/usr`.
+/// - **Plain grub-btrfs**: a snapper snapshot of `/`, the layout snapper and
+///   grub-btrfsd manage from then on (and whose `info.xml` gives the menu entry
+///   its type and description).
+///
+/// Best-effort by contract: the caller keeps the install alive if this fails —
+/// a missing baseline snapshot costs a menu entry, not a bootable system.
+/// Snapper invocation for the baseline snapshot. `--no-dbus` because the
+/// chroot has no session bus; the description is what the GRUB entry shows.
+const SNAPPER_BASELINE_CMD: &str =
+    "snapper --no-dbus -c root create -d 'Fresh install (deploytix)'";
+
+pub fn create_baseline_snapshot(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    devices: &ImmutableDevices,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_grub_btrfs {
+        return Ok(());
+    }
+
+    if config.packages.immutable_root {
+        let id = snapshot::create_set(cmd, devices, /* readonly = */ true)?;
+        info!(
+            "Created baseline immutable snapshot set {} (pristine install)",
+            id
+        );
+    } else {
+        info!("Creating baseline snapper snapshot of / (pristine install)");
+        cmd.run_in_chroot(install_root, SNAPPER_BASELINE_CMD)?;
+    }
+
+    Ok(())
+}
+
+/// Regenerate `grub.cfg` so grub-btrfs's snapshot entries reach the boot menu.
+///
+/// The bootloader phase runs `grub-mkconfig` well before grub-btrfs is
+/// installed, so the grub.cfg it produces predates
+/// `/etc/grub.d/41_snapshots-btrfs` and carries neither the snapshot submenu
+/// nor `/boot/grub/grub-btrfs.cfg`. Nothing regenerated it afterwards: the
+/// `95-grub-reinstall.hook` triggers on kernels and `usr/lib/grub/*`, which the
+/// grub-btrfs package does not ship.
+///
+/// Runs in the chroot, where `/` is a real btrfs root — the generator needs
+/// `grub-probe` and `btrfs subvolume show /`, both of which fail against the
+/// overlay `/` of a *booted* immutable system.
+///
+/// On standalone-GRUB layouts (SecureBoot sbctl + encryption) grub.cfg is
+/// embedded in the signed EFI binary, so the rebuild + re-sign pipeline runs
+/// instead of a bare `grub-mkconfig` — the same command `GRUB_BTRFS_MKCONFIG`
+/// points grub-btrfsd at.
+pub fn regenerate_grub_config(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let regen = grub_regen_command(config);
+    info!(
+        "Regenerating grub.cfg with grub-btrfs installed ({})",
+        regen
+    );
+    cmd.run_in_chroot(install_root, regen)?;
+    Ok(())
+}
+
+/// The command that rewrites grub.cfg for this layout.
+fn grub_regen_command(config: &DeploymentConfig) -> &'static str {
+    if uses_standalone_grub(config) {
+        "/usr/local/bin/reinstall-grub"
+    } else {
+        "grub-mkconfig -o /boot/grub/grub.cfg"
+    }
 }
 
 /// Install grub-btrfs and its runtime dependencies via pacman in chroot.
@@ -414,6 +505,78 @@ fn write_grub_btrfsd_service(
 mod tests {
     use super::*;
     use crate::config::{DeploymentConfig, Filesystem, InitSystem, SecureBootMethod};
+
+    #[test]
+    fn grub_regen_command_matches_the_bootloader_layout() {
+        let mut cfg = base_config();
+        // Plain GRUB: a bare regeneration is enough.
+        assert_eq!(
+            grub_regen_command(&cfg),
+            "grub-mkconfig -o /boot/grub/grub.cfg"
+        );
+
+        // Standalone GRUB embeds grub.cfg in a signed EFI binary, so the
+        // rebuild + re-sign pipeline must run instead.
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Sbctl;
+        cfg.disk.encryption = true;
+        assert!(uses_standalone_grub(&cfg));
+        assert_eq!(grub_regen_command(&cfg), "/usr/local/bin/reinstall-grub");
+
+        // Whichever it is, it is the command grub-btrfsd is pointed at, so the
+        // daemon and the install-time regeneration stay in agreement.
+        let root = temp_root("regen_matches_daemon");
+        let cmd = CommandRunner::new(false);
+        write_grub_btrfs_config(&cmd, &cfg, &root).unwrap();
+        assert!(read_config(&root)
+            .contains(&format!("GRUB_BTRFS_MKCONFIG={}", grub_regen_command(&cfg))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn baseline_snapshot_is_a_paired_set_only_when_immutable() {
+        let devices = ImmutableDevices {
+            root_fs: "/dev/mapper/Crypt-Root".into(),
+            usr_fs: "/dev/mapper/Crypt-Usr".into(),
+        };
+        let cmd = CommandRunner::new(true);
+
+        // Plain grub-btrfs: snapper owns /.snapshots, so the baseline is a
+        // snapper snapshot with a description the menu can show.
+        let mut cfg = base_config();
+        cfg.packages.immutable_root = false;
+        create_baseline_snapshot(&cmd, &cfg, &devices, "/mnt/target").unwrap();
+        assert!(SNAPPER_BASELINE_CMD.contains("--no-dbus"));
+        assert!(SNAPPER_BASELINE_CMD.contains("-c root create"));
+
+        // Immutable: a paired {@, @usr, @etc} set, read-only, so the recovery
+        // entry boots a coherent system rather than an old / over a live /usr.
+        cfg.packages.immutable_root = true;
+        create_baseline_snapshot(&cmd, &cfg, &devices, "/mnt/target").unwrap();
+        let cmds = crate::immutable::snapshot::create_set_cmds(&devices, "42", true);
+        assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@\"")));
+        assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@etc\"")));
+        assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@usr\"")));
+    }
+
+    #[test]
+    fn baseline_snapshot_is_a_no_op_without_grub_btrfs() {
+        let devices = ImmutableDevices {
+            root_fs: "/dev/mapper/Crypt-Root".into(),
+            usr_fs: "/dev/mapper/Crypt-Root".into(),
+        };
+        let mut cfg = base_config();
+        cfg.packages.install_grub_btrfs = false;
+        // A non-dry-run runner would try to shell out; returning Ok without
+        // running anything is the point.
+        create_baseline_snapshot(
+            &CommandRunner::new(false),
+            &cfg,
+            &devices,
+            "/nonexistent/install/root",
+        )
+        .unwrap();
+    }
 
     fn base_config() -> DeploymentConfig {
         let mut config = DeploymentConfig::sample();

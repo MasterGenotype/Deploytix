@@ -23,7 +23,7 @@ use crate::immutable::PAIR_MARKER;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Top-level directory (inside the filesystem root subvolume) that holds
 /// deploytix transactional snapshot sets on each btrfs filesystem.
@@ -179,10 +179,24 @@ pub fn create_set(
         if readonly { "read-only" } else { "writable" },
         id
     );
-    for c in create_set_cmds(devices, &id, readonly) {
-        cmd.run("sh", &["-c", &c])?;
+    // A set spans two filesystems in multi-volume layouts, so a failure can
+    // leave a half-built set behind — which grub-btrfs would then list as a
+    // bootable entry. Unwind it rather than leaking it.
+    let build = (|| -> Result<()> {
+        for c in create_set_cmds(devices, &id, readonly) {
+            cmd.run("sh", &["-c", &c])?;
+        }
+        cmd.run("sh", &["-c", &write_pair_marker_cmd(&devices.root_fs, &id)])?;
+        Ok(())
+    })();
+    if let Err(e) = build {
+        warn!(
+            "[immutable] Set {} failed to build; removing its partial snapshots",
+            id
+        );
+        let _ = delete_set(cmd, devices, &id);
+        return Err(e);
     }
-    cmd.run("sh", &["-c", &write_pair_marker_cmd(&devices.root_fs, &id)])?;
     Ok(id)
 }
 

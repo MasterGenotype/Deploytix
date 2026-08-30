@@ -59,6 +59,13 @@ etc=@deploytix-sets/<id>/etc
 
 The live system's `@` carries `usr=@usr` / `etc=@etc`.
 
+A **baseline set** is created at the end of the install, read-only, capturing the
+pristine system. Without it a fresh install has no snapshots at all, so
+grub-btrfs's generator finds nothing and the boot menu ships with an empty
+snapshot submenu. The install also regenerates `grub.cfg` once grub-btrfs is
+present — the bootloader phase runs `grub-mkconfig` before the package is
+installed, so the grub.cfg it writes predates `/etc/grub.d/41_snapshots-btrfs`.
+
 ---
 
 ## Boot flow
@@ -179,6 +186,9 @@ bypasses it.
   deletes a partially built set on any failure.
 - **Recovery.** A bad activated set is always escapable: pick an older entry from
   the grub-btrfs menu, or boot any set and run `deploytix rollback`.
+- **The baseline set is prunable.** It is an ordinary set, so `deploytix update`
+  will eventually prune it past `--keep`. The pristine install stays reachable
+  regardless via `deploytix rollback @`, which repoints at `@` itself.
 
 ---
 

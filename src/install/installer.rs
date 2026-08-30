@@ -1213,27 +1213,20 @@ impl Installer {
         configure::encryption::get_luks_uuid(&container.device).map(Some)
     }
 
-    /// Install grub-btrfs: packages, snapper root config with a top-level
-    /// @snapshots subvolume, /etc/default/grub-btrfs/config, and an
-    /// init-specific grub-btrfsd service.
-    fn install_grub_btrfs(&self) -> Result<()> {
-        info!("[Phase 5.45] Installing grub-btrfs (snapshot boot menu entries)");
-
-        // The block device carrying the root btrfs filesystem: the Root LUKS
-        // mapper on encrypted layouts, the ROOT partition otherwise.
-        let root_fs_device = if self.config.disk.encryption {
+    /// The block device carrying the root btrfs filesystem: the Root LUKS
+    /// mapper on encrypted layouts, the ROOT partition otherwise.
+    fn root_fs_device(&self) -> Result<String> {
+        if self.config.disk.encryption {
             match self
                 .luks_containers
                 .iter()
                 .find(|c| c.volume_name == "Root")
             {
-                Some(c) => c.mapped_path.clone(),
-                None if self.cmd.is_dry_run() => "/dev/mapper/Crypt-Root".to_string(),
-                None => {
-                    return Err(DeploytixError::ConfigError(
-                        "No Root LUKS container found for grub-btrfs setup".to_string(),
-                    ))
-                }
+                Some(c) => Ok(c.mapped_path.clone()),
+                None if self.cmd.is_dry_run() => Ok(crate::immutable::ROOT_FS_DEVICE.to_string()),
+                None => Err(DeploytixError::ConfigError(
+                    "No Root LUKS container found for grub-btrfs setup".to_string(),
+                )),
             }
         } else {
             let layout = self.layout.as_ref().unwrap();
@@ -1246,8 +1239,36 @@ impl Installer {
                         "No root partition found for grub-btrfs setup".to_string(),
                     )
                 })?;
-            partition_path(&self.config.disk.device, root_part.number)
-        };
+            Ok(partition_path(&self.config.disk.device, root_part.number))
+        }
+    }
+
+    /// The filesystems backing the immutable subvolumes for this layout.
+    ///
+    /// `@usr` only lives on its own container in multi-volume encrypted
+    /// layouts; everywhere else it is a subvolume of the root filesystem.
+    fn immutable_devices(&self) -> Result<crate::immutable::snapshot::ImmutableDevices> {
+        let root_fs = self.root_fs_device()?;
+        let usr_fs = self
+            .luks_containers
+            .iter()
+            .find(|c| c.volume_name == "Usr")
+            .map(|c| c.mapped_path.clone())
+            .unwrap_or_else(|| root_fs.clone());
+        Ok(crate::immutable::snapshot::ImmutableDevices { root_fs, usr_fs })
+    }
+
+    /// Install grub-btrfs: packages, snapper root config with a top-level
+    /// @snapshots subvolume, /etc/default/grub-btrfs/config, and an
+    /// init-specific grub-btrfsd service.
+    ///
+    /// The baseline snapshot and the grub.cfg regeneration that make its
+    /// entries appear happen later, in [`Self::finalize`], once the system is
+    /// fully configured.
+    fn install_grub_btrfs(&self) -> Result<()> {
+        info!("[Phase 5.45] Installing grub-btrfs (snapshot boot menu entries)");
+
+        let root_fs_device = self.root_fs_device()?;
 
         let installed = configure::grub_btrfs::install_grub_btrfs(
             &self.cmd,
@@ -1433,6 +1454,47 @@ impl Installer {
 
         // Regenerate initramfs
         self.cmd.run_in_chroot(INSTALL_ROOT, "mkinitcpio -P")?;
+
+        // Baseline snapshot + grub.cfg regeneration, in that order: the
+        // generator only emits entries for snapshots that already exist, and
+        // the bootloader phase wrote grub.cfg before grub-btrfs was installed.
+        // Both run here, while the target is still mounted and `/` is a real
+        // btrfs root the generator can probe.
+        //
+        // Neither is worth failing a complete install over: without them the
+        // system boots fine, just without snapshot entries.
+        if self.config.packages.install_grub_btrfs {
+            self.report_progress(0.98, "Creating baseline snapshot and GRUB entries...");
+            match self.immutable_devices() {
+                Ok(devices) => {
+                    if let Err(e) = configure::grub_btrfs::create_baseline_snapshot(
+                        &self.cmd,
+                        &self.config,
+                        &devices,
+                        INSTALL_ROOT,
+                    ) {
+                        warn!(
+                            "Baseline snapshot failed ({}) — the GRUB snapshot menu will be \
+                             empty until the first snapshot is taken",
+                            e
+                        );
+                    }
+                }
+                Err(e) => warn!(
+                    "Cannot resolve root filesystem for baseline snapshot: {}",
+                    e
+                ),
+            }
+            if let Err(e) =
+                configure::grub_btrfs::regenerate_grub_config(&self.cmd, &self.config, INSTALL_ROOT)
+            {
+                warn!(
+                    "grub.cfg regeneration failed ({}) — the previous grub.cfg is intact but \
+                     carries no snapshot submenu",
+                    e
+                );
+            }
+        }
 
         // Immutable A/B: clone slot A → B, seal both with dm-verity, write the
         // slot-pointer state, and patch the boot pointer. Handles its own
