@@ -7,3 +7,4 @@ pub mod error;
 pub mod interactive;
 pub mod prompt;
 pub mod signal;
+pub mod user;

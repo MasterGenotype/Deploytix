@@ -1,0 +1,18 @@
+# Desktop entry for the transactional system updater.
+#
+# Shipped by deploytix-update-gui-git, which the installer only adds to the
+# package list when immutable_root is set — a mutable deployment never
+# receives this file, so no updater appears in its menus.
+
+[Desktop Entry]
+Type=Application
+Name=Deploytix Update
+GenericName=System Updater
+Comment=Update this system transactionally and roll back to a previous snapshot
+Exec=pkexec %BINDIR%/deploytix-update-gui
+Icon=system-software-update
+NoDisplay=false
+StartupNotify=true
+Terminal=false
+Categories=System;Settings;PackageManager;
+Keywords=update;upgrade;packages;snapshot;rollback;immutable;

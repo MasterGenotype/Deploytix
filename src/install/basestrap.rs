@@ -88,6 +88,14 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         "dosfstools".to_string(),
     ]);
 
+    // The graphical updater drives `deploytix update`, which only exists on an
+    // immutable root. On a mutable install there are no snapshots and pacman
+    // works normally, so it is not installed at all — no binary, no desktop
+    // entry, no polkit action.
+    if config.packages.immutable_root {
+        packages.push("deploytix-update-gui-git".to_string());
+    }
+
     // Essential tools
     packages.extend([
         "git".to_string(),
@@ -265,6 +273,7 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 const CUSTOM_PKG_PREFIXES: &[&str] = &[
     "deploytix-git-",
     "deploytix-gui-git-",
+    "deploytix-update-gui-git-",
     "gamescope-git-",
     "tkg-gui-git-",
 ];
@@ -273,6 +282,7 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
 const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "deploytix-git",
     "deploytix-gui-git",
+    "deploytix-update-gui-git",
     "gamescope-git",
     "tkg-gui-git",
 ];
@@ -402,28 +412,14 @@ fn custom_packages_in_sync_db(needed: &[&str]) -> bool {
 
 /// Resolve the home directory of the user who invoked the installer.
 ///
-/// The installer runs as root, either via `sudo` (sets `SUDO_USER`) or
-/// `pkexec`/polkit (sets `PKEXEC_UID`).  This function tries both and
-/// falls back to scanning `/home` for a deploytix checkout.
+/// Wraps [`crate::utils::user::invoking_user_home`] with an installer-specific
+/// last resort: scan `/home` for a deploytix checkout, which covers a plain
+/// root shell where neither `SUDO_USER` nor `PKEXEC_UID` is set.
 fn resolve_invoking_user_home() -> Option<PathBuf> {
-    // 1. SUDO_USER — set by sudo.
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        let home = PathBuf::from(format!("/home/{}", user));
-        if home.is_dir() {
-            return Some(home);
-        }
+    if let Some(home) = crate::utils::user::invoking_user_home() {
+        return Some(home);
     }
 
-    // 2. PKEXEC_UID — set by pkexec (polkit).
-    if let Ok(uid_str) = std::env::var("PKEXEC_UID") {
-        if let Ok(uid) = uid_str.parse::<u32>() {
-            if let Some(home) = home_dir_for_uid(uid) {
-                return Some(home);
-            }
-        }
-    }
-
-    // 3. Scan /home for a directory containing a deploytix checkout.
     let scan_markers = [".gitrepos/deploytix/pkg"];
     if let Ok(entries) = std::fs::read_dir("/home") {
         for entry in entries.flatten() {
@@ -434,25 +430,6 @@ fn resolve_invoking_user_home() -> Option<PathBuf> {
         }
     }
 
-    None
-}
-
-/// Map a numeric UID to its home directory by parsing `/etc/passwd`.
-fn home_dir_for_uid(uid: u32) -> Option<PathBuf> {
-    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-    for line in passwd.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 6 {
-            if let Ok(line_uid) = fields[2].parse::<u32>() {
-                if line_uid == uid {
-                    let home = PathBuf::from(fields[5]);
-                    if home.is_dir() {
-                        return Some(home);
-                    }
-                }
-            }
-        }
-    }
     None
 }
 
@@ -526,7 +503,7 @@ fn locate_prebuilt_packages() -> Vec<PathBuf> {
 /// contains its PKGBUILD.
 fn repo_dir_for_package(pkg_name: &str) -> &'static str {
     match pkg_name {
-        "deploytix-git" | "deploytix-gui-git" => "deploytix",
+        "deploytix-git" | "deploytix-gui-git" | "deploytix-update-gui-git" => "deploytix",
         "gamescope-git" => "gamescope",
         "tkg-gui-git" => "tkg-gui",
         _ => "",
@@ -556,39 +533,6 @@ fn find_pkgbuild_dir(pkg_name: &str) -> Option<PathBuf> {
     }
 
     candidates.into_iter().find(|d| d.join("PKGBUILD").exists())
-}
-
-/// Resolve the username of the user who invoked the installer (via
-/// sudo or pkexec).  `makepkg` refuses to run as root, so we need the
-/// original user.
-fn resolve_invoking_username() -> Option<String> {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if !user.is_empty() && user != "root" {
-            return Some(user);
-        }
-    }
-    if let Ok(uid_str) = std::env::var("PKEXEC_UID") {
-        if let Ok(uid) = uid_str.parse::<u32>() {
-            return username_for_uid(uid);
-        }
-    }
-    None
-}
-
-/// Map a numeric UID to a username by parsing `/etc/passwd`.
-fn username_for_uid(uid: u32) -> Option<String> {
-    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-    for line in passwd.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 6 {
-            if let Ok(line_uid) = fields[2].parse::<u32>() {
-                if line_uid == uid {
-                    return Some(fields[0].to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 /// The embedded PKGBUILD for `pkg_name`, if one exists.
@@ -653,10 +597,10 @@ fn materialize_embedded_pkgbuild(pkg_name: &str, build_user: &str) -> Option<Pat
 /// Returns `None` only when neither is usable, which makes building impossible
 /// since `makepkg` refuses to run as root.
 fn resolve_build_user() -> Option<String> {
-    if let Some(user) = resolve_invoking_username() {
+    if let Some(user) = crate::utils::user::invoking_username() {
         return Some(user);
     }
-    if username_for_uid_exists(FALLBACK_BUILD_USER) {
+    if crate::utils::user::user_exists(FALLBACK_BUILD_USER) {
         info!(
             "No invoking user (not started via sudo/pkexec); building as {}",
             FALLBACK_BUILD_USER
@@ -664,17 +608,6 @@ fn resolve_build_user() -> Option<String> {
         return Some(FALLBACK_BUILD_USER.to_string());
     }
     None
-}
-
-/// Whether `name` exists as an account in `/etc/passwd`.
-fn username_for_uid_exists(name: &str) -> bool {
-    std::fs::read_to_string("/etc/passwd")
-        .map(|passwd| {
-            passwd
-                .lines()
-                .any(|line| line.split(':').next() == Some(name))
-        })
-        .unwrap_or(false)
 }
 
 /// Create a writable scratch home for `build_user` and return it.
@@ -1303,6 +1236,42 @@ mod tests {
                 "embedded key '{repo}' is unreachable from repo_dir_for_package"
             );
         }
+    }
+
+    /// The updater drives `deploytix update`, which cannot work on a mutable
+    /// root, so it must never reach one — not as a stale binary, not as a
+    /// desktop entry. Gating the package is what enforces that.
+    #[test]
+    fn the_update_gui_is_installed_only_on_immutable_roots() {
+        let mut config = crate::config::DeploymentConfig::sample();
+
+        config.packages.immutable_root = false;
+        assert!(
+            !build_package_list(&config).contains(&"deploytix-update-gui-git".to_string()),
+            "a mutable install must not receive the updater"
+        );
+
+        // Both immutable backends must get it: btrfs snapshot sets ...
+        config.packages.immutable_root = true;
+        config.packages.install_grub_btrfs = true;
+        config.disk.use_lvm_thin = false;
+        assert!(build_package_list(&config).contains(&"deploytix-update-gui-git".to_string()));
+
+        // ... and LVM A/B dm-verity slots.
+        config.packages.install_grub_btrfs = false;
+        config.disk.use_lvm_thin = true;
+        assert!(build_package_list(&config).contains(&"deploytix-update-gui-git".to_string()));
+    }
+
+    /// The installer's own GUI ships on every deployment, so the updater must
+    /// be a separate package rather than a file inside it.
+    #[test]
+    fn the_installer_gui_is_installed_unconditionally() {
+        let mut config = crate::config::DeploymentConfig::sample();
+        config.packages.immutable_root = false;
+        let packages = build_package_list(&config);
+        assert!(packages.contains(&"deploytix-gui-git".to_string()));
+        assert!(packages.contains(&"deploytix-git".to_string()));
     }
 
     #[test]

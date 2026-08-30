@@ -1,6 +1,6 @@
 # Maintainer: superphenotype
 pkgbase=deploytix-git
-pkgname=('deploytix-git' 'deploytix-gui-git')
+pkgname=('deploytix-git' 'deploytix-gui-git' 'deploytix-update-gui-git')
 pkgver=1.4.0.r30.g79e0726
 pkgrel=1
 pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
@@ -72,4 +72,23 @@ package_deploytix-gui-git() {
     install -Dm644 "$startdir/deploytix-gui.desktop.out" "$pkgdir/usr/share/applications/deploytix-gui.desktop"
     install -Dm644 com.deploytix.gui.policy "$pkgdir/usr/share/polkit-1/actions/com.deploytix.gui.policy"
     sed -i 's|%BINDIR%|/usr/bin|g' "$pkgdir/usr/share/polkit-1/actions/com.deploytix.gui.policy"
+}
+
+# Separate package on purpose: the transactional updater only works on an
+# immutable root, so `build_package_list` adds it to the install only when
+# immutable_root is set.  A mutable deployment never receives the binary, the
+# desktop entry or the polkit action.
+package_deploytix-update-gui-git() {
+    pkgdesc="Graphical transactional updater for immutable Deploytix installs"
+    depends=('deploytix-git' 'alsa-lib' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'libx11' 'libxcursor' 'wayland' 'mesa')
+    provides=('deploytix-update-gui')
+    conflicts=('deploytix-update-gui')
+
+    cd "$_repodir"
+    install -Dm755 "target/release/deploytix-update-gui" "$pkgdir/usr/bin/deploytix-update-gui"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    sed 's|%BINDIR%|/usr/bin|g' deploytix-update-gui.desktop > "$startdir/deploytix-update-gui.desktop.out"
+    install -Dm644 "$startdir/deploytix-update-gui.desktop.out" "$pkgdir/usr/share/applications/deploytix-update-gui.desktop"
+    install -Dm644 com.deploytix.update-gui.policy "$pkgdir/usr/share/polkit-1/actions/com.deploytix.update-gui.policy"
+    sed -i 's|%BINDIR%|/usr/bin|g' "$pkgdir/usr/share/polkit-1/actions/com.deploytix.update-gui.policy"
 }
