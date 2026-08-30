@@ -15,5 +15,8 @@ pub mod utils;
 #[cfg(feature = "gui")]
 pub mod gui;
 
+#[cfg(feature = "gui")]
+pub mod gui_update;
+
 pub use config::DeploymentConfig;
 pub use utils::error::DeploytixError;

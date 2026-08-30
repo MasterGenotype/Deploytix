@@ -5,13 +5,16 @@ POLKITDIR  := /usr/share/polkit-1/actions
 
 CLI_BIN      := target/release/deploytix
 GUI_BIN      := target/release/deploytix-gui
+UPDATE_GUI_BIN := target/release/deploytix-update-gui
 GCC_BIN      := target/x86_64-unknown-linux-gnu/release/deploytix
 PORTABLE_BIN := target/x86_64-unknown-linux-musl/release/deploytix
 
-.PHONY: all build gui gcc portable install install-cli install-gcc install-portable uninstall clean fmt lint test
+.PHONY: all build gui gcc portable install install-cli install-gcc install-portable install-update-gui uninstall clean fmt lint test
 
 DESKTOP_FILE := deploytix-gui.desktop
 POLKIT_FILE  := com.deploytix.gui.policy
+UPDATE_DESKTOP_FILE := deploytix-update-gui.desktop
+UPDATE_POLKIT_FILE  := com.deploytix.update-gui.policy
 
 ## Default: build CLI
 all: build
@@ -84,11 +87,27 @@ install-portable: portable
 	sudo install -m 755 $(PORTABLE_BIN) $(BINDIR)/deploytix
 	@echo "Installed portable deploytix -> $(BINDIR)/deploytix"
 
+## Install the transactional updater to $(BINDIR)
+##
+## Deliberately NOT part of `install` / `install-all`: the updater only works on
+## an immutable root, and deployed systems get it from the separate
+## deploytix-update-gui-git package, which the installer withholds unless
+## immutable_root is set.  Use this only on an immutable machine.
+install-update-gui: gui
+	sudo mkdir -p $(BINDIR) $(APPDIR) $(POLKITDIR)
+	sudo install -m 755 $(UPDATE_GUI_BIN) $(BINDIR)/deploytix-update-gui
+	sed 's|%BINDIR%|$(BINDIR)|g' $(UPDATE_DESKTOP_FILE) > /tmp/$(UPDATE_DESKTOP_FILE)
+	sudo install -m 644 /tmp/$(UPDATE_DESKTOP_FILE) $(APPDIR)/$(UPDATE_DESKTOP_FILE)
+	@rm -f /tmp/$(UPDATE_DESKTOP_FILE)
+	sudo install -m 644 $(UPDATE_POLKIT_FILE) $(POLKITDIR)/$(UPDATE_POLKIT_FILE)
+	sudo sed -i 's|%BINDIR%|$(BINDIR)|g' $(POLKITDIR)/$(UPDATE_POLKIT_FILE)
+	@echo "Installed deploytix-update-gui -> $(BINDIR)/deploytix-update-gui"
+
 ## Remove installed binaries and desktop entry
 uninstall:
-	rm -f $(BINDIR)/deploytix $(BINDIR)/deploytix-gui
-	rm -f $(APPDIR)/$(DESKTOP_FILE)
-	sudo rm -f $(POLKITDIR)/$(POLKIT_FILE)
+	rm -f $(BINDIR)/deploytix $(BINDIR)/deploytix-gui $(BINDIR)/deploytix-update-gui
+	rm -f $(APPDIR)/$(DESKTOP_FILE) $(APPDIR)/$(UPDATE_DESKTOP_FILE)
+	sudo rm -f $(POLKITDIR)/$(POLKIT_FILE) $(POLKITDIR)/$(UPDATE_POLKIT_FILE)
 	@echo "Uninstalled deploytix and deploytix-gui from $(BINDIR)"
 	@echo "Removed desktop entry from $(APPDIR)"
 	@echo "Removed polkit policy from $(POLKITDIR)"

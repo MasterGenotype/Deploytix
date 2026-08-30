@@ -23,7 +23,7 @@
 //! back. This is documented in `docs/IMMUTABLE_SYSTEM.md`.
 
 use crate::immutable::snapshot::{self, ImmutableDevices};
-use crate::immutable::{boot, detect_devices};
+use crate::immutable::{boot, detect_devices, history};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use tracing::{info, warn};
@@ -212,19 +212,27 @@ pub fn run_update(
     let (local_files, repo_names) = classify_args(extra_packages);
 
     // Everything from here is unwound on failure so a bad update leaves nothing.
-    let result = (|| -> Result<()> {
+    let started_at = history::now_secs();
+    let start = std::time::Instant::now();
+
+    let result = (|| -> Result<history::PackageChanges> {
         cmd.run("sh", &["-c", &mount_set_cmd(&devices, &id)])?;
         let target = target_dir(&id);
         // Local .pkg.tar.zst files are copied into the shared /var so the chroot
         // can reach them by absolute path and install them with `pacman -U`.
         let staged = stage_local_pkgs(cmd, &local_files)?;
+        // Bracket the transaction with two `pacman -Q` reads. The pacman DB is
+        // on the shared /var (rbound into the chroot), so it is not snapshotted
+        // and these two reads are the only way to know what this set changed.
+        let before = history::query_packages(cmd, &target);
         info!("[immutable] Running pacman in set {}", id);
         for pac in pacman_cmds(&staged, &repo_names) {
             cmd.run_in_chroot(&target, &pac)?;
         }
+        let after = history::query_packages(cmd, &target);
         // Regenerate the (shared) initramfs from within the updated set.
         cmd.run_in_chroot(&target, "mkinitcpio -P")?;
-        Ok(())
+        Ok(history::diff(&before, &after))
     })();
 
     // Always release the chroot mounts and clear the package staging dir.
@@ -233,8 +241,25 @@ pub fn run_update(
         let _ = std::fs::remove_dir_all(PKG_STAGE_DIR);
     }
 
+    // Best-effort history entry, written for failures too — a failed update is
+    // exactly what a user wants to look at afterwards.
+    if !cmd.is_dry_run() {
+        history::write_record(&history::UpdateRecord {
+            started_at,
+            duration_secs: start.elapsed().as_secs(),
+            backend: history::Backend::Btrfs,
+            target: id.clone(),
+            request: history::Request::classify(&repo_names, &local_files),
+            outcome: match &result {
+                Ok(_) => history::Outcome::Succeeded,
+                Err(e) => history::Outcome::Failed(e.to_string()),
+            },
+            changes: result.as_ref().ok().cloned().unwrap_or_default(),
+        });
+    }
+
     match result {
-        Ok(()) => {
+        Ok(_) => {
             boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
             let running = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
                 .unwrap_or_else(|| "@".to_string());
