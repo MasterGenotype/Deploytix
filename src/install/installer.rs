@@ -2434,6 +2434,16 @@ impl Installer {
         );
         self.cmd.run("sh", &["-c", &sed])?;
 
+        // Both slots start as identical clones, so archive the installed kernel
+        // for each: /boot is shared, and without an archive the first rollback
+        // would boot whatever kernel the newest update installed.
+        let boot_root = format!("{}/boot", INSTALL_ROOT);
+        for slot in ["A", "B"] {
+            if let Err(e) = crate::immutable::bootset::archive(&self.cmd, &boot_root, slot) {
+                warn!("Could not archive kernel images for slot {}: {}", slot, e);
+            }
+        }
+
         let _ = self.cmd.run(
             "sh",
             &[

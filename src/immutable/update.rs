@@ -32,7 +32,7 @@
 //! back. This is documented in `docs/IMMUTABLE_SYSTEM.md`.
 
 use crate::immutable::snapshot::{self, ImmutableDevices};
-use crate::immutable::{boot, detect_devices};
+use crate::immutable::{boot, bootset, detect_devices};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use tracing::{info, warn};
@@ -201,8 +201,16 @@ fn prune_sets(
     for id in to_delete {
         if let Err(e) = snapshot::delete_set(cmd, devices, id) {
             warn!("[immutable] Failed to prune set {}: {}", id, e);
+            continue;
         }
+        // The archive is only useful for booting the set it belongs to, and
+        // /boot is a small partition — it goes with it.
+        bootset::remove(cmd, bootset::BOOT_ROOT, id);
     }
+    // Sweep archives whose sets are gone, so a small /boot cannot fill with
+    // kernels nothing can boot.
+    let live: Vec<String> = snapshot::list_sets(cmd, &devices.root_fs).unwrap_or_default();
+    bootset::prune_orphans(cmd, bootset::BOOT_ROOT, &live);
     Ok(())
 }
 
@@ -304,6 +312,16 @@ pub fn run_update(
 
     match result {
         Ok(()) => {
+            // Capture the kernel this set was built with before anything moves
+            // the pointer: /boot is shared, so this copy is what makes a later
+            // rollback to this set boot the kernel its modules match.
+            if let Err(e) = bootset::archive(cmd, bootset::BOOT_ROOT, &id) {
+                warn!(
+                    "[immutable] Could not archive kernel images for set {} ({}) — \
+                     rolling back to it later will keep the then-current kernel",
+                    id, e
+                );
+            }
             // Re-activate even when the pointer already names this set: the
             // update may have installed a kernel, and grub.cfg lists those.
             boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
@@ -333,7 +351,13 @@ pub fn run_update(
             } else {
                 warn!("[immutable] Update failed; discarding set {}", id);
                 let _ = snapshot::delete_set(cmd, &devices, &id);
+                bootset::remove(cmd, bootset::BOOT_ROOT, &id);
             }
+            // pacman's kernel hook and mkinitcpio write straight through the
+            // rbind-mounted /boot, so a failure this late can leave the new
+            // kernel over the canonical names while the pointer still selects
+            // the old set. Put that set's own kernel back.
+            let _ = bootset::restore(cmd, bootset::BOOT_ROOT, &bootset::archive_name(&running));
             Err(e)
         }
     }

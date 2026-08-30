@@ -140,10 +140,14 @@ intercepts *interactive* `pacman` upgrade/install/remove and points you at
 
 ## Caveats & limitations
 
-- **Shared `/boot`.** The kernel and initramfs live on the shared `/boot`
-  partition, so a rollback restores userspace but boots the most recently
-  installed kernel. The `verity-ab` hook is version-independent, so this is safe;
-  only kernel *contents* are not per-slot.
+- **Shared `/boot`, per-slot kernel archives.** The slot images exclude `/boot`,
+  so the kernel is shared. Each slot keeps a copy of the images it was built
+  with under `/boot/deploytix/<slot>/`, and `activate_slot` restores that copy
+  over the canonical names before the pointer starts selecting it — so a
+  rollback boots the kernel its modules match, and a failed update restores the
+  running slot's kernel instead of leaving the new one behind. Both slots are
+  archived at install, since they start as identical clones. See
+  `src/immutable/bootset.rs`.
 - **Shared package DB.** `/var/lib/pacman` is on the shared `/var`, so a rollback
   restores the slot's `/usr` files but not the package database — the DB reflects
   the newest update. (Same trade-off as the btrfs backend.)

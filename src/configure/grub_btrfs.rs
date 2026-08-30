@@ -16,6 +16,7 @@ use crate::config::{DeploymentConfig, InitSystem};
 use crate::configure::bootloader::uses_standalone_grub;
 use crate::configure::packages::pacman_install_chroot_reviewed_status;
 use crate::disk::formatting::get_partition_uuid;
+use crate::immutable::bootset;
 use crate::immutable::snapshot::{self, ImmutableDevices};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -112,6 +113,12 @@ pub fn create_baseline_snapshot(
             "Created baseline immutable snapshot set {} (pristine install)",
             id
         );
+        // Give `@` and the baseline set their kernel archives now: /boot is
+        // shared, so without them the first rollback to either would boot
+        // whatever kernel the newest update happened to install.
+        let boot_root = format!("{install_root}/boot");
+        bootset::archive(cmd, &boot_root, bootset::BASE_NAME)?;
+        bootset::archive(cmd, &boot_root, &id)?;
     } else {
         info!("Creating baseline snapper snapshot of / (pristine install)");
         cmd.run_in_chroot(install_root, SNAPPER_BASELINE_CMD)?;

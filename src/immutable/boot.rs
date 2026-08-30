@@ -14,6 +14,7 @@
 //! `grub-probe` works), points that root's `/etc/default/grub` at itself, and
 //! runs `grub-mkconfig` there — writing the shared `/boot/grub/grub.cfg`.
 
+use crate::immutable::bootset;
 use crate::immutable::snapshot::{self, ImmutableDevices};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -117,6 +118,13 @@ pub fn activate_target(
     root_subvol: &str,
 ) -> Result<()> {
     let (usr, etc) = paired_subvols(root_subvol);
+
+    // Put this set's own kernel images back under the canonical names before
+    // regenerating grub, so the entry `10_linux` writes and the modules in the
+    // set's /usr/lib/modules are the same kernel. Every pointer move goes
+    // through here, so that holds for updates and rollbacks alike.
+    bootset::restore(cmd, bootset::BOOT_ROOT, &bootset::archive_name(root_subvol))?;
+
     info!(
         "[immutable] Regenerating grub.cfg with default boot = {} (via chroot)",
         root_subvol

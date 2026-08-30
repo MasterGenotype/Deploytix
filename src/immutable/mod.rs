@@ -24,6 +24,7 @@
 //! `@usr` covers them for free.
 
 pub mod boot;
+pub mod bootset;
 pub mod etc;
 pub mod lockdown;
 pub mod lvm_ab;

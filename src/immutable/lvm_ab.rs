@@ -22,6 +22,7 @@
 
 use crate::config::Filesystem;
 use crate::disk::lvm::{ab, lv_path};
+use crate::immutable::bootset;
 use crate::immutable::update::{self, UpdateOptions};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
@@ -176,6 +177,11 @@ fn set_pointer_sed(file: &str, slot: &str, roothash: &str) -> String {
 /// `/etc/default/grub`. No `grub-mkconfig` — the live root is a dm-verity device
 /// that `grub-probe` cannot canonicalize.
 pub fn activate_slot(cmd: &CommandRunner, slot: &str, roothash: &str) -> Result<()> {
+    // The slot images exclude /boot, so the kernel is shared: put this slot's
+    // own images back under the canonical names the GRUB entries reference,
+    // before the pointer starts selecting it.
+    bootset::restore(cmd, bootset::BOOT_ROOT, slot)?;
+
     info!(
         "[lvm-ab] Repointing default boot to slot {} (roothash {})",
         slot,
@@ -321,7 +327,20 @@ pub fn run_update(
                 target
             );
         }
+        // pacman's kernel hook and mkinitcpio wrote through the rbind-mounted
+        // /boot, so undo that: the running slot keeps its own kernel.
+        let _ = bootset::restore(cmd, bootset::BOOT_ROOT, &running);
         return Err(e);
+    }
+
+    // Record the kernel this slot was built with before the pointer moves, so
+    // rolling back to it later boots the kernel its modules match.
+    if let Err(e) = bootset::archive(cmd, bootset::BOOT_ROOT, &target) {
+        warn!(
+            "[lvm-ab] Could not archive kernel images for slot {} ({}) — rolling back \
+             to it later will keep the then-current kernel",
+            target, e
+        );
     }
 
     // Seal the freshly built slot with a new dm-verity tree and repoint boot.
