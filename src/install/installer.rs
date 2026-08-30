@@ -679,6 +679,7 @@ impl Installer {
             self.config.disk.encryption,
             self.config.disk.use_lvm_thin,
             &self.config.system.bootloader,
+            self.config.immutable_lvm_ab(),
         )?;
 
         // Get device info and compute layout
@@ -2203,9 +2204,55 @@ impl Installer {
         Ok(())
     }
 
-    /// Mount slot A (root image) at INSTALL_ROOT plus the persistent var/home for
-    /// installation. Slot B, the hash LVs, and the /etc overlay are left alone —
-    /// slot B is cloned and both slots sealed at finalize.
+    /// The /boot source device for the A/B layout: the LUKS1-mapped device when
+    /// boot is encrypted, otherwise the BOOT partition.
+    fn ab_boot_source(&self) -> Result<String> {
+        if let Some(ref boot_container) = self.luks_boot_container {
+            return Ok(boot_container.mapped_path.clone());
+        }
+        let layout = self.layout.as_ref().unwrap();
+        let boot_part = layout
+            .partitions
+            .iter()
+            .find(|p| p.is_boot_fs)
+            .ok_or_else(|| {
+                DeploytixError::ConfigError("No Boot partition found in layout".to_string())
+            })?;
+        Ok(partition_path(&self.config.disk.device, boot_part.number))
+    }
+
+    /// Mount /boot (honouring the `@boot` subvolume on btrfs) and the EFI ESP
+    /// under INSTALL_ROOT — needed during install (basestrap kernel, mkinitcpio,
+    /// grub-install/grub-mkconfig all write there) and when re-writing the boot
+    /// pointer at finalize.
+    fn mount_ab_boot_and_efi(&self) -> Result<()> {
+        let layout = self.layout.as_ref().unwrap();
+        let boot_source = self.ab_boot_source()?;
+        if self.config.disk.boot_filesystem == Filesystem::Btrfs {
+            mount_boot_btrfs_subvolume(&self.cmd, &boot_source, INSTALL_ROOT)?;
+        } else {
+            let boot_mount = format!("{}/boot", INSTALL_ROOT);
+            if !self.cmd.is_dry_run() {
+                fs::create_dir_all(&boot_mount)?;
+            }
+            self.cmd.run("mount", &[&boot_source, &boot_mount])?;
+        }
+
+        let efi_part = layout.partitions.iter().find(|p| p.is_efi).ok_or_else(|| {
+            DeploytixError::ConfigError("No EFI partition found in layout".to_string())
+        })?;
+        let efi_device = partition_path(&self.config.disk.device, efi_part.number);
+        let efi_mount = format!("{}/boot/efi", INSTALL_ROOT);
+        if !self.cmd.is_dry_run() {
+            fs::create_dir_all(&efi_mount)?;
+        }
+        self.cmd.run("mount", &[&efi_device, &efi_mount])?;
+        Ok(())
+    }
+
+    /// Mount slot A (root image) at INSTALL_ROOT, the persistent var/home, and the
+    /// shared /boot + EFI for installation. Slot B, the hash LVs, and the /etc
+    /// overlay are left alone — slot B is cloned and both slots sealed at finalize.
     fn mount_lvm_ab_volumes(&self) -> Result<()> {
         use crate::disk::lvm::{ab, AbVolumeRole};
         info!("[Phase 2/6] Mounting slot A to {}", INSTALL_ROOT);
@@ -2233,6 +2280,20 @@ impl Installer {
             }
             self.cmd.run("mount", &[&lv_device, &mount_point])?;
             info!("Mounted {} -> {}", lv_device, mount_point);
+        }
+
+        // Shared /boot + EFI (kernel, initramfs and GRUB config are written here
+        // during install and must land on the real partitions, not inside the
+        // sealed slot-A image).
+        self.mount_ab_boot_and_efi()?;
+
+        // Enable swap partition if present.
+        for part in &self.layout.as_ref().unwrap().partitions {
+            if part.is_swap {
+                let swap_device = partition_path(&self.config.disk.device, part.number);
+                info!("Enabling swap on {}", swap_device);
+                self.cmd.run("swapon", &[&swap_device])?;
+            }
         }
         Ok(())
     }
@@ -2338,37 +2399,23 @@ impl Installer {
             return Ok(());
         }
 
-        // Re-mount /boot (and its EFI child) at INSTALL_ROOT so we can write the
-        // state file and patch grub.cfg using the live absolute paths the engine
-        // expects, then unmount again.
-        let boot_dev = self
-            .luks_boot_container
-            .as_ref()
-            .map(|c| c.mapped_path.clone())
-            .unwrap_or_else(|| {
-                // Plain boot partition by BOOT label.
-                "/dev/disk/by-partlabel/BOOT".to_string()
-            });
-        let mount_boot = format!(
-            "mkdir -p {r}/boot; mount {dev} {r}/boot 2>/dev/null || true",
-            r = INSTALL_ROOT,
-            dev = boot_dev
-        );
-        self.cmd.run("sh", &["-c", &mount_boot])?;
+        // Re-mount /boot (honouring @boot on btrfs) and EFI at INSTALL_ROOT so we
+        // can write the state file and patch grub.cfg, then unmount again.
+        self.mount_ab_boot_and_efi()?;
 
-        // State file lives on /boot.
+        // State file lives on the shared /boot.
         let state_path = format!("{}/boot/{}", INSTALL_ROOT, "deploytix-slots.conf");
         fs::write(&state_path, state.to_conf())?;
 
-        // Patch the installed grub.cfg + /etc/default/grub (still on INSTALL_ROOT).
+        // Patch the authoritative grub.cfg on /boot with slot A's real root hash.
+        // /etc/default/grub lives inside the now-sealed slot A (unmounted here), so
+        // only grub.cfg is reachable — which is the one that governs the next boot.
         let grub_cfg = format!("{}/boot/grub/grub.cfg", INSTALL_ROOT);
-        let grub_default = format!("{}/etc/default/grub", INSTALL_ROOT);
         let sed = format!(
             "sed -i 's|deploytix.slot=[^ \"]*|deploytix.slot=A|g; \
-             s|deploytix.roothash=[^ \"]*|deploytix.roothash={h}|g' {cfg} {def} 2>/dev/null || true",
+             s|deploytix.roothash=[^ \"]*|deploytix.roothash={h}|g' {cfg} 2>/dev/null || true",
             h = roothash_a,
             cfg = grub_cfg,
-            def = grub_default,
         );
         self.cmd.run("sh", &["-c", &sed])?;
 
@@ -2376,7 +2423,7 @@ impl Installer {
             "sh",
             &[
                 "-c",
-                &format!("umount {r}/boot 2>/dev/null || true", r = INSTALL_ROOT),
+                &format!("umount -R {r}/boot 2>/dev/null || true", r = INSTALL_ROOT),
             ],
         );
         info!("A/B slot state written and boot pointer set to slot A");

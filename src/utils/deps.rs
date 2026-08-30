@@ -25,6 +25,8 @@ fn binary_to_package() -> HashMap<&'static str, &'static str> {
 
     // Encryption
     map.insert("cryptsetup", "cryptsetup");
+    // dm-verity (LVM immutable A/B) — provided by cryptsetup
+    map.insert("veritysetup", "cryptsetup");
 
     // LVM
     map.insert("pvcreate", "lvm2");
@@ -57,6 +59,7 @@ pub fn required_binaries(
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
+    needs_verity: bool,
 ) -> Vec<&'static str> {
     let mut bins = vec![
         "sfdisk",
@@ -90,6 +93,12 @@ pub fn required_binaries(
         bins.push("cryptsetup");
     }
 
+    // dm-verity sealing (LVM immutable A/B) needs veritysetup, which ships with
+    // cryptsetup — required even on unencrypted A/B installs.
+    if needs_verity {
+        bins.push("veritysetup");
+    }
+
     // LVM for LVM thin provisioning (feature-driven)
     if use_lvm_thin {
         bins.push("pvcreate");
@@ -115,6 +124,7 @@ pub fn check_dependencies(
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
+    needs_verity: bool,
 ) -> Vec<String> {
     let required = required_binaries(
         filesystem,
@@ -122,6 +132,7 @@ pub fn check_dependencies(
         encryption,
         use_lvm_thin,
         bootloader,
+        needs_verity,
     );
     let bin_to_pkg = binary_to_package();
 
@@ -153,6 +164,7 @@ pub fn ensure_dependencies(
     encryption: bool,
     use_lvm_thin: bool,
     bootloader: &Bootloader,
+    needs_verity: bool,
 ) -> Result<()> {
     let required = required_binaries(
         filesystem,
@@ -160,6 +172,7 @@ pub fn ensure_dependencies(
         encryption,
         use_lvm_thin,
         bootloader,
+        needs_verity,
     );
     let bin_to_pkg = binary_to_package();
 
@@ -218,6 +231,7 @@ pub fn ensure_dependencies(
         encryption,
         use_lvm_thin,
         bootloader,
+        needs_verity,
     );
     if !still_missing.is_empty() {
         return Err(crate::utils::error::DeploytixError::ConfigError(format!(
