@@ -3,18 +3,20 @@
 use crate::config::{DeploymentConfig, Filesystem, SwapType};
 use crate::configure;
 use crate::configure::encryption::{
-    close_multi_luks, setup_multi_volume_encryption, LuksContainer,
+    close_multi_luks, setup_multi_volume_encryption, verify_luks_credential, AdoptSpec, Credential,
+    LuksContainer,
 };
 use crate::configure::keyfiles::{setup_keyfiles_for_volumes, VolumeKeyfile};
 use crate::desktop;
 use crate::disk::detection::{get_device_info, partition_path};
+use crate::disk::existing::{find_home_partition, read_partition_table, HomeMatch};
 use crate::disk::formatting::{
     create_btrfs_subvolumes, format_all_partitions, format_boot_partition, format_efi,
     format_partition, format_swap, mount_btrfs_subvolumes,
 };
 use crate::disk::layouts::{
     compute_layout_from_config, get_luks_partitions, multi_volume_subvolumes, print_layout_summary,
-    ComputedLayout,
+    ComputedLayout, PinnedExtent,
 };
 use crate::disk::lvm::{self, lv_path, ThinVolumeDef};
 use crate::disk::partitioning::apply_partitions;
@@ -30,7 +32,7 @@ use crate::install::{
 use crate::utils::command::{CommandRunner, OperationRecord};
 use crate::utils::deps::ensure_dependencies;
 use crate::utils::error::{DeploytixError, Result};
-use crate::utils::prompt::warn_confirm;
+use crate::utils::prompt::{prompt_password, warn_confirm};
 use crate::utils::signal;
 use std::fs;
 use std::path::PathBuf;
@@ -91,6 +93,33 @@ pub struct Installer {
     skip_confirm: bool,
     /// Optional progress callback for GUI integration
     progress_cb: Option<ProgressCallback>,
+    /// Set when this run is a recovery install adopting an existing /home.
+    /// Resolved in `prepare()`, before anything is written to the disk.
+    recovery: Option<RecoveryPlan>,
+}
+
+/// What a recovery install resolved about the existing disk, established in
+/// the prepare phase and relied on by every later phase.
+///
+/// Its existence is the proof that the credential was verified *before*
+/// repartitioning: if it could not be verified, `prepare()` fails and no
+/// phase that writes to the disk ever runs.
+#[derive(Debug)]
+struct RecoveryPlan {
+    /// The partition being preserved, exactly as it exists on disk.
+    home_partition: crate::disk::existing::ExistingPartition,
+    /// The credential proven to unlock it (`None` when it is not encrypted).
+    credential: Option<Credential>,
+}
+
+impl RecoveryPlan {
+    /// The adopt instruction for the encryption and keyfile phases.
+    fn adopt_spec(&self) -> Option<AdoptSpec> {
+        self.credential.as_ref().map(|c| AdoptSpec {
+            volume_name: "Home".to_string(),
+            credential: c.clone(),
+        })
+    }
 }
 
 impl Installer {
@@ -107,6 +136,7 @@ impl Installer {
             luks_lvm_container: None,
             skip_confirm: false,
             progress_cb: None,
+            recovery: None,
         }
     }
 
@@ -655,15 +685,32 @@ impl Installer {
         );
 
         // Compute partition layout (features are applied as layers)
-        let layout = compute_layout_from_config(&self.config.disk, disk_mib)?;
+        let mut layout = compute_layout_from_config(&self.config.disk, disk_mib)?;
+
+        // Recovery install: resolve the existing /home and prove we can open
+        // it, then pin it in the layout. All of this happens before the
+        // confirmation prompt and long before partition_disk() runs — a
+        // credential that only fails later would leave the disk already
+        // repartitioned and the data gone.
+        if self.config.disk.recovery.reuse_home {
+            self.recovery = Some(self.resolve_recovery(&mut layout)?);
+        }
+
         print_layout_summary(&layout);
         self.layout = Some(layout);
 
         // Confirm with user
-        let warning = format!(
-            "This will ERASE ALL DATA on {}. This operation cannot be undone!",
-            self.config.disk.device
-        );
+        let warning = match &self.recovery {
+            Some(plan) => format!(
+                "This will ERASE ALL DATA on {} EXCEPT the existing HOME partition \
+                 ({}). This operation cannot be undone!",
+                self.config.disk.device, plan.home_partition.node,
+            ),
+            None => format!(
+                "This will ERASE ALL DATA on {}. This operation cannot be undone!",
+                self.config.disk.device
+            ),
+        };
 
         if !self.cmd.is_dry_run() && !self.skip_confirm && !warn_confirm(&warning)? {
             return Err(crate::utils::error::DeploytixError::UserCancelled);
@@ -675,6 +722,152 @@ impl Installer {
         }
 
         Ok(())
+    }
+
+    /// Resolve the existing /home for a recovery install and pin it in the
+    /// layout.
+    ///
+    /// Four things have to hold before this run may touch the disk:
+    /// the existing table has a single unambiguous HOME partition; its
+    /// filesystem matches what the config asks for; the supplied credential
+    /// opens it; and the layout can be written without any other partition
+    /// landing on top of it (enforced when the sfdisk script is built).
+    fn resolve_recovery(&self, layout: &mut ComputedLayout) -> Result<RecoveryPlan> {
+        let device = &self.config.disk.device;
+        info!(
+            "Recovery install: reading the existing partition table on {}",
+            device
+        );
+
+        let table = read_partition_table(device)?;
+
+        let home = match find_home_partition(&table) {
+            HomeMatch::Found(p) => p.clone(),
+            HomeMatch::NotFound => {
+                return Err(DeploytixError::ValidationError(format!(
+                    "recovery.reuse_home: no HOME partition exists on {}. Run \
+                     `deploytix inspect {}` to see the current table.",
+                    device, device
+                )))
+            }
+            HomeMatch::Ambiguous(candidates) => {
+                let nodes: Vec<&str> = candidates.iter().map(|p| p.node.as_str()).collect();
+                return Err(DeploytixError::ValidationError(format!(
+                    "recovery.reuse_home: {} partitions on {} are named HOME ({}). \
+                     Refusing to guess which one to preserve.",
+                    candidates.len(),
+                    device,
+                    nodes.join(", "),
+                )));
+            }
+        };
+
+        info!(
+            "Recovery install: preserving {} ({} sectors at {}, {})",
+            home.node,
+            home.size_sectors,
+            home.start_sector,
+            home.fs_type.as_deref().unwrap_or("no filesystem signature"),
+        );
+
+        // Verify the credential now, while the disk is still intact.
+        let credential = if self.config.disk.encryption {
+            if !home.is_luks() {
+                return Err(DeploytixError::ValidationError(format!(
+                    "recovery.reuse_home: {} is {}, but this install is encrypted. \
+                     The existing home is not a LUKS container and cannot be adopted.",
+                    home.node,
+                    home.fs_type.as_deref().unwrap_or("unformatted"),
+                )));
+            }
+            Some(self.resolve_home_credential(&home.node)?)
+        } else {
+            // Unencrypted: the filesystem must already match, since the
+            // partition will be mounted as-is rather than formatted.
+            let expected = self.config.disk.filesystem.to_string();
+            match home.fs_type.as_deref() {
+                Some(found) if found.eq_ignore_ascii_case(&expected) => {}
+                other => {
+                    return Err(DeploytixError::ValidationError(format!(
+                        "recovery.reuse_home: {} holds {}, but the config asks for {}. \
+                         The preserved home is never reformatted, so the filesystems \
+                         must match.",
+                        home.node,
+                        other.unwrap_or("no recognisable filesystem"),
+                        expected,
+                    )))
+                }
+            }
+            None
+        };
+
+        // Pin the layout's /home entry to the extent that already exists, so
+        // sfdisk rewrites that table entry unchanged.
+        let home_part = layout
+            .partitions
+            .iter_mut()
+            .find(|p| p.mount_point.as_deref() == Some("/home"))
+            .ok_or_else(|| {
+                DeploytixError::ConfigError(
+                    "recovery.reuse_home: the computed layout has no /home partition".to_string(),
+                )
+            })?;
+
+        if home_part.number != home.number {
+            return Err(DeploytixError::ValidationError(format!(
+                "recovery.reuse_home: the existing HOME is partition {} but this \
+                 layout places /home at partition {}. Adjust disk.partitions so the \
+                 ordering matches the disk, or reinstall without reuse_home.",
+                home.number, home_part.number,
+            )));
+        }
+
+        home_part.pinned = Some(PinnedExtent {
+            start_sector: home.start_sector,
+            size_sectors: home.size_sectors,
+            part_uuid: home.part_uuid.clone(),
+        });
+
+        Ok(RecoveryPlan {
+            home_partition: home,
+            credential,
+        })
+    }
+
+    /// Obtain a credential that demonstrably opens the existing HOME
+    /// container: the configured keyfile, else a prompted passphrase.
+    fn resolve_home_credential(&self, node: &str) -> Result<Credential> {
+        let recovery = &self.config.disk.recovery;
+
+        if let Some(path) = &recovery.home_keyfile {
+            let credential = Credential::Keyfile(path.clone());
+            match verify_luks_credential(&self.cmd, node, &credential) {
+                Ok(()) => return Ok(credential),
+                Err(e) if !recovery.allow_passphrase_fallback => return Err(e),
+                Err(e) => warn!("{} — falling back to a passphrase prompt", e),
+            }
+        }
+
+        if !recovery.allow_passphrase_fallback {
+            return Err(DeploytixError::ValidationError(format!(
+                "recovery.reuse_home: no credential available for {} \
+                 (set recovery.home_keyfile or allow_passphrase_fallback)",
+                node
+            )));
+        }
+
+        // In dry-run there is nothing to unlock and nothing to prompt for.
+        if self.cmd.is_dry_run() {
+            return Ok(Credential::Passphrase(String::new()));
+        }
+
+        let passphrase = prompt_password(
+            &format!("Passphrase for the existing home container ({})", node),
+            false,
+        )?;
+        let credential = Credential::Passphrase(passphrase);
+        verify_luks_credential(&self.cmd, node, &credential)?;
+        Ok(credential)
     }
 
     /// Partition the disk
@@ -1294,11 +1487,13 @@ impl Installer {
             ));
         }
 
+        let adopt = self.recovery.as_ref().and_then(|r| r.adopt_spec());
         let containers = setup_multi_volume_encryption(
             &self.cmd,
             &self.config,
             &self.config.disk.device,
             &all_luks_parts,
+            adopt.as_ref(),
         )?;
 
         self.luks_containers = containers;
@@ -1336,8 +1531,21 @@ impl Installer {
 
         let layout = self.layout.as_ref().unwrap();
 
-        // Format each LUKS-mapped device with the configured filesystem
+        // Format each LUKS-mapped device with the configured filesystem.
+        // An adopted container is skipped: it was opened, not created, and
+        // mkfs would destroy the data the recovery install is preserving.
+        let adopt = self.recovery.as_ref().and_then(|r| r.adopt_spec());
         for container in &self.luks_containers {
+            if adopt
+                .as_ref()
+                .is_some_and(|a| a.matches(&container.volume_name))
+            {
+                info!(
+                    "Preserving existing filesystem on {} ({}) — not formatting",
+                    container.mapped_path, container.volume_name
+                );
+                continue;
+            }
             format_partition(
                 &self.cmd,
                 &container.mapped_path,
@@ -1559,8 +1767,14 @@ impl Installer {
             all_containers.push(boot_container.clone());
         }
 
-        let keyfiles =
-            setup_keyfiles_for_volumes(&self.cmd, &all_containers, password, INSTALL_ROOT)?;
+        let adopt_owned = self.recovery.as_ref().and_then(|r| r.adopt_spec());
+        let keyfiles = setup_keyfiles_for_volumes(
+            &self.cmd,
+            &all_containers,
+            password,
+            INSTALL_ROOT,
+            adopt_owned.as_ref(),
+        )?;
 
         self.keyfiles = keyfiles;
         info!("Keyfiles created for {} volumes", all_containers.len());
@@ -2255,11 +2469,14 @@ impl Installer {
             return Ok(());
         }
 
+        // Recovery installs are rejected for the LVM backends in
+        // validate_recovery(), so there is never a volume to adopt here.
         let keyfiles = configure::keyfiles::setup_keyfiles_for_volumes(
             &self.cmd,
             &all_containers,
             password,
             INSTALL_ROOT,
+            None,
         )?;
 
         self.keyfiles = keyfiles;
@@ -2298,5 +2515,192 @@ impl Installer {
         configure::secureboot::print_enrollment_instructions(&self.config);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CustomPartitionEntry;
+
+    /// A config whose layout matches the scratch disk the ignored tests
+    /// below expect: EFI, BOOT, then ROOT/USR/VAR/HOME as partitions 3-6.
+    fn recovery_config(device: &str, keyfile: Option<&str>) -> DeploymentConfig {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.device = device.to_string();
+        cfg.disk.filesystem = Filesystem::Btrfs;
+        cfg.disk.encryption = true;
+        cfg.disk.encryption_password = Some("unused-for-adoption".to_string());
+        cfg.disk.swap_type = SwapType::ZramOnly;
+        cfg.disk.use_lvm_thin = false;
+        cfg.disk.partitions = vec![
+            CustomPartitionEntry {
+                mount_point: "/".to_string(),
+                label: None,
+                size_mib: 6144,
+                encryption: None,
+            },
+            CustomPartitionEntry {
+                mount_point: "/usr".to_string(),
+                label: None,
+                size_mib: 8192,
+                encryption: None,
+            },
+            CustomPartitionEntry {
+                mount_point: "/var".to_string(),
+                label: None,
+                size_mib: 4096,
+                encryption: None,
+            },
+            CustomPartitionEntry {
+                mount_point: "/home".to_string(),
+                label: None,
+                size_mib: 0,
+                encryption: None,
+            },
+        ];
+        cfg.disk.recovery.reuse_home = true;
+        cfg.disk.recovery.home_keyfile = keyfile.map(str::to_string);
+        cfg.disk.recovery.allow_passphrase_fallback = false;
+        cfg
+    }
+
+    /// Resolving a recovery install reads the disk and verifies the
+    /// credential for real, so it needs a scratch disk. Ignored by default;
+    /// set one up with:
+    ///
+    /// ```sh
+    /// truncate -s 40G /tmp/rec.img
+    /// sfdisk /tmp/rec.img <<'PARTS'
+    /// label: gpt
+    /// unit: sectors
+    /// start=2048,     size=1048576,  type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI"
+    /// start=1050624,  size=4194304,  type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="BOOT"
+    /// start=5244928,  size=12582912, type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name="ROOT"
+    /// start=17827840, size=16777216, type=3B8F8425-20E0-4F3B-907F-1A25A76F98E8, name="USR"
+    /// start=34605056, size=8388608,  type=4D21B016-B534-45C2-A9FB-5C16E091FD2D, name="VAR"
+    /// start=42993664, size=40892383, type=933AC7E1-2EB4-4F13-B844-0E14E2AEF915, name="HOME"
+    /// PARTS
+    /// losetup -f --show /tmp/rec.img   # assume /dev/loop0
+    /// partx -a /dev/loop0
+    /// head -c 512 /dev/urandom > /tmp/good.key
+    /// head -c 512 /dev/urandom > /tmp/bad.key
+    /// cryptsetup luksFormat --type luks2 --batch-mode \
+    ///     --key-file /tmp/good.key /dev/loop0p6
+    /// cargo test --lib install::installer -- --ignored
+    /// ```
+    const SCRATCH_DEVICE: &str = "/dev/loop0";
+
+    /// HOME's extent from the scratch disk above.
+    const HOME_START: u64 = 42_993_664;
+    const HOME_SECTORS: u64 = 40_892_383;
+
+    fn scratch_layout(cfg: &DeploymentConfig) -> ComputedLayout {
+        // 40 GiB, matching the scratch image.
+        compute_layout_from_config(&cfg.disk, 40 * 1024).expect("layout computes")
+    }
+
+    /// The whole contract of the prepare phase: identify the existing home,
+    /// prove the credential opens it, and pin it to its exact on-disk extent
+    /// — all before anything is written.
+    #[test]
+    #[ignore = "needs a prepared scratch disk (see the module docs)"]
+    fn resolves_and_pins_the_existing_home() {
+        let cfg = recovery_config(SCRATCH_DEVICE, Some("/tmp/good.key"));
+        let installer = Installer::new(cfg, false);
+        let mut layout = scratch_layout(&installer.config);
+
+        let plan = installer
+            .resolve_recovery(&mut layout)
+            .expect("the existing home must resolve");
+
+        assert_eq!(plan.home_partition.node, "/dev/loop0p6");
+        assert!(plan.home_partition.is_luks());
+        assert!(plan.adopt_spec().is_some_and(|a| a.matches("Home")));
+
+        let home = layout
+            .partitions
+            .iter()
+            .find(|p| p.mount_point.as_deref() == Some("/home"))
+            .expect("layout has /home");
+        let pin = home.pinned.as_ref().expect("/home must be pinned");
+        assert_eq!(pin.start_sector, HOME_START);
+        assert_eq!(pin.size_sectors, HOME_SECTORS);
+        assert!(
+            pin.part_uuid.is_some(),
+            "the original PARTUUID is carried over"
+        );
+
+        // Nothing else may be pinned — the rest of the disk is erased.
+        assert_eq!(
+            layout
+                .partitions
+                .iter()
+                .filter(|p| p.pinned.is_some())
+                .count(),
+            1
+        );
+
+        // And the table that would actually be written preserves the extent
+        // verbatim, with no other partition placed over it.
+        let script = crate::disk::partitioning::build_sfdisk_script(
+            SCRATCH_DEVICE,
+            &layout,
+            512,
+            40 * 1024 * 1024 * 1024 / 512,
+        )
+        .expect("the pinned layout must produce a valid table");
+        assert!(
+            script.contains(&format!(
+                "/dev/loop0p6 : start={}, size={}",
+                HOME_START, HOME_SECTORS
+            )),
+            "HOME not preserved in the generated table:\n{}",
+            script
+        );
+    }
+
+    /// A wrong keyfile must stop the install in the prepare phase, while the
+    /// disk is still intact. Failing later would leave it repartitioned and
+    /// the preserved data gone.
+    #[test]
+    #[ignore = "needs a prepared scratch disk (see the module docs)"]
+    fn a_wrong_keyfile_fails_before_anything_is_written() {
+        let cfg = recovery_config(SCRATCH_DEVICE, Some("/tmp/bad.key"));
+        let installer = Installer::new(cfg, false);
+        let mut layout = scratch_layout(&installer.config);
+
+        let err = installer
+            .resolve_recovery(&mut layout)
+            .expect_err("an unrelated keyfile must be rejected")
+            .to_string();
+        assert!(err.contains("does not unlock"), "unexpected error: {}", err);
+
+        assert!(
+            layout.partitions.iter().all(|p| p.pinned.is_none()),
+            "nothing may be pinned when the credential fails"
+        );
+    }
+
+    /// The layout's /home has to be the partition the disk actually holds;
+    /// pinning a different number would preserve the wrong extent.
+    #[test]
+    #[ignore = "needs a prepared scratch disk (see the module docs)"]
+    fn a_layout_whose_home_is_a_different_partition_is_refused() {
+        let mut cfg = recovery_config(SCRATCH_DEVICE, Some("/tmp/good.key"));
+        // Drop /var so /home lands at partition 5 rather than 6.
+        cfg.disk.partitions.retain(|p| p.mount_point != "/var");
+        let installer = Installer::new(cfg, false);
+        let mut layout = scratch_layout(&installer.config);
+
+        let err = installer
+            .resolve_recovery(&mut layout)
+            .expect_err("a mismatched partition number must be refused")
+            .to_string();
+        assert!(
+            err.contains("partition 6") && err.contains("partition 5"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

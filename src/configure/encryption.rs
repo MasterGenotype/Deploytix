@@ -211,6 +211,231 @@ fn luks_format_inner(device: &str, password: &str, integrity: bool) -> Result<()
 }
 
 /// Open an existing LUKS container by name.
+/// A credential that unlocks a LUKS container.
+///
+/// A home-preserving recovery install adopts an existing container rather
+/// than reformatting it, and the credential that opens it comes from the
+/// user — a keyfile carried on the installer host, or a passphrase typed
+/// at the prompt. Both are modelled here so callers take one code path.
+///
+/// Note this is *not* the same thing as the per-volume keyfiles under
+/// `/etc/cryptsetup-keys.d` that [`crate::configure::keyfiles`] generates
+/// and bakes into the target's initramfs. This one lives on the installer
+/// host and is read once.
+#[derive(Clone)]
+pub enum Credential {
+    /// Path to a keyfile readable on the installer host.
+    Keyfile(String),
+    /// A passphrase.
+    Passphrase(String),
+}
+
+/// A volume to adopt rather than create during a recovery install.
+///
+/// The named container is opened with `credential` instead of being
+/// `luksFormat`ed, so its data survives the reinstall. Only one volume is
+/// adoptable today (`/home`); the field is named rather than positional so
+/// the rest of the pipeline can match on it without knowing which.
+#[derive(Debug, Clone)]
+pub struct AdoptSpec {
+    /// Title-case volume name, matching [`LuksContainer::volume_name`]
+    /// (e.g. `"Home"`).
+    pub volume_name: String,
+    /// The credential that unlocks the existing container.
+    pub credential: Credential,
+}
+
+impl AdoptSpec {
+    /// Whether this spec names `volume_name`.
+    pub fn matches(&self, volume_name: &str) -> bool {
+        self.volume_name.eq_ignore_ascii_case(volume_name)
+    }
+}
+
+impl std::fmt::Debug for Credential {
+    /// Redacts the passphrase — this type ends up in error paths and logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credential::Keyfile(path) => write!(f, "Keyfile({})", path),
+            Credential::Passphrase(_) => write!(f, "Passphrase(<redacted>)"),
+        }
+    }
+}
+
+impl Credential {
+    /// How to describe this credential in a log line or error, without
+    /// disclosing a passphrase.
+    pub fn describe(&self) -> String {
+        match self {
+            Credential::Keyfile(path) => format!("keyfile {}", path),
+            Credential::Passphrase(_) => "passphrase".to_string(),
+        }
+    }
+
+    /// The `--key-file` arguments this credential contributes, if any.
+    fn key_file_args(&self) -> Vec<&str> {
+        match self {
+            Credential::Keyfile(path) => vec!["--key-file", path],
+            Credential::Passphrase(_) => Vec::new(),
+        }
+    }
+
+    /// The text to write to cryptsetup's stdin, if any.
+    fn stdin_secret(&self) -> Option<&str> {
+        match self {
+            Credential::Keyfile(_) => None,
+            Credential::Passphrase(p) => Some(p),
+        }
+    }
+}
+
+/// Run `cryptsetup` with a credential supplied either as `--key-file` or on
+/// stdin, and return its output.
+///
+/// `credential_args` are spliced in before `args`, so callers pass the
+/// subcommand and operands and this handles how the secret is delivered.
+pub(crate) fn run_cryptsetup(
+    subcommand_args: &[&str],
+    credential: &Credential,
+    label: &str,
+) -> Result<std::process::Output> {
+    let mut args: Vec<&str> = Vec::new();
+    args.extend(credential.key_file_args());
+    args.extend_from_slice(subcommand_args);
+
+    let mut child = Command::new("cryptsetup")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: label.to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    // cryptsetup reads the passphrase from stdin; with --key-file it does
+    // not, so stdin is simply closed.
+    if let Some(secret) = credential.stdin_secret() {
+        if let Some(ref mut stdin) = child.stdin {
+            writeln!(stdin, "{}", secret)?;
+        }
+    }
+    drop(child.stdin.take());
+
+    child
+        .wait_with_output()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: label.to_string(),
+            stderr: e.to_string(),
+        })
+}
+
+/// Check that `credential` unlocks `device`, without opening it.
+///
+/// `cryptsetup open --test-passphrase` validates the credential against the
+/// container's keyslots and maps nothing. A recovery install must call this
+/// in the prepare phase: if the credential is wrong and we only find out
+/// after the disk has been repartitioned, the data the feature exists to
+/// preserve is already gone.
+pub fn verify_luks_credential(
+    cmd: &CommandRunner,
+    device: &str,
+    credential: &Credential,
+) -> Result<()> {
+    info!(
+        "Verifying {} unlocks LUKS container {}",
+        credential.describe(),
+        device
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] cryptsetup open --test-passphrase {} ({})",
+            device,
+            credential.describe()
+        );
+        return Ok(());
+    }
+
+    if let Credential::Keyfile(path) = credential {
+        if !std::path::Path::new(path).is_file() {
+            return Err(DeploytixError::ValidationError(format!(
+                "keyfile {} does not exist or is not a regular file",
+                path
+            )));
+        }
+    }
+
+    let output = run_cryptsetup(
+        &["open", "--test-passphrase", device],
+        credential,
+        "cryptsetup open --test-passphrase",
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup open --test-passphrase".to_string(),
+            stderr: format!(
+                "{} does not unlock {}: {}",
+                credential.describe(),
+                device,
+                stderr.trim()
+            ),
+        });
+    }
+
+    info!("{} unlocks {}", credential.describe(), device);
+    Ok(())
+}
+
+/// Open an existing LUKS container with either credential type.
+///
+/// Unlike [`setup_multi_volume_encryption`], this never formats: it adopts
+/// a container that already exists.
+pub fn open_luks_with(
+    cmd: &CommandRunner,
+    device: &str,
+    mapper_name: &str,
+    credential: &Credential,
+) -> Result<()> {
+    info!(
+        "Opening existing LUKS container {} as {} with {}",
+        device,
+        mapper_name,
+        credential.describe()
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] cryptsetup open {} {} ({})",
+            device,
+            mapper_name,
+            credential.describe()
+        );
+        return Ok(());
+    }
+
+    let output = run_cryptsetup(
+        &["open", device, mapper_name],
+        credential,
+        "cryptsetup open",
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DeploytixError::CommandFailed {
+            command: "cryptsetup open".to_string(),
+            stderr: format!("Failed to open LUKS container: {}", stderr.trim()),
+        });
+    }
+
+    // Wait for the mapper node to appear.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    Ok(())
+}
+
 pub fn open_luks(
     cmd: &CommandRunner,
     device: &str,
@@ -510,6 +735,7 @@ pub fn setup_multi_volume_encryption(
     config: &DeploymentConfig,
     device: &str,
     luks_partitions: &[(u32, &str)], // (partition_number, name)
+    adopt: Option<&AdoptSpec>,
 ) -> Result<Vec<LuksContainer>> {
     if !config.disk.encryption {
         return Err(DeploytixError::ConfigError(
@@ -544,30 +770,44 @@ pub fn setup_multi_volume_encryption(
             );
         }
 
-        if cmd.is_dry_run() {
-            let integrity_flag = if integrity {
-                " --integrity hmac-sha256"
-            } else {
-                ""
-            };
-            println!(
-                "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
-                integrity_flag, luks_device
-            );
-            println!(
-                "  [dry-run] cryptsetup open {} {}",
-                luks_device, mapper_name
-            );
-        } else {
-            // Format LUKS container (with or without integrity)
-            if integrity {
-                luks_format_integrity(&luks_device, password)?;
-            } else {
-                luks_format(&luks_device, password)?;
+        // A volume named by `adopt` already exists and is being preserved:
+        // open it, never format it. luksFormat would write a fresh header
+        // and destroy every keyslot along with access to the data.
+        match adopt.filter(|a| a.matches(&volume_name)) {
+            Some(spec) => {
+                info!(
+                    "Adopting existing LUKS container {} as {} (not reformatting)",
+                    luks_device, mapper_name
+                );
+                open_luks_with(cmd, &luks_device, &mapper_name, &spec.credential)?;
             }
+            None => {
+                if cmd.is_dry_run() {
+                    let integrity_flag = if integrity {
+                        " --integrity hmac-sha256"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  [dry-run] cryptsetup luksFormat --type luks2{} {}",
+                        integrity_flag, luks_device
+                    );
+                    println!(
+                        "  [dry-run] cryptsetup open {} {}",
+                        luks_device, mapper_name
+                    );
+                } else {
+                    // Format LUKS container (with or without integrity)
+                    if integrity {
+                        luks_format_integrity(&luks_device, password)?;
+                    } else {
+                        luks_format(&luks_device, password)?;
+                    }
 
-            // Open LUKS container
-            luks_open(&luks_device, &mapper_name, password)?;
+                    // Open LUKS container
+                    luks_open(&luks_device, &mapper_name, password)?;
+                }
+            }
         }
 
         info!(
@@ -636,5 +876,106 @@ mod tests {
     fn to_title_case_handles_single_character() {
         assert_eq!(to_title_case("a"), "A");
         assert_eq!(to_title_case("Z"), "Z");
+    }
+
+    // ── Credential (recovery-install unlock) ─────────────────────────────
+
+    #[test]
+    fn keyfile_credentials_pass_key_file_and_never_use_stdin() {
+        let c = Credential::Keyfile("/run/media/usb/crypthome.key".to_string());
+        assert_eq!(
+            c.key_file_args(),
+            vec!["--key-file", "/run/media/usb/crypthome.key"]
+        );
+        assert!(c.stdin_secret().is_none());
+    }
+
+    #[test]
+    fn passphrase_credentials_use_stdin_and_add_no_arguments() {
+        let c = Credential::Passphrase("hunter2".to_string());
+        assert!(c.key_file_args().is_empty());
+        assert_eq!(c.stdin_secret(), Some("hunter2"));
+    }
+
+    /// This type reaches error paths and logs; a passphrase must not.
+    #[test]
+    fn debug_and_describe_redact_the_passphrase() {
+        let c = Credential::Passphrase("hunter2".to_string());
+        assert!(!format!("{:?}", c).contains("hunter2"));
+        assert!(!c.describe().contains("hunter2"));
+
+        let k = Credential::Keyfile("/tmp/home.key".to_string());
+        assert!(format!("{:?}", k).contains("/tmp/home.key"));
+        assert!(k.describe().contains("/tmp/home.key"));
+    }
+
+    #[test]
+    fn a_missing_keyfile_is_rejected_before_cryptsetup_runs() {
+        let cmd = CommandRunner::new(false);
+        let c = Credential::Keyfile("/nonexistent/does-not-exist.key".to_string());
+        let err = verify_luks_credential(&cmd, "/dev/null", &c)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not exist"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn dry_run_verification_touches_nothing() {
+        let cmd = CommandRunner::new(true);
+        let c = Credential::Keyfile("/nonexistent/does-not-exist.key".to_string());
+        assert!(verify_luks_credential(&cmd, "/dev/null", &c).is_ok());
+    }
+
+    /// Exercises the real cryptsetup credential check. Ignored by default
+    /// because it needs cryptsetup and a prepared container; set one up with:
+    ///
+    /// ```sh
+    /// truncate -s 32M /tmp/home.img
+    /// head -c 512 /dev/urandom > /tmp/good.key
+    /// head -c 512 /dev/urandom > /tmp/bad.key
+    /// cryptsetup luksFormat --type luks2 --batch-mode \
+    ///     --key-file /tmp/good.key /tmp/home.img
+    /// cargo test --lib verifies_a_real_luks_container -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs cryptsetup and a prepared LUKS container at /tmp/home.img"]
+    fn verifies_a_real_luks_container() {
+        let cmd = CommandRunner::new(false);
+        let good = Credential::Keyfile("/tmp/good.key".to_string());
+        let bad = Credential::Keyfile("/tmp/bad.key".to_string());
+
+        verify_luks_credential(&cmd, "/tmp/home.img", &good)
+            .expect("the formatting keyfile must unlock the container");
+
+        let err = verify_luks_credential(&cmd, "/tmp/home.img", &bad)
+            .expect_err("an unrelated keyfile must be rejected")
+            .to_string();
+        assert!(err.contains("does not unlock"), "unexpected error: {}", err);
+    }
+
+    // ── AdoptSpec ────────────────────────────────────────────────────────
+
+    #[test]
+    fn adopt_matches_the_named_volume_case_insensitively() {
+        let spec = AdoptSpec {
+            volume_name: "Home".to_string(),
+            credential: Credential::Keyfile("/tmp/home.key".to_string()),
+        };
+        assert!(spec.matches("Home"));
+        assert!(spec.matches("home"));
+        assert!(spec.matches("HOME"));
+    }
+
+    /// Matching the wrong volume would reformat a container that should have
+    /// been adopted, or adopt one that should have been created.
+    #[test]
+    fn adopt_does_not_match_other_volumes() {
+        let spec = AdoptSpec {
+            volume_name: "Home".to_string(),
+            credential: Credential::Keyfile("/tmp/home.key".to_string()),
+        };
+        for other in ["Root", "Usr", "Var", "Boot"] {
+            assert!(!spec.matches(other), "must not match {}", other);
+        }
     }
 }

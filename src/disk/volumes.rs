@@ -246,6 +246,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 2,
@@ -260,6 +261,7 @@ mod tests {
                     is_boot_fs: true,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 3,
@@ -274,6 +276,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 4,
@@ -288,6 +291,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 5,
@@ -302,6 +306,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
             ],
             total_mib: 500000,
@@ -383,6 +388,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 2,
@@ -397,6 +403,7 @@ mod tests {
                     is_boot_fs: true,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
                 PartitionDef {
                     number: 3,
@@ -411,6 +418,7 @@ mod tests {
                     is_boot_fs: false,
                     attributes: None,
                     subvolume_name: None,
+                    pinned: None,
                 },
             ],
             total_mib: 500000,

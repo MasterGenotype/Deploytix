@@ -863,6 +863,35 @@ pub fn install_btrfs_tools(
 /// Embedded audio-startup script (compiled into binary).
 const AUDIO_STARTUP_SCRIPT: &str = include_str!("../resources/autostart/audio-startup.sh");
 
+/// Write a file into the user's home, leaving an existing one alone when
+/// this run is preserving an existing /home.
+///
+/// A recovery install lands on a home directory the user has been living in.
+/// Overwriting their autostart entries with the installer's defaults would
+/// silently undo customisation that has nothing to do with the reinstall.
+/// On an ordinary install there is nothing there yet, so this always writes.
+fn write_user_file_preserving(
+    config: &DeploymentConfig,
+    path: &str,
+    content: &str,
+    mode: u32,
+) -> Result<()> {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+
+    if config.disk.recovery.reuse_home && std::path::Path::new(path).exists() {
+        info!("  Keeping the existing {} (preserved home)", name);
+        return Ok(());
+    }
+
+    fs::write(path, content)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    info!("  Installed {}", name);
+    Ok(())
+}
+
 /// Deploy user autostart entries to the target system.
 ///
 /// Installs unconditionally:
@@ -916,9 +945,7 @@ pub fn install_autostart_entries(
         username
     );
     let audio_desktop_path = format!("{}/audio-startup.desktop", autostart_dir);
-    fs::write(&audio_desktop_path, &audio_desktop)?;
-    fs::set_permissions(&audio_desktop_path, fs::Permissions::from_mode(0o644))?;
-    info!("  Installed ~/.config/autostart/audio-startup.desktop");
+    write_user_file_preserving(config, &audio_desktop_path, &audio_desktop, 0o644)?;
 
     // Deploy nm-applet.desktop for any NetworkManager-based backend
     if matches!(
@@ -935,9 +962,7 @@ pub fn install_autostart_entries(
              X-GNOME-Autostart-enabled=true\n\
              Comment=NetworkManager system tray applet\n";
         let nm_desktop_path = format!("{}/nm-applet.desktop", autostart_dir);
-        fs::write(&nm_desktop_path, nm_desktop)?;
-        fs::set_permissions(&nm_desktop_path, fs::Permissions::from_mode(0o644))?;
-        info!("  Installed ~/.config/autostart/nm-applet.desktop");
+        write_user_file_preserving(config, &nm_desktop_path, nm_desktop, 0o644)?;
     }
 
     // Fix ownership: all deployed files should belong to the user, not root

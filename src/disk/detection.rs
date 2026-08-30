@@ -27,22 +27,7 @@ pub struct BlockDevice {
 impl BlockDevice {
     /// Get human-readable size
     pub fn size_human(&self) -> String {
-        const KIB: u64 = 1024;
-        const MIB: u64 = KIB * 1024;
-        const GIB: u64 = MIB * 1024;
-        const TIB: u64 = GIB * 1024;
-
-        if self.size_bytes >= TIB {
-            format!("{:.1}T", self.size_bytes as f64 / TIB as f64)
-        } else if self.size_bytes >= GIB {
-            format!("{:.1}G", self.size_bytes as f64 / GIB as f64)
-        } else if self.size_bytes >= MIB {
-            format!("{:.1}M", self.size_bytes as f64 / MIB as f64)
-        } else if self.size_bytes >= KIB {
-            format!("{:.1}K", self.size_bytes as f64 / KIB as f64)
-        } else {
-            format!("{}B", self.size_bytes)
-        }
+        human_bytes(self.size_bytes)
     }
 
     /// Get size in MiB
@@ -135,6 +120,26 @@ fn is_device_mounted(device: &str) -> bool {
 /// physical whole-disks (SCSI/SATA/USB, NVMe, MMC/SD, virtio, Xen, IDE).
 /// Device-mapper devices (dm-crypt, LVM), ZRAM, loop, software RAID, optical
 /// drives, and other virtual block devices are excluded.
+/// Format a byte count as a short human-readable size (e.g. `324.4G`).
+pub fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+
+    if bytes >= TIB {
+        format!("{:.1}T", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1}G", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1}M", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1}K", bytes as f64 / KIB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 pub fn list_block_devices(all: bool) -> Result<Vec<BlockDevice>> {
     let mut devices = Vec::new();
 

@@ -106,6 +106,36 @@ pub fn multi_volume_subvolumes(volume_name: &str) -> Vec<SubvolumeDef> {
     }
 }
 
+/// An exact on-disk extent carried over from a partition table that already
+/// exists, rather than computed by the sequential allocator.
+///
+/// A recovery install preserves the HOME partition by pinning it: the new
+/// table is written with this partition's original start and length, byte
+/// for byte, so rewriting the table is a no-op for that partition's
+/// contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedExtent {
+    /// First LBA, from the existing table.
+    pub start_sector: u64,
+    /// Length in sectors, from the existing table.
+    pub size_sectors: u64,
+    /// The partition's original GPT UUID, carried over so anything that
+    /// resolves it by PARTUUID keeps working across the reinstall.
+    pub part_uuid: Option<String>,
+}
+
+impl PinnedExtent {
+    /// One past the last sector of this extent.
+    pub fn end_sector(&self) -> u64 {
+        self.start_sector + self.size_sectors
+    }
+}
+
+/// Whether two half-open sector ranges share any sector.
+pub fn extents_overlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) -> bool {
+    a_start < b_start + b_size && b_start < a_start + a_size
+}
+
 /// A single partition definition
 #[derive(Debug, Clone)]
 pub struct PartitionDef {
@@ -136,6 +166,10 @@ pub struct PartitionDef {
     /// `subvol=<name>` instead of as a raw filesystem.
     /// Set unconditionally for all data partitions when the filesystem is btrfs.
     pub subvolume_name: Option<String>,
+    /// When set, this partition is preserved from an existing table: the
+    /// sfdisk script emits this exact extent instead of placing the
+    /// partition sequentially, and the partition is not wiped or formatted.
+    pub pinned: Option<PinnedExtent>,
 }
 
 /// Planned thin volume definition (saved when LVM thin collapses partitions)
@@ -298,6 +332,7 @@ pub fn compute_layout_from_entries(
             is_boot_fs: false,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         },
         PartitionDef {
             number: 2,
@@ -312,6 +347,7 @@ pub fn compute_layout_from_entries(
             is_boot_fs: true,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         },
     ];
 
@@ -332,6 +368,7 @@ pub fn compute_layout_from_entries(
             is_boot_fs: false,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         });
         next_part_num += 1;
     }
@@ -371,6 +408,7 @@ pub fn compute_layout_from_entries(
             is_boot_fs: false,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         });
         next_part_num += 1;
     }
@@ -550,6 +588,7 @@ pub fn apply_lvm_thin_to_layout(
         is_boot_fs: false,
         attributes: None,
         subvolume_name: None,
+        pinned: None,
     });
 
     Ok(ComputedLayout {
@@ -580,6 +619,7 @@ mod tests {
             is_boot_fs: false,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         }
     }
 
@@ -673,6 +713,7 @@ mod tests {
             is_boot_fs: false,
             attributes: None,
             subvolume_name: None,
+            pinned: None,
         }
     }
 
