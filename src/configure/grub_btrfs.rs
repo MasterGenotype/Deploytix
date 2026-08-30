@@ -104,7 +104,10 @@ pub fn create_baseline_snapshot(
     }
 
     if config.packages.immutable_root {
-        let id = snapshot::create_set(cmd, devices, /* readonly = */ true)?;
+        // The baseline is the pristine install itself, so it snapshots the
+        // live trio rather than a boot pointer (there is nothing booted yet).
+        let source = snapshot::SourceSubvols::live();
+        let id = snapshot::create_set(cmd, devices, &source, /* readonly = */ true)?;
         info!(
             "Created baseline immutable snapshot set {} (pristine install)",
             id
@@ -553,7 +556,12 @@ mod tests {
         // entry boots a coherent system rather than an old / over a live /usr.
         cfg.packages.immutable_root = true;
         create_baseline_snapshot(&cmd, &cfg, &devices, "/mnt/target").unwrap();
-        let cmds = crate::immutable::snapshot::create_set_cmds(&devices, "42", true);
+        let cmds = crate::immutable::snapshot::create_set_cmds(
+            &devices,
+            &snapshot::SourceSubvols::live(),
+            "42",
+            true,
+        );
         assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@\"")));
         assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@etc\"")));
         assert!(cmds.iter().any(|c| c.contains("snapshot -r \"$m/@usr\"")));

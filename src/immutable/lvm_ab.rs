@@ -108,6 +108,34 @@ impl SlotState {
     }
 }
 
+/// The slot the running system actually booted from (`deploytix.slot=` on the
+/// kernel cmdline, last occurrence wins — matching the `verity-ab` hook).
+///
+/// [`SlotState::active`] is the slot that will boot *next*: `run_update` sets it
+/// to the slot it just built. The two therefore differ exactly while an update
+/// is staged and not yet booted, and `fallback` (normally `state.active`) covers
+/// a cmdline without the token.
+pub fn running_slot(fallback: &str) -> String {
+    std::fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|c| parse_slot(&c))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Extract the effective `deploytix.slot=` value from a kernel cmdline.
+fn parse_slot(cmdline: &str) -> Option<String> {
+    let mut found = None;
+    for arg in cmdline.split_whitespace() {
+        if let Some(value) = arg.strip_prefix("deploytix.slot=") {
+            let value = value.trim_matches('"');
+            if !value.is_empty() {
+                found = Some(value.to_uppercase());
+            }
+        }
+    }
+    found
+}
+
 /// Whether this system uses the LVM immutable A/B backend (used for dispatch).
 pub fn detect() -> bool {
     std::path::Path::new(STATE_FILE).exists()
@@ -202,6 +230,22 @@ fn unmount_target_cmd(slot: &str) -> String {
     format!("umount -R {t} 2>/dev/null || true; rmdir {t} 2>/dev/null || true")
 }
 
+/// The slot an update writes into: `(slot, already_staged)`.
+///
+/// Normally the inactive slot — the one not running. But once an update is
+/// staged, `active` names it while the session still runs the *other* slot, so
+/// "the inactive slot" would be the running root: rebuilding it would rsync
+/// over the live system and throw away the staged packages. Forgetting a
+/// package and updating again therefore extends the staged slot instead, and it
+/// stays the slot the system boots into.
+fn update_target(active: &str, running: &str) -> (String, bool) {
+    if active.eq_ignore_ascii_case(running) {
+        (ab::other_slot(active).to_string(), false)
+    } else {
+        (active.to_string(), true)
+    }
+}
+
 /// Perform a transactional A/B update: build the inactive slot, verity-seal it,
 /// and repoint the boot pointer at it.
 pub fn run_update(
@@ -211,15 +255,29 @@ pub fn run_update(
 ) -> Result<()> {
     let state = read_state()?;
     let active = state.active.clone();
-    let target = ab::other_slot(&active).to_string();
+    let running = running_slot(&active);
+
+    // Forgetting a package and updating again in the same session must extend
+    // the slot already staged, not rebuild the other one — which, once an
+    // update is staged, is the slot this session is running from. Rebuilding it
+    // would rsync over the running root and drop the staged packages.
+    let (target, staged) = update_target(&active, &running);
+
     let vg = state.vg.clone();
     let (root_lv, hash_lv) = ab::slot_lvs(&target)
         .ok_or_else(|| DeploytixError::ConfigError(format!("invalid target slot '{target}'")))?;
 
-    info!(
-        "[lvm-ab] Building update into inactive slot {} ({}/{})",
-        target, root_lv, hash_lv
-    );
+    if staged {
+        info!(
+            "[lvm-ab] Adding to slot {} ({}), already staged for the next boot",
+            target, root_lv
+        );
+    } else {
+        info!(
+            "[lvm-ab] Building update into inactive slot {} ({}/{})",
+            target, root_lv, hash_lv
+        );
+    }
 
     let (local_files, repo_names) = update::classify_args(extra_packages);
 
@@ -228,8 +286,12 @@ pub fn run_update(
     let result = (|| -> Result<()> {
         cmd.run("sh", &["-c", &mount_target_cmd(&vg, root_lv, &target)])?;
         let t = target_dir(&target);
-        info!("[lvm-ab] Syncing active root -> slot {}", target);
-        cmd.run("sh", &["-c", &rsync_root_cmd(&target)])?;
+        // Only a fresh target needs the running root copied in; a staged slot
+        // already holds it, plus whatever earlier updates installed.
+        if !staged {
+            info!("[lvm-ab] Syncing active root -> slot {}", target);
+            cmd.run("sh", &["-c", &rsync_root_cmd(&target)])?;
+        }
 
         let staged = update::stage_local_pkgs(cmd, &local_files)?;
         info!("[lvm-ab] Running pacman in slot {}", target);
@@ -247,10 +309,18 @@ pub fn run_update(
     }
 
     if let Err(e) = result {
-        warn!(
-            "[lvm-ab] Update failed; slot {} left inactive, boot pointer unchanged",
-            target
-        );
+        if staged {
+            warn!(
+                "[lvm-ab] Update failed; slot {} keeps what earlier updates staged \
+                 and stays selected for the next boot",
+                target
+            );
+        } else {
+            warn!(
+                "[lvm-ab] Update failed; slot {} left inactive, boot pointer unchanged",
+                target
+            );
+        }
         return Err(e);
     }
 
@@ -358,6 +428,33 @@ fn slot_fs(fs: &Filesystem) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_targets_the_inactive_slot_then_keeps_filling_it() {
+        // Nothing staged (active == running): build the other slot.
+        assert_eq!(update_target("A", "A"), ("B".to_string(), false));
+        assert_eq!(update_target("B", "B"), ("A".to_string(), false));
+
+        // An update is staged into B while A is still running. The forgotten
+        // package joins B; targeting "the inactive slot" would target A, the
+        // running root, and rsync away everything B holds.
+        assert_eq!(update_target("B", "A"), ("B".to_string(), true));
+        assert_eq!(update_target("A", "B"), ("A".to_string(), true));
+    }
+
+    #[test]
+    fn running_slot_reads_the_last_cmdline_token() {
+        assert_eq!(parse_slot("ro deploytix.slot=B quiet"), Some("B".into()));
+        assert_eq!(
+            parse_slot("deploytix.slot=A deploytix.slot=b"),
+            Some("B".into())
+        );
+        assert_eq!(parse_slot("deploytix.slot=\"a\""), Some("A".into()));
+        // No token → the caller keeps its fallback (state.active).
+        assert_eq!(parse_slot("root=/dev/mapper/x ro"), None);
+        assert_eq!(parse_slot("deploytix.slot="), None);
+        assert_eq!(running_slot("A"), running_slot("A"));
+    }
 
     fn sample_state() -> SlotState {
         SlotState {

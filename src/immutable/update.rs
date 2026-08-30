@@ -3,17 +3,26 @@
 //! The running system's `/` and `/usr` are read-only, so updates never modify it
 //! in place. Instead:
 //!
-//! 1. Snapshot the current `{@, @usr, @etc}` into a new **writable** set.
+//! 1. Pick the set to write into: the one already staged for the next boot when
+//!    an update is pending (so a forgotten package joins it), otherwise a new
+//!    **writable** snapshot of whatever boots next.
 //! 2. Mount that set (root + paired usr/etc, with `/var`, `/home`, `/boot`
 //!    bind-mounted so state and the kernel/initramfs are shared).
 //! 3. Run `pacman -Syu` (or install the requested packages) and regenerate the
 //!    initramfs *inside the set* via `artix-chroot`.
-//! 4. On success, point the default boot entry at the new set and regenerate
+//! 4. On success, point the default boot entry at the set and regenerate
 //!    grub.cfg; the change takes effect on the next reboot. On failure, delete
-//!    the half-built set and leave the running system untouched.
+//!    the half-built set — unless it was a staged one, which keeps what earlier
+//!    updates put there — and leave the running system untouched.
 //!
 //! Old sets are pruned to [`UpdateOptions::keep_sets`], never removing the
 //! running set or the one just built.
+//!
+//! ## Updates chain, they do not restart
+//! Each update sources the *next boot pointer*, never the pristine `@`. `@` is
+//! read-only for the life of the system, so re-sourcing it every time would
+//! quietly discard every package installed by earlier updates — both those from
+//! previous boots and those staged moments ago.
 //!
 //! ## Caveat: shared `/boot`
 //! `/boot` is a separate, non-snapshotted partition, so the kernel and initramfs
@@ -197,6 +206,62 @@ fn prune_sets(
     Ok(())
 }
 
+/// Pick the set this update writes into: `(id, reused)`.
+///
+/// Forgetting a package and running `deploytix update` again in the same
+/// session must land in the set already staged for the next boot — otherwise
+/// the second run would build a rival set from the *running* system, and the
+/// first run's packages would vanish when that rival became the boot target.
+/// So a staged, writable set is filled further rather than replaced, and stays
+/// the set the system boots into.
+///
+/// Otherwise a fresh set is snapshotted from whatever the next boot is pointed
+/// at, which is the running system in the ordinary case and the chosen target
+/// when a `deploytix rollback` is staged. Never from `@` unless `@` is what
+/// boots next: `@` is the pristine base and is never written to, so sourcing it
+/// unconditionally would drop everything earlier updates installed.
+fn resolve_update_set(
+    cmd: &CommandRunner,
+    devices: &ImmutableDevices,
+    staged: &str,
+    running: &str,
+) -> Result<(String, bool)> {
+    // Ask about writability only for a staged set — the query mounts the
+    // filesystem root, and every other branch builds a fresh set regardless.
+    let staged_id = staged_set_id(staged, running);
+    let writable = staged_id
+        .as_ref()
+        .is_some_and(|id| snapshot::set_is_writable(cmd, &devices.root_fs, id));
+
+    if let Some(id) = staged_id.filter(|_| writable) {
+        info!(
+            "[immutable] Adding to update set {} already staged for the next boot",
+            id
+        );
+        return Ok((id, true));
+    }
+
+    info!(
+        "[immutable] Building transactional update set from {}",
+        staged
+    );
+    let source = snapshot::SourceSubvols::for_root(staged);
+    let id = snapshot::create_set(cmd, devices, &source, /* readonly = */ false)?;
+    Ok((id, false))
+}
+
+/// The id of a set that is staged for the next boot but not yet running — the
+/// only candidate an update may keep filling in place.
+///
+/// `None` when the next boot is the running system (nothing staged; writing in
+/// place would mutate the live root), or when the pointer is not a set at all.
+fn staged_set_id(staged: &str, running: &str) -> Option<String> {
+    if staged == running {
+        return None;
+    }
+    boot::pointer_set_id(staged)
+}
+
 /// Perform a transactional update.
 pub fn run_update(
     cmd: &CommandRunner,
@@ -206,8 +271,12 @@ pub fn run_update(
     ensure_immutable(cmd)?;
     let devices = detect_devices();
 
-    info!("[immutable] Building transactional update set");
-    let id = snapshot::create_set(cmd, &devices, /* readonly = */ false)?;
+    // What the next boot is pointed at, versus what this session booted from.
+    // They differ exactly while an update or rollback is staged.
+    let staged = boot::current_boot_pointer(cmd)?;
+    let running = boot::running_root_subvol();
+
+    let (id, reused) = resolve_update_set(cmd, &devices, &staged, &running)?;
 
     let (local_files, repo_names) = classify_args(extra_packages);
 
@@ -217,9 +286,9 @@ pub fn run_update(
         let target = target_dir(&id);
         // Local .pkg.tar.zst files are copied into the shared /var so the chroot
         // can reach them by absolute path and install them with `pacman -U`.
-        let staged = stage_local_pkgs(cmd, &local_files)?;
+        let staged_files = stage_local_pkgs(cmd, &local_files)?;
         info!("[immutable] Running pacman in set {}", id);
-        for pac in pacman_cmds(&staged, &repo_names) {
+        for pac in pacman_cmds(&staged_files, &repo_names) {
             cmd.run_in_chroot(&target, &pac)?;
         }
         // Regenerate the (shared) initramfs from within the updated set.
@@ -235,10 +304,14 @@ pub fn run_update(
 
     match result {
         Ok(()) => {
+            // Re-activate even when the pointer already names this set: the
+            // update may have installed a kernel, and grub.cfg lists those.
             boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
-            let running = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
-                .unwrap_or_else(|| "@".to_string());
-            prune_sets(cmd, &devices, opts.keep_sets, &running, &id)?;
+            // Protect the set the live system is *running* from. Reading the
+            // pointer back here would name the set just activated, leaving the
+            // running one prunable out from under the session.
+            let running_id = boot::pointer_set_id(&running).unwrap_or_else(|| "@".to_string());
+            prune_sets(cmd, &devices, opts.keep_sets, &running_id, &id)?;
             info!(
                 "[immutable] Update ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
                 id
@@ -249,8 +322,18 @@ pub fn run_update(
             Ok(())
         }
         Err(e) => {
-            warn!("[immutable] Update failed; discarding set {}", id);
-            let _ = snapshot::delete_set(cmd, &devices, &id);
+            // Only a set this run created is safe to discard; a reused one
+            // still holds the packages an earlier update staged.
+            if reused {
+                warn!(
+                    "[immutable] Update failed; set {} keeps what earlier updates staged \
+                     and stays selected for the next boot",
+                    id
+                );
+            } else {
+                warn!("[immutable] Update failed; discarding set {}", id);
+                let _ = snapshot::delete_set(cmd, &devices, &id);
+            }
             Err(e)
         }
     }
@@ -259,6 +342,46 @@ pub fn run_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_staged_this_session_is_the_one_to_keep_filling() {
+        // Second `deploytix update` of the session: the pointer already names
+        // the set the first one built, so the forgotten package joins it.
+        assert_eq!(
+            staged_set_id("@deploytix-sets/7/root", "@"),
+            Some("7".to_string())
+        );
+        assert_eq!(
+            staged_set_id("@deploytix-sets/7/root", "@deploytix-sets/3/root"),
+            Some("7".to_string())
+        );
+    }
+
+    #[test]
+    fn the_running_set_is_never_written_to_in_place() {
+        // Nothing staged: next boot is what is running. Writing there would
+        // mutate the live root and leave nothing to roll back to.
+        assert_eq!(staged_set_id("@", "@"), None);
+        assert_eq!(
+            staged_set_id("@deploytix-sets/7/root", "@deploytix-sets/7/root"),
+            None
+        );
+        // A staged rollback to the pristine base is not a set to fill either.
+        assert_eq!(staged_set_id("@", "@deploytix-sets/7/root"), None);
+    }
+
+    #[test]
+    fn a_fresh_set_chains_off_whatever_boots_next() {
+        // Ordinary case: source is the running system, so earlier updates'
+        // packages carry forward instead of being dropped by re-sourcing `@`.
+        assert_eq!(
+            snapshot::SourceSubvols::for_root("@deploytix-sets/7/root").root,
+            "@deploytix-sets/7/root"
+        );
+        // With a rollback staged, the source is the rolled-back-to target —
+        // the operator's stated intent for the next boot.
+        assert_eq!(snapshot::SourceSubvols::for_root("@").root, "@");
+    }
 
     fn devices() -> ImmutableDevices {
         ImmutableDevices {

@@ -101,6 +101,17 @@ What it does (active = A → target = B):
 5. On any failure, the half-built slot is abandoned and the running slot + boot
    pointer are left untouched.
 
+> **A second update in the same session extends the staged slot.** Once B is
+> staged, `active=B` while the session still runs A — so "the inactive slot"
+> would be A, the running root, and rebuilding it would rsync over the live
+> system and discard everything B holds. A forgotten package therefore goes into
+> B, which stays the boot target; step 1's rsync is skipped, since B already
+> carries the running tree plus what the earlier update installed. The running
+> slot is read from `deploytix.slot=` on `/proc/cmdline` — the same token the
+> `verity-ab` hook resolves — because the state file's `active` names the *next*
+> boot, not the current one. A failed update leaves the staged slot as the
+> earlier update left it, still selected for the next boot.
+
 ---
 
 ## Rolling back: `deploytix rollback`

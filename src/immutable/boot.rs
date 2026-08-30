@@ -34,13 +34,45 @@ pub fn pointer_set_id(pointer: &str) -> Option<String> {
 /// The paired `usr`/`etc` subvolumes for a given root subvolume, by convention:
 /// a set uses its sibling `usr`/`etc`; the live `@` uses `@usr`/`@etc`.
 fn paired_subvols(root_subvol: &str) -> (String, String) {
-    match pointer_set_id(root_subvol) {
-        Some(id) => (snapshot::set_usr_subvol(&id), snapshot::set_etc_subvol(&id)),
-        None => (
-            crate::immutable::USR_SUBVOL.to_string(),
-            crate::immutable::ETC_SUBVOL.to_string(),
-        ),
+    let trio = snapshot::SourceSubvols::for_root(root_subvol);
+    (trio.usr, trio.etc)
+}
+
+/// The root subvolume the running system actually booted from, read from
+/// `/proc/cmdline`.
+///
+/// [`current_boot_pointer`] reads grub.cfg, which is what will boot *next*: the
+/// two differ exactly while an update or rollback is staged but not yet booted,
+/// and telling them apart is what keeps a second `deploytix update` in the same
+/// session from starting a rival set (and keeps pruning off the set the live
+/// system is running from).
+///
+/// Mirrors `resolve_root_subvol` in the mountcrypt hook: last `rootflags=subvol=`
+/// wins, surrounding double quotes stripped (grub-btrfs emits them).
+pub fn running_root_subvol() -> String {
+    std::fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|c| parse_root_subvol(&c))
+        .unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string())
+}
+
+/// Extract the effective `rootflags=subvol=` value from a kernel cmdline.
+fn parse_root_subvol(cmdline: &str) -> Option<String> {
+    let mut found = None;
+    for arg in cmdline.split_whitespace() {
+        let Some(flags) = arg.strip_prefix("rootflags=") else {
+            continue;
+        };
+        for flag in flags.split(',') {
+            if let Some(value) = flag.strip_prefix("subvol=") {
+                let value = value.trim_matches('"');
+                if !value.is_empty() {
+                    found = Some(value.to_string());
+                }
+            }
+        }
     }
+    found
 }
 
 /// `sed` that rewrites the `rootflags=subvol=` pointer in `file`. A `|` delimiter
@@ -130,6 +162,34 @@ pub fn current_boot_pointer(cmd: &CommandRunner) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_root_subvol_takes_the_last_rootflags_like_the_hook() {
+        // Plain boot of the base install.
+        assert_eq!(
+            parse_root_subvol("root=UUID=x rootflags=subvol=@ rw"),
+            Some("@".into())
+        );
+
+        // A grub-btrfs snapshot entry appends its own rootflags after the
+        // cmdline's; the kernel (and the hook) take the last one.
+        assert_eq!(
+            parse_root_subvol(
+                "rootflags=subvol=@ quiet rootflags=subvol=\"@deploytix-sets/7/root\""
+            ),
+            Some("@deploytix-sets/7/root".into())
+        );
+
+        // Other rootflags survive alongside subvol=.
+        assert_eq!(
+            parse_root_subvol("rootflags=compress=zstd,subvol=@deploytix-sets/9/root,noatime"),
+            Some("@deploytix-sets/9/root".into())
+        );
+
+        // Nothing to find → caller falls back to @.
+        assert_eq!(parse_root_subvol("root=UUID=x rw quiet"), None);
+        assert_eq!(parse_root_subvol("rootflags=subvol="), None);
+    }
 
     fn devices() -> ImmutableDevices {
         ImmutableDevices {

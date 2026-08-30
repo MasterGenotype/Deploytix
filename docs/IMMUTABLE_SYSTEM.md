@@ -108,8 +108,10 @@ deploytix -n update              # dry-run: print the plan, change nothing
 
 What it does:
 
-1. Snapshots the current `{@, @usr, @etc}` into a new **writable** set and writes
-   its pairing marker.
+1. Picks the set to write into. If an update is already staged for the next boot
+   (you forgot a package and ran `update` again), that set is filled further and
+   stays the boot target. Otherwise `{@, @usr, @etc}` of **whatever boots next**
+   are snapshotted into a new **writable** set with its pairing marker.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
    `artix-chroot`, or plain `chroot` where `artools` is not installed.
@@ -120,7 +122,31 @@ What it does:
 5. Prunes sets beyond `--keep`, never removing the running set or the new one.
 
 The running system is never modified, so an interrupted or failed update is a
-no-op.
+no-op. A failed update on a *staged* set leaves that set exactly as the earlier
+update left it, still selected for the next boot.
+
+> **Updates chain, they do not restart.** Each update sources the next boot
+> pointer, never the pristine `@` — which is read-only for the life of the
+> system, so re-sourcing it would discard every package earlier updates
+> installed. Concretely:
+>
+> | Running | Staged for next boot | `deploytix update foo` writes into |
+> |---------|----------------------|------------------------------------|
+> | `@` | `@` (nothing staged) | a new set snapshotted from `@` |
+> | set `X` | set `X` (nothing staged) | a new set snapshotted from `X` |
+> | set `X` | set `Y` (update staged) | **set `Y` itself** — `foo` joins it |
+> | set `X` | set `R` (rollback staged, read-only) | a new set snapshotted from `R` |
+>
+> The running set is never written to in place: that would mutate the live root
+> and leave nothing to roll back to. The running root comes from
+> `rootflags=subvol=` on `/proc/cmdline` (the same value the `mountcrypt` hook
+> resolves); the staged pointer comes from grub.cfg. Pruning also uses the
+> running root, so the set the session is booted from is never pruned away.
+>
+> The LVM A/B backend follows the same rule with slots: a second update extends
+> the staged slot instead of rebuilding "the inactive slot", which after staging
+> is the running root. It skips the rsync in that case — the slot already holds
+> the running tree plus what earlier updates added.
 
 > **API filesystems in the update chroot.** `artools` (which provides
 > `artix-chroot`) is a host/ISO dependency and is *not* installed into deployed
