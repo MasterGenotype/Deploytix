@@ -129,7 +129,7 @@ The installer executes a **feature-driven pipeline** where each step checks its 
 
 **Phase 4 — System Configuration.** Enters the target via `artix-chroot` and configures locale, timezone, keymap, hostname, user account, mkinitcpio hooks, GRUB bootloader, network backend, init system services, Secure Boot (if enabled), GPU drivers, and swap (ZRAM/file).
 
-**Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, Handheld Daemon, Decky Loader, and evdevhook2.
+**Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, handheld controller quirks, Handheld Daemon, Decky Loader, and evdevhook2.
 
 **Phase 6 — Finalize.** Regenerates the initramfs, unmounts all filesystems in reverse order, exports ZFS pools if applicable, and closes all LUKS containers.
 
@@ -252,6 +252,7 @@ sysctl_network_performance = true  # BBR, fq, larger buffers
 install_hhd = true             # Handheld Daemon (gamepad remapping, TDP)
 install_decky_loader = true    # Steam plugin framework
 install_evdevhook2 = true      # Cemuhook UDP motion server
+# handheld_controller_quirks   # omit = auto-detect Legion Go family; true/false to force
 gpu_drivers = ["amd"]          # nvidia, amd, intel
 ```
 
@@ -306,6 +307,7 @@ The `[packages]` section provides a full gaming/handheld device stack:
 - **Handheld Daemon (HHD)** — Gamepad remapping, TDP control, per-game profiles (AUR: `hhd-git`). Writes init-specific service files.
 - **Decky Loader** — Steam plugin framework (AUR: `decky-loader-bin`). Writes init-specific service files.
 - **evdevhook2** — Cemuhook UDP motion server for DualShock/DualSense/Joy-Con controllers (AUR: `evdevhook2-git`). Installs udev rules and service files.
+- **Handheld Controller Quirks** — Stops the controllers on Lenovo Legion Go family handhelds (Legion Go, Legion Go 2, Legion Go S) repeatedly disconnecting and reconnecting: pins USB runtime power management off for the pads, binds them to `xpad` on kernels that predate their IDs, and opens their hidraw nodes to the session user. Applied automatically when the installing host's DMI identifies one of those machines; `handheld_controller_quirks = true`/`false` forces the decision. See `docs/HANDHELD_CONTROLLER_QUIRKS.md`.
 - **Wine** — Wine compatibility layer packages.
 - **GPU Drivers** — NVIDIA, AMD, and/or Intel driver stacks.
 - **Sysctl Tweaks** — Gaming performance (`vm.max_map_count`, swappiness) and network performance (BBR, fq, larger socket buffers, ECN).

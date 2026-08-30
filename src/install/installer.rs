@@ -422,6 +422,14 @@ impl Installer {
             self.install_sysctl_network_performance()?;
         }
 
+        // Phase 5.68: Handheld controller quirks.
+        //
+        // Ahead of HHD deliberately: the rules govern how the controllers
+        // bind and whether their hidraw nodes are reachable, which is what
+        // HHD builds its emulated pad on top of.
+        self.report_progress(0.905, "Applying handheld controller quirks...");
+        configure::handheld_quirks::install(&self.cmd, &self.config, INSTALL_ROOT)?;
+
         // Phase 5.7: Handheld Daemon (HHD)
         if self.config.packages.install_hhd {
             self.report_progress(0.910, "Installing Handheld Daemon (HHD)...");

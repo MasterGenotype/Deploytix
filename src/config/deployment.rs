@@ -325,6 +325,18 @@ pub struct PackagesConfig {
     /// writes an init-specific service file for runit/s6/dinit/openrc.
     #[serde(default)]
     pub install_evdevhook2: bool,
+    /// Ship udev quirks that stop the controllers on Lenovo Legion Go family
+    /// handhelds (Legion Go, Legion Go 2, Legion Go S) disconnecting and
+    /// reconnecting: pin USB runtime power management off for the pads, bind
+    /// them to `xpad` on kernels that predate their IDs, and open their
+    /// hidraw nodes to the session user.
+    ///
+    /// Unset (the default) means auto — the rules are written only when the
+    /// installing host's DMI identifies it as one of those handhelds. Set
+    /// `true` to force them on (deploying to removable media from another
+    /// machine), `false` to suppress them.
+    #[serde(default)]
+    pub handheld_controller_quirks: Option<bool>,
     /// GPU driver vendors to install
     #[serde(default)]
     pub gpu_drivers: Vec<GpuDriverVendor>,
@@ -1211,6 +1223,24 @@ impl DeploymentConfig {
             false
         };
 
+        // Handheld controller quirks — offered with the detected hardware as
+        // the default, so a Legion Go family machine gets them by answering
+        // through the wizard without knowing the flag exists.
+        let detected_handheld = crate::configure::handheld_quirks::detect_host_model();
+        let handheld_controller_quirks = Some(prompt_confirm(
+            &match detected_handheld {
+                Some(model) => format!(
+                    "Apply handheld controller quirks? ({} detected — stops the \
+                     controllers disconnecting/reconnecting)",
+                    model.as_str()
+                ),
+                None => "Apply handheld controller quirks? (Lenovo Legion Go family — \
+                         stops the controllers disconnecting/reconnecting)"
+                    .to_string(),
+            },
+            detected_handheld.is_some(),
+        )?);
+
         Ok(DeploymentConfig {
             disk: DiskConfig {
                 device,
@@ -1276,6 +1306,7 @@ impl DeploymentConfig {
                 install_hhd,
                 install_decky_loader,
                 install_evdevhook2,
+                handheld_controller_quirks,
                 gpu_drivers,
                 extra_packages: ExtraPackagesConfig::default(),
             },

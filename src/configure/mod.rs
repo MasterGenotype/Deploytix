@@ -6,6 +6,7 @@ pub mod encryption;
 pub mod gamescope_update;
 pub mod greetd;
 pub mod grub_btrfs;
+pub mod handheld_quirks;
 pub mod hooks;
 pub mod keyfiles;
 pub mod locale;

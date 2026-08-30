@@ -145,6 +145,7 @@ impl DeploytixGui {
                 install_hhd: self.packages.install_hhd,
                 install_decky_loader: self.packages.install_decky_loader,
                 install_evdevhook2: self.packages.install_evdevhook2,
+                handheld_controller_quirks: Some(self.packages.handheld_controller_quirks),
                 gpu_drivers: {
                     let mut drivers = Vec::new();
                     if self.packages.gpu_nvidia {
