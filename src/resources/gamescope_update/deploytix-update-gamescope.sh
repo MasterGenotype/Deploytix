@@ -13,6 +13,22 @@
 # a pacman PreTransaction hook (deploytix-gamescope-guard) aborts any
 # gamescope install/upgrade not initiated by this script.
 #
+# ── Immutable installs ──────────────────────────────────────────────────────
+# On an immutable deployment (immutable_root = true, either the btrfs
+# snapshot-set backend or the LVM A/B dm-verity backend) / and /usr are
+# read-only, so pacman cannot install anything into the running system.  This
+# script detects that and adapts:
+#
+#   * the package is installed with `deploytix update <pkgfile>`, which builds
+#     a new snapshot set / inactive slot and takes effect on the next reboot,
+#     instead of `pacman -U` against the live root;
+#   * build dependencies are never installed on the fly — they cannot be — so
+#     missing ones are reported with the `deploytix update` command that adds
+#     them, rather than failing deep inside makepkg.
+#
+# makepkg itself still runs on the live system: it only writes to the user's
+# cache under $HOME, which is a shared writable subvolume on both backends.
+#
 # Usage:
 #   deploytix-update-gamescope [--check] [--force]
 #
@@ -29,6 +45,12 @@ BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/deploytix/gamescope-update"
 REMOTE="https://github.com/MasterGenotype/gamescope.git"
 BRANCH="gamescope-ba"
 
+# Immutable-backend markers.  These are the same signals deploytix itself
+# dispatches on: immutable::update::ensure_immutable() checks the pairing
+# marker, immutable::lvm_ab::detect() checks the slot state file.
+PAIR_MARKER="/.deploytix-pair"
+LVM_AB_STATE="/boot/deploytix-slots.conf"
+
 msg()  { printf '\033[1;34m==>\033[0m \033[1m%s\033[0m\n' "$*"; }
 msg2() { printf '  \033[1;32m->\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; }
@@ -38,9 +60,12 @@ usage() {
 Usage: deploytix-update-gamescope [--check] [--force]
 
 Rebuilds gamescope (Bazzite fork) from the Deploytix source branch with the
-exact same meson options used at install time, then installs it via pacman.
+exact same meson options used at install time, then installs it.
 Do NOT update gamescope through the AUR — that build breaks the Steam
 gamescope session.
+
+On an immutable installation the rebuilt package is installed with
+`deploytix update`, so it becomes active on the next reboot.
 
 Options:
   --check   Only report whether an update is available (exit 0 = update
@@ -61,6 +86,47 @@ for arg in "$@"; do
     esac
 done
 
+# ── Immutable detection ─────────────────────────────────────────────────────
+# Either backend marker means the running / and /usr are read-only and pacman
+# must not be pointed at them.  A read-only /usr without a marker is treated as
+# immutable too: whatever put it there, `pacman -U` would fail against it.
+is_immutable() {
+    [[ -e "$PAIR_MARKER" || -e "$LVM_AB_STATE" ]] && return 0
+    local opts
+    opts="$(findmnt -no OPTIONS --target /usr 2>/dev/null || true)"
+    [[ ",$opts," == *,ro,* ]]
+}
+
+IMMUTABLE=0
+if is_immutable; then
+    IMMUTABLE=1
+fi
+
+# Packages that must already be installed, because on an immutable system we
+# cannot add them mid-build.  Reports them all at once with the command that
+# installs them, rather than failing one at a time.
+#
+# $@ = package names.  Returns 1 (and prints guidance) if any are unsatisfied.
+require_preinstalled() {
+    local missing
+    # `pacman -T` prints the arguments it cannot satisfy, one per line, and
+    # exits 127 when there is at least one.  Anything else is a real error.
+    missing="$(pacman -T "$@" 2>/dev/null || true)"
+    [[ -z "$missing" ]] && return 0
+
+    err "missing build prerequisites on a read-only system:"
+    printf '      %s\n' $missing >&2
+    err ""
+    err "This is an immutable installation, so they cannot be installed into"
+    err "the running system.  Add them transactionally and reboot first:"
+    err ""
+    err "    sudo deploytix update ${missing//$'\n'/ }"
+    err "    sudo reboot"
+    err ""
+    err "then run deploytix-update-gamescope again."
+    return 1
+}
+
 if [[ $EUID -eq 0 ]]; then
     err "run as a regular user — makepkg refuses to run as root."
     err "sudo is invoked internally for dependency sync and package install."
@@ -75,8 +141,12 @@ fi
 
 # git is needed for the remote check and by makepkg to fetch sources.
 if ! command -v git >/dev/null; then
-    msg "git is not installed; installing it (sudo)..."
-    sudo pacman -S --needed --noconfirm git
+    if (( IMMUTABLE )); then
+        require_preinstalled git || exit 1
+    else
+        msg "git is not installed; installing it (sudo)..."
+        sudo pacman -S --needed --noconfirm git
+    fi
 fi
 
 # ── Check whether the remote branch has moved past the installed build ───────
@@ -93,13 +163,18 @@ if [[ -z "$remote_full" ]]; then
     err "could not resolve branch '$BRANCH' on $REMOTE (network down?)"
     exit 1
 fi
-remote_short="${remote_full:0:7}"
+# pkgver embeds `git rev-parse --short HEAD`, whose width follows core.abbrev
+# and grows with the object count.  Compare against the installed hash's own
+# length rather than assuming 7, so the check keeps working as the repo grows.
+installed_hash="${installed_ver#*.}"   # r2513.754b539-1 -> 754b539-1
+installed_hash="${installed_hash%%-*}" #                 -> 754b539
+abbrev_len="${#installed_hash}"
+(( abbrev_len >= 7 && abbrev_len <= 40 )) || abbrev_len=7
+remote_short="${remote_full:0:abbrev_len}"
 msg2 "Remote HEAD: $remote_short"
 
-# pkgver format is r<count>.<shorthash> (see PKGBUILD), so the installed
-# version string contains the short commit hash of the built source.
 up_to_date=0
-if [[ -n "$installed_ver" && "$installed_ver" == *".${remote_short}-"* ]]; then
+if [[ -n "$installed_ver" && "$installed_hash" == "$remote_short" ]]; then
     up_to_date=1
 fi
 
@@ -118,6 +193,15 @@ if (( up_to_date )) && ! (( FORCE )); then
     exit 0
 fi
 
+# Checked after --check (a read-only query needs none of this) but before the
+# build, so a misconfigured system fails in a second rather than after a
+# full gamescope compile.
+if (( IMMUTABLE )) && ! command -v deploytix >/dev/null; then
+    err "immutable system detected but the 'deploytix' binary is not on PATH."
+    err "it is required to install packages transactionally; cannot continue."
+    exit 1
+fi
+
 # ── Build with the canonical PKGBUILD (exact same meson options) ─────────────
 msg "Rebuilding gamescope from $BRANCH with the Deploytix build configuration..."
 rm -rf "$BUILD_DIR"
@@ -125,14 +209,33 @@ mkdir -p "$BUILD_DIR"
 cp "$PKGBUILD_SRC" "$BUILD_DIR/PKGBUILD"
 cd "$BUILD_DIR"
 
-# base-devel is assumed present by makepkg (AUR convention) but is not
-# guaranteed on every deployment; --needed makes this a no-op when it is.
-msg2 "Ensuring build prerequisites (base-devel)..."
-sudo pacman -S --needed --noconfirm base-devel
+if (( IMMUTABLE )); then
+    # No dependency syncing is possible against a read-only /usr, so check the
+    # full set up front and hand back one actionable command.  base-devel is a
+    # group rather than a package, so its members that makepkg actually needs
+    # are listed explicitly.
+    msg "Verifying build prerequisites (read-only system, nothing will be installed)..."
+    mapfile -t pkgbuild_deps < <(
+        bash -c 'source "$1"; printf "%s\n" "${depends[@]}" "${makedepends[@]}"' \
+             _ "$BUILD_DIR/PKGBUILD"
+    )
+    require_preinstalled \
+        binutils fakeroot gcc make patch \
+        "${pkgbuild_deps[@]}" || exit 1
+    msg2 "All build prerequisites present."
 
-# --syncdeps pulls makedepends via sudo pacman; --cleanbuild guarantees a
-# pristine srcdir so stale build artifacts can never leak into the package.
-makepkg --syncdeps --force --cleanbuild --noconfirm
+    # --syncdeps would shell out to `pacman -S`; deps are verified above.
+    makepkg --force --cleanbuild --noconfirm
+else
+    # base-devel is assumed present by makepkg (AUR convention) but is not
+    # guaranteed on every deployment; --needed makes this a no-op when it is.
+    msg2 "Ensuring build prerequisites (base-devel)..."
+    sudo pacman -S --needed --noconfirm base-devel
+
+    # --syncdeps pulls makedepends via sudo pacman; --cleanbuild guarantees a
+    # pristine srcdir so stale build artifacts can never leak into the package.
+    makepkg --syncdeps --force --cleanbuild --noconfirm
+fi
 
 # BUILD_DIR was wiped above, so any package here is from this run.  Exclude
 # split debug packages in case makepkg.conf has OPTIONS=(debug).
@@ -145,11 +248,15 @@ fi
 
 # ── Install — raise the guard flag so the pacman hook lets this through ──────
 # The flag must never outlive this script: if it lingered (e.g. Ctrl-C while
-# pacman -U is waiting or running), the guard hook would wave through the AUR
+# pacman is waiting or running), the guard hook would wave through the AUR
 # gamescope installs it exists to block.  The EXIT trap removes it on every
 # exit path; the INT/TERM traps convert those signals into an exit so the
 # EXIT trap is guaranteed to run.  (/run is tmpfs, so even an unkillable
 # SIGKILL leaves the flag behind only until reboot.)
+#
+# On an immutable system the guard hook runs inside the chroot that
+# `deploytix update` sets up; artix-chroot bind-mounts the host's /run into it,
+# so the flag below is visible there and the transaction is let through.
 remove_guard_flag() { sudo rm -f "$GUARD_FLAG"; }
 msg "Installing $(basename "$pkgfile")..."
 sudo mkdir -p "$(dirname "$GUARD_FLAG")"
@@ -158,14 +265,33 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 sudo touch "$GUARD_FLAG"
 rc=0
-sudo pacman -U --noconfirm "$pkgfile" || rc=$?
+if (( IMMUTABLE )); then
+    # Builds a new snapshot set (btrfs) or inactive slot (LVM A/B), installs
+    # into it with `pacman -U`, and repoints the boot pointer.  The running
+    # system is untouched; a failure discards the half-built set.
+    sudo deploytix update "$pkgfile" || rc=$?
+else
+    sudo pacman -U --noconfirm "$pkgfile" || rc=$?
+fi
 remove_guard_flag
 trap - EXIT INT TERM
 if (( rc != 0 )); then
-    err "pacman -U failed (exit $rc); the previous gamescope remains installed."
+    if (( IMMUTABLE )); then
+        err "deploytix update failed (exit $rc); the running system is unchanged."
+    else
+        err "pacman -U failed (exit $rc); the previous gamescope remains installed."
+    fi
     exit "$rc"
 fi
 
+# Step out of BUILD_DIR before removing it, or every subshell below inherits a
+# deleted cwd and bash warns about getcwd.
+cd /
 rm -rf "$BUILD_DIR"
-msg "gamescope updated successfully: $(pacman -Q "$PKGNAME")"
-msg2 "Restart the gamescope session (or reboot) to pick up the new build."
+if (( IMMUTABLE )); then
+    msg "gamescope update staged successfully."
+    msg2 "Reboot to activate it (roll back with \`deploytix rollback\` if needed)."
+else
+    msg "gamescope updated successfully: $(pacman -Q "$PKGNAME")"
+    msg2 "Restart the gamescope session (or reboot) to pick up the new build."
+fi
