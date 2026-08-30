@@ -18,6 +18,22 @@
 //!   install/upgrade not initiated by the update utility.
 //! - `IgnorePkg = gamescope-git` in the target's `pacman.conf` so `pacman
 //!   -Syu` / `yay -Syu` never try to replace the package on their own.
+//!
+//! ## Immutable deployments
+//! The same files are deployed regardless of `immutable_root`; the update
+//! utility detects the read-only root at runtime (either backend's marker —
+//! `/.deploytix-pair` or `/boot/deploytix-slots.conf` — or a read-only `/usr`)
+//! and adapts, so a system migrated to immutable after install still works:
+//! - it installs the rebuilt package with `deploytix update <pkgfile>`, which
+//!   stages it into a new snapshot set / inactive slot for the next reboot,
+//!   rather than `pacman -U` against the read-only live root;
+//! - it never tries to sync build dependencies (`pacman -S`, `makepkg
+//!   --syncdeps`), which cannot write to `/usr`. Missing ones are reported up
+//!   front with the `deploytix update` command that adds them.
+//!
+//! The guard hook still applies inside the update chroot: `artix-chroot`
+//! bind-mounts the host `/run`, so the flag the utility raises is visible to
+//! the hook running against the new set.
 
 use crate::config::DeploymentConfig;
 use crate::utils::command::CommandRunner;

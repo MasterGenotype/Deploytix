@@ -302,7 +302,7 @@ Common flags: `--config <path>`, `--dbpath <path>`, `--root <path>`, `--include-
 The `[packages]` section provides a full gaming/handheld device stack:
 
 - **Steam + Gamescope** — Installs Steam and builds the Bazzite-maintained gamescope compositor from vendored source (`vendor/gamescope`).
-- **Gamescope Updates** — Deploys `deploytix-update-gamescope` (with an "Update Gamescope" desktop entry) which rebuilds gamescope from the same fork with the exact same meson options every time. AUR rebuilds of gamescope break the Steam session, so a pacman hook aborts any gamescope update not made through this tool and `IgnorePkg = gamescope-git` keeps `-Syu` from touching it.
+- **Gamescope Updates** — Deploys `deploytix-update-gamescope` (with an "Update Gamescope" desktop entry) which rebuilds gamescope from the same fork with the exact same meson options every time. AUR rebuilds of gamescope break the Steam session, so a pacman hook aborts any gamescope update not made through this tool and `IgnorePkg = gamescope-git` keeps `-Syu` from touching it. On immutable installs it detects the read-only root and installs the rebuilt package through `deploytix update` (active on the next reboot) instead of `pacman -U`.
 - **Session Switching** — Deploys greetd-based scripts for switching between a gamescope (Steam Deck-style) session and a desktop session. Includes `deploytix-session-manager`, `session-select`, `return-to-gamemode`, PAM configs, and a `steamos-session-select` compatibility symlink.
 - **Handheld Daemon (HHD)** — Gamepad remapping, TDP control, per-game profiles (AUR: `hhd-git`). Writes init-specific service files.
 - **Decky Loader** — Steam plugin framework (AUR: `decky-loader-bin`). Writes init-specific service files.
