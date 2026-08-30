@@ -17,7 +17,7 @@ cargo build --release --features gui     # Release CLI + GUI binary
 cargo portable                           # Static musl binary (zero runtime deps)
 cargo clippy --all-features -- -D warnings  # Lint (warnings are errors)
 cargo fmt -- --check                     # Format check
-cargo test --all-features                # Run tests (no test suite yet)
+cargo test --all-features                # Run tests
 ```
 
 **Makefile shortcuts:**

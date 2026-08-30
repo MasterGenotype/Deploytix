@@ -277,6 +277,42 @@ const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "tkg-gui-git",
 ];
 
+/// PKGBUILDs embedded in the binary so the installer can build the custom
+/// packages with no clone of the deploytix repo present.
+///
+/// Only self-contained PKGBUILDs can live here — ones whose `source=()` is an
+/// upstream git URL, so `makepkg` fetches everything itself from just this
+/// file. `pkg/PKGBUILD` (deploytix-git/deploytix-gui-git) deliberately is not
+/// among them: it builds from `$startdir/..` with an empty `source=()`, so it
+/// needs the repo tree and cannot be materialised standalone.
+///
+/// Keyed by the repo directory name from [`repo_dir_for_package`].
+const EMBEDDED_PKGBUILDS: &[(&str, &str)] = &[
+    // Same file the deployed `deploytix-update-gamescope` rebuilds from, so a
+    // freshly installed gamescope and a later in-place update are byte-for-byte
+    // the same build configuration.
+    (
+        "gamescope",
+        include_str!("../resources/gamescope_update/PKGBUILD"),
+    ),
+    (
+        "tkg-gui",
+        include_str!("../resources/custom_pkgbuilds/tkg-gui.PKGBUILD"),
+    ),
+];
+
+/// Directory under which embedded PKGBUILDs are materialised for building.
+///
+/// `/var/tmp` rather than `/tmp`: these builds need several GB of scratch
+/// space (gamescope compiles a whole compositor plus wlroots), and `/tmp` is a
+/// RAM-backed tmpfs on the live ISO and on many desktop installs.
+const EMBEDDED_BUILD_ROOT: &str = "/var/tmp/deploytix-pkgbuild";
+
+/// Unprivileged account used for `makepkg` when the installer was not started
+/// through sudo/pkexec (e.g. a root shell on the live ISO) and there is
+/// therefore no invoking user to drop to.
+const FALLBACK_BUILD_USER: &str = "nobody";
+
 /// Path where the ISO live-overlay embeds the deploytix repo.
 const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
 
@@ -555,47 +591,191 @@ fn username_for_uid(uid: u32) -> Option<String> {
     None
 }
 
+/// The embedded PKGBUILD for `pkg_name`, if one exists.
+fn embedded_pkgbuild_for(pkg_name: &str) -> Option<&'static str> {
+    let repo = repo_dir_for_package(pkg_name);
+    EMBEDDED_PKGBUILDS
+        .iter()
+        .find(|(name, _)| *name == repo)
+        .map(|(_, contents)| *contents)
+}
+
+/// Write the embedded PKGBUILD for `pkg_name` into its own build directory
+/// under [`EMBEDDED_BUILD_ROOT`], owned by `build_user` so `makepkg` (which
+/// refuses to run as root) can write its `src`/`pkg` trees there.
+///
+/// Returns the directory containing the PKGBUILD.
+fn materialize_embedded_pkgbuild(pkg_name: &str, build_user: &str) -> Option<PathBuf> {
+    let contents = embedded_pkgbuild_for(pkg_name)?;
+    let dir = Path::new(EMBEDDED_BUILD_ROOT).join(repo_dir_for_package(pkg_name));
+
+    // Start from a clean directory so a previous failed run cannot leak
+    // stale sources or packages into this build.
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("Could not create build dir {}: {}", dir.display(), e);
+        return None;
+    }
+    if let Err(e) = std::fs::write(dir.join("PKGBUILD"), contents) {
+        warn!("Could not write PKGBUILD into {}: {}", dir.display(), e);
+        return None;
+    }
+
+    // makepkg writes srcdir/pkgdir alongside the PKGBUILD, so the build user
+    // needs to own the tree.  chown -R is the portable way to do this without
+    // pulling in a users/groups crate.
+    let status = std::process::Command::new("chown")
+        .args(["-R", &format!("{build_user}:"), &dir.to_string_lossy()])
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => {
+            warn!(
+                "Could not chown {} to {}; makepkg may fail",
+                dir.display(),
+                build_user
+            );
+        }
+    }
+
+    info!(
+        "Materialised embedded PKGBUILD for {} at {}",
+        pkg_name,
+        dir.display()
+    );
+    Some(dir)
+}
+
+/// Account to run `makepkg` as: the user who invoked the installer, or
+/// [`FALLBACK_BUILD_USER`] when it was started directly as root (no
+/// `SUDO_USER`/`PKEXEC_UID`), which is the common case on the live ISO.
+///
+/// Returns `None` only when neither is usable, which makes building impossible
+/// since `makepkg` refuses to run as root.
+fn resolve_build_user() -> Option<String> {
+    if let Some(user) = resolve_invoking_username() {
+        return Some(user);
+    }
+    if username_for_uid_exists(FALLBACK_BUILD_USER) {
+        info!(
+            "No invoking user (not started via sudo/pkexec); building as {}",
+            FALLBACK_BUILD_USER
+        );
+        return Some(FALLBACK_BUILD_USER.to_string());
+    }
+    None
+}
+
+/// Whether `name` exists as an account in `/etc/passwd`.
+fn username_for_uid_exists(name: &str) -> bool {
+    std::fs::read_to_string("/etc/passwd")
+        .map(|passwd| {
+            passwd
+                .lines()
+                .any(|line| line.split(':').next() == Some(name))
+        })
+        .unwrap_or(false)
+}
+
+/// Create a writable scratch home for `build_user` and return it.
+///
+/// Only used for [`FALLBACK_BUILD_USER`], whose real home is not writable (or
+/// does not exist). Returns `None` if it could not be prepared, in which case
+/// the build simply runs with whatever HOME sudo provides.
+fn ensure_scratch_home(build_user: &str) -> Option<PathBuf> {
+    let home = Path::new(EMBEDDED_BUILD_ROOT).join(".home");
+    if let Err(e) = std::fs::create_dir_all(&home) {
+        warn!("Could not create scratch home {}: {}", home.display(), e);
+        return None;
+    }
+    let ok = std::process::Command::new("chown")
+        .args(["-R", &format!("{build_user}:"), &home.to_string_lossy()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        warn!("Could not chown scratch home {}", home.display());
+        return None;
+    }
+    Some(home)
+}
+
 /// Build a custom package from its PKGBUILD.
 ///
-/// Runs `makepkg` as the invoking user in the PKGBUILD directory.
+/// Prefers a PKGBUILD from a local clone of the deploytix repo (so a
+/// developer's local edits win), and otherwise materialises the copy embedded
+/// in this binary — which is what lets a plain `deploytix install` succeed with
+/// no clone, no submodules and no pre-built packages.
+///
+/// Runs `makepkg` as an unprivileged user, since it refuses to run as root.
 /// Returns paths to any `.pkg.tar.zst` files produced.
 fn build_package_from_source(pkg_name: &str) -> Vec<PathBuf> {
-    let pkgbuild_dir = match find_pkgbuild_dir(pkg_name) {
-        Some(dir) => dir,
+    let username = match resolve_build_user() {
+        Some(u) => u,
         None => {
-            warn!("No PKGBUILD found for {}", pkg_name);
+            warn!(
+                "Cannot determine an unprivileged user for makepkg \
+                 (no SUDO_USER/PKEXEC_UID and no '{}' account)",
+                FALLBACK_BUILD_USER
+            );
             return Vec::new();
         }
     };
 
-    let username = match resolve_invoking_username() {
-        Some(u) => u,
-        None => {
-            warn!("Cannot determine invoking user for makepkg (need SUDO_USER or PKEXEC_UID)");
-            return Vec::new();
+    let pkgbuild_dir = match find_pkgbuild_dir(pkg_name) {
+        Some(dir) => {
+            info!("Using PKGBUILD from local repo: {}", dir.display());
+            dir
         }
+        None => match materialize_embedded_pkgbuild(pkg_name, &username) {
+            Some(dir) => dir,
+            None => {
+                warn!(
+                    "No PKGBUILD found for {} — none in a local repo clone and \
+                     none embedded (it needs the repo tree to build)",
+                    pkg_name
+                );
+                return Vec::new();
+            }
+        },
     };
 
     info!(
-        "Building {} from {} as user {}",
+        "Building {} from {} as user {} — this can take a while",
         pkg_name,
         pkgbuild_dir.display(),
         username
     );
 
-    let status = std::process::Command::new("sudo")
-        .args([
-            "-u",
-            &username,
-            "makepkg",
-            "-s",
-            "--noconfirm",
-            "--needed",
-            "--clean",
-        ])
+    // The fallback account has no usable home (`nobody` is typically
+    // /nonexistent), but every one of these packages builds with cargo, which
+    // needs a writable HOME for ~/.cargo. Give it a scratch home rather than
+    // letting the build fail on an unwritable registry path. The invoking
+    // user's real home is left alone so their cargo cache is reused.
+    let scratch_home = (username == FALLBACK_BUILD_USER)
+        .then(|| ensure_scratch_home(&username))
+        .flatten();
+
+    // sudo's env_reset drops the caller's environment, so HOME has to be set
+    // on the far side of it via `env`.
+    let mut command = std::process::Command::new("sudo");
+    command.args(["-u", &username]);
+    if let Some(ref home) = scratch_home {
+        command.args([
+            "env",
+            &format!("HOME={}", home.display()),
+            &format!("CARGO_HOME={}/.cargo", home.display()),
+        ]);
+    }
+    command.args(["makepkg", "-s", "--noconfirm", "--needed", "--clean"]);
+
+    // Build output is inherited rather than discarded: these builds compile
+    // Rust and (for gamescope) a full compositor, so silence for many minutes
+    // reads as a hang.
+    let status = command
         .current_dir(&pkgbuild_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status();
 
     match status {
@@ -822,17 +1002,40 @@ pub fn prepare_deploytix_repo(
         } else {
             still_missing.join(", ")
         };
+        // Split the report: packages with an embedded PKGBUILD were actually
+        // attempted and failed (network, makedepends, a broken build), which is
+        // a different problem from one that can only come from the repo tree.
+        let (buildable, needs_tree): (Vec<&str>, Vec<&str>) = still_missing
+            .iter()
+            .copied()
+            .partition(|p| embedded_pkgbuild_for(p).is_some());
+
+        let mut hint = String::new();
+        if !buildable.is_empty() {
+            hint.push_str(&format!(
+                "\n{} can be built from source without a repo clone, so the \
+                 build itself failed. Check the makepkg output above; the usual \
+                 causes are no network access to fetch the sources, or missing \
+                 makedepends that pacman could not install.\n",
+                buildable.join(", ")
+            ));
+        }
+        if !needs_tree.is_empty() {
+            hint.push_str(&format!(
+                "\n{} is built from the deploytix repo tree itself and cannot be \
+                 fetched standalone. Run from the Deploytix live ISO (which has \
+                 it pre-built), or run the installer as a user whose \
+                 ~/.gitrepos/deploytix holds the repo.\n",
+                needs_tree.join(", ")
+            ));
+        }
+
         return Err(DeploytixError::ConfigError(format!(
             "Cannot resolve custom packages: {}\n\
-             These packages are not in any configured pacman repository, \
-             not found as pre-built .pkg.tar.zst files, and could not be \
-             built from source.\n\n\
-             To fix, try one of:\n\
-             - Run from the Deploytix live ISO (has all packages embedded)\n\
-             - Build packages first: cd pkg && makepkg -s\n\
-             - Initialize vendored submodules: git submodule update --init --recursive\n\
-             - Run iso/build-deploytix-iso.sh to build everything at once",
-            missing_str
+             These packages are not in any configured pacman repository, were \
+             not found as pre-built .pkg.tar.zst files, and could not be built.\n\
+             {}",
+            missing_str, hint
         )));
     }
 
@@ -1020,4 +1223,121 @@ pub fn run_basestrap_with_retries(
         command: "basestrap".to_string(),
         stderr: last_error.unwrap_or_else(|| "Unknown error after retries".to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_pkgbuilds_cover_the_submodule_packages() {
+        // These are the two packages a user cannot otherwise get without
+        // cloning the repo and initialising its submodules.
+        assert!(embedded_pkgbuild_for("gamescope-git").is_some());
+        assert!(embedded_pkgbuild_for("tkg-gui-git").is_some());
+    }
+
+    #[test]
+    fn deploytix_itself_has_no_embedded_pkgbuild() {
+        // pkg/PKGBUILD builds from `$startdir/..` with an empty source=(), so
+        // it cannot be materialised standalone. Embedding it would produce a
+        // PKGBUILD that fails at build time instead of a clear error.
+        assert!(embedded_pkgbuild_for("deploytix-git").is_none());
+        assert!(embedded_pkgbuild_for("deploytix-gui-git").is_none());
+        assert!(embedded_pkgbuild_for("some-other-pkg").is_none());
+    }
+
+    /// The invariant the whole on-demand build rests on: an embedded PKGBUILD
+    /// must fetch its own sources, because the installer hands makepkg nothing
+    /// but this one file in an otherwise empty directory.
+    #[test]
+    fn embedded_pkgbuilds_are_self_contained() {
+        for (repo, contents) in EMBEDDED_PKGBUILDS {
+            let source_line = contents
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("source="))
+                .unwrap_or_else(|| panic!("{repo}: embedded PKGBUILD has no source= line"));
+            assert!(
+                source_line.contains("git+http"),
+                "{repo}: source= must be a remote git URL so makepkg can fetch it \
+                 with no repo checkout present, got: {source_line}"
+            );
+            assert!(
+                !source_line.contains("file://"),
+                "{repo}: source= points at a local path, which is not reachable \
+                 when building from the embedded copy: {source_line}"
+            );
+        }
+    }
+
+    /// Each embedded PKGBUILD must build a package whose filename matches the
+    /// prefix the installer scans for, or the build would succeed and then be
+    /// reported as still missing.
+    #[test]
+    fn embedded_pkgbuilds_produce_recognised_package_names() {
+        for (repo, contents) in EMBEDDED_PKGBUILDS {
+            let pkgname = contents
+                .lines()
+                .map(str::trim)
+                .find_map(|l| l.strip_prefix("pkgname="))
+                .unwrap_or_else(|| panic!("{repo}: embedded PKGBUILD has no pkgname="));
+            assert!(
+                CUSTOM_PACKAGE_NAMES.contains(&pkgname),
+                "{repo}: pkgname '{pkgname}' is not in CUSTOM_PACKAGE_NAMES"
+            );
+            assert!(
+                CUSTOM_PKG_PREFIXES.contains(&format!("{pkgname}-").as_str()),
+                "{repo}: no CUSTOM_PKG_PREFIXES entry for pkgname '{pkgname}'"
+            );
+        }
+    }
+
+    #[test]
+    fn every_embedded_repo_key_maps_back_from_a_package_name() {
+        for (repo, _) in EMBEDDED_PKGBUILDS {
+            assert!(
+                CUSTOM_PACKAGE_NAMES
+                    .iter()
+                    .any(|p| repo_dir_for_package(p) == *repo),
+                "embedded key '{repo}' is unreachable from repo_dir_for_package"
+            );
+        }
+    }
+
+    #[test]
+    fn needed_custom_packages_selects_only_what_is_installed() {
+        let list: Vec<String> = ["base", "tkg-gui-git", "nano", "gamescope-git"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let needed = needed_custom_packages(&list);
+        assert_eq!(needed, vec!["gamescope-git", "tkg-gui-git"]);
+        assert!(needed_custom_packages(&["base".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn find_missing_packages_matches_on_filename_prefix() {
+        let found = vec![
+            PathBuf::from("/tmp/repo/gamescope-git-r2513.754b539-1-x86_64.pkg.tar.zst"),
+            PathBuf::from("/tmp/repo/deploytix-git-1.4.0-1-x86_64.pkg.tar.zst"),
+        ];
+        let needed = ["gamescope-git", "tkg-gui-git", "deploytix-git"];
+        assert_eq!(find_missing_packages(&needed, &found), vec!["tkg-gui-git"]);
+    }
+
+    /// `deploytix-gui-git` must not be considered satisfied by a
+    /// `deploytix-git-*` file: prefix matching is on `<name>-`, and
+    /// "deploytix-git-" is itself a prefix of nothing else.
+    #[test]
+    fn find_missing_packages_does_not_confuse_sibling_package_names() {
+        let found = vec![PathBuf::from(
+            "/tmp/repo/deploytix-git-1.4.0-1-x86_64.pkg.tar.zst",
+        )];
+        let needed = ["deploytix-git", "deploytix-gui-git"];
+        assert_eq!(
+            find_missing_packages(&needed, &found),
+            vec!["deploytix-gui-git"]
+        );
+    }
 }
