@@ -62,13 +62,109 @@ pub fn command_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Run a command in chroot using artix-chroot (if available) or plain chroot
+/// Shell that mounts the API filesystems a chroot needs (`/proc`, `/sys`,
+/// `/dev`, `/run`, `/tmp`), mirroring what `artix-chroot` does internally.
+///
+/// This is only used on the plain-`chroot` fallback path: `artools` is a
+/// host/ISO dependency and is *not* installed into deployed systems, so
+/// `deploytix update` / `rollback` on an immutable install always lands here.
+/// Without `/proc`, `/etc/mtab` (a symlink to `../proc/self/mounts`) dangles and
+/// pacman aborts with "could not determine filesystem mount points".
+///
+/// Every mount is best-effort: an already-mounted or unsupported one must not
+/// abort the whole setup, and a genuinely missing mount surfaces as the chrooted
+/// command's own error.
+pub fn chroot_api_setup_cmd(chroot_path: &str) -> String {
+    format!(
+        "t={t}; mkdir -p \"$t/proc\" \"$t/sys\" \"$t/dev\" \"$t/run\" \"$t/tmp\" 2>/dev/null; \
+         mount -t proc proc \"$t/proc\" -o nosuid,noexec,nodev 2>/dev/null || true; \
+         mount -t sysfs sys \"$t/sys\" -o nosuid,noexec,nodev,ro 2>/dev/null || true; \
+         if [ -d /sys/firmware/efi/efivars ]; then \
+             mkdir -p \"$t/sys/firmware/efi/efivars\" 2>/dev/null; \
+             mount -t efivarfs efivarfs \"$t/sys/firmware/efi/efivars\" -o nosuid,noexec,nodev 2>/dev/null || true; \
+         fi; \
+         mount -t devtmpfs udev \"$t/dev\" -o mode=0755,nosuid 2>/dev/null || \
+             mount --rbind /dev \"$t/dev\" 2>/dev/null || true; \
+         mkdir -p \"$t/dev/pts\" \"$t/dev/shm\" 2>/dev/null; \
+         mount -t devpts devpts \"$t/dev/pts\" -o mode=0620,gid=5,nosuid,noexec 2>/dev/null || true; \
+         mount -t tmpfs shm \"$t/dev/shm\" -o mode=1777,nosuid,nodev 2>/dev/null || true; \
+         mount --bind /run \"$t/run\" 2>/dev/null || true; \
+         mount -t tmpfs tmp \"$t/tmp\" -o mode=1777,strictatime,nodev,nosuid 2>/dev/null || true; \
+         true",
+        t = chroot_path,
+    )
+}
+
+/// Shell that releases whatever [`chroot_api_setup_cmd`] mounted, innermost
+/// first. Lazy unmount is the fallback so a busy mount never wedges the target.
+pub fn chroot_api_teardown_cmd(chroot_path: &str) -> String {
+    format!(
+        "t={t}; for m in tmp run dev/shm dev/pts dev sys/firmware/efi/efivars sys proc; do \
+             umount -R \"$t/$m\" 2>/dev/null || umount -Rl \"$t/$m\" 2>/dev/null || true; \
+         done; true",
+        t = chroot_path,
+    )
+}
+
+/// Run a shell snippet, discarding its outcome. Used for best-effort chroot
+/// mount setup/teardown, which must never mask the chrooted command's result.
+fn run_shell_quietly(script: &str) {
+    match Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) if !out.status.success() => {
+            debug!(
+                "chroot mount helper returned {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => debug!("chroot mount helper failed to run: {}", e),
+        _ => {}
+    }
+}
+
+/// Ensure `<chroot>/etc/mtab` exists, as the `filesystem` package ships it.
+///
+/// pacman reads it to enumerate mount points before committing a transaction;
+/// if a target's `/etc` lacks the link entirely, no amount of mounting `/proc`
+/// helps. Best-effort: a read-only or absent `/etc` is not fatal here, the
+/// chrooted command reports the real problem.
+fn ensure_chroot_mtab(chroot_path: &str) {
+    let etc = std::path::Path::new(chroot_path).join("etc");
+    if !etc.is_dir() {
+        return;
+    }
+    let mtab = etc.join("mtab");
+    // symlink_metadata, not exists(): a dangling symlink is still "present".
+    if std::fs::symlink_metadata(&mtab).is_ok() {
+        return;
+    }
+    if let Err(e) = std::os::unix::fs::symlink("../proc/self/mounts", &mtab) {
+        debug!("could not create {}: {}", mtab.display(), e);
+    }
+}
+
+/// Run a command in chroot using artix-chroot (if available) or plain chroot.
+///
+/// `artix-chroot` mounts the API filesystems itself; the plain-`chroot`
+/// fallback does not, so we set them up (and tear them down) around the
+/// command — otherwise pacman and mkinitcpio fail inside the chroot.
 pub fn run_in_artix_chroot(chroot_path: &str, command: &str) -> Result<Output> {
     if command_exists("artix-chroot") {
+        ensure_chroot_mtab(chroot_path);
         run_command("artix-chroot", &[chroot_path, "bash", "-c", command])
     } else {
-        // Fallback to plain chroot
-        run_command("chroot", &[chroot_path, "bash", "-c", command])
+        // Fallback to plain chroot: provide the mounts artix-chroot would have.
+        debug!("artix-chroot not found; using plain chroot with API mounts");
+        run_shell_quietly(&chroot_api_setup_cmd(chroot_path));
+        ensure_chroot_mtab(chroot_path);
+        let result = run_command("chroot", &[chroot_path, "bash", "-c", command]);
+        run_shell_quietly(&chroot_api_teardown_cmd(chroot_path));
+        result
     }
 }
 
@@ -266,5 +362,91 @@ impl CommandRunner {
             }
             PacmanDecision::Cancel => Err(DeploytixError::UserCancelled),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_valid_shell(script: &str) {
+        if let Ok(status) = Command::new("sh").arg("-n").arg("-c").arg(script).status() {
+            assert!(status.success(), "not valid shell:\n{script}");
+        }
+    }
+
+    #[test]
+    fn api_setup_mounts_everything_pacman_and_mkinitcpio_need() {
+        let s = chroot_api_setup_cmd("/run/deploytix-update/42");
+        // /proc is the one that made pacman fail: /etc/mtab -> ../proc/self/mounts.
+        assert!(s.contains("mount -t proc proc \"$t/proc\""));
+        assert!(s.contains("mount -t sysfs sys \"$t/sys\""));
+        assert!(s.contains("mount -t devtmpfs udev \"$t/dev\""));
+        assert!(s.contains("mount -t devpts devpts \"$t/dev/pts\""));
+        assert!(s.contains("mount -t tmpfs shm \"$t/dev/shm\""));
+        // /run is a plain bind, never rbind: the target lives under /run itself.
+        assert!(s.contains("mount --bind /run \"$t/run\""));
+        assert!(!s.contains("mount --rbind /run"));
+        assert_valid_shell(&s);
+    }
+
+    #[test]
+    fn api_setup_is_best_effort_and_never_aborts() {
+        let s = chroot_api_setup_cmd("/mnt/target");
+        assert!(!s.contains("set -e"));
+        assert!(s.ends_with("true"));
+        assert_valid_shell(&s);
+    }
+
+    #[test]
+    fn api_teardown_unmounts_innermost_first() {
+        let s = chroot_api_teardown_cmd("/run/deploytix-update/42");
+        let list: Vec<&str> = s
+            .split("for m in ")
+            .nth(1)
+            .and_then(|r| r.split(';').next())
+            .unwrap_or_default()
+            .split_whitespace()
+            .take_while(|w| *w != "do")
+            .collect();
+        assert_eq!(
+            list,
+            vec![
+                "tmp",
+                "run",
+                "dev/shm",
+                "dev/pts",
+                "dev",
+                "sys/firmware/efi/efivars",
+                "sys",
+                "proc"
+            ]
+        );
+        // Lazy unmount is the fallback so a busy mount cannot wedge the target.
+        assert!(s.contains("umount -Rl"));
+        assert_valid_shell(&s);
+    }
+
+    #[test]
+    fn ensure_mtab_creates_link_only_when_absent() {
+        let base = std::env::temp_dir().join(format!("deploytix-mtab-{}", std::process::id()));
+        let etc = base.join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+
+        ensure_chroot_mtab(base.to_str().unwrap());
+        let link = std::fs::read_link(etc.join("mtab")).unwrap();
+        assert_eq!(link.to_str().unwrap(), "../proc/self/mounts");
+
+        // Idempotent: an existing (here dangling) link is left alone.
+        ensure_chroot_mtab(base.to_str().unwrap());
+        assert!(std::fs::symlink_metadata(etc.join("mtab")).is_ok());
+
+        // No /etc at all → no-op, no panic.
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        ensure_chroot_mtab(empty.to_str().unwrap());
+        assert!(std::fs::symlink_metadata(empty.join("etc/mtab")).is_err());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -105,7 +105,7 @@ What it does:
    its pairing marker.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
-   `artix-chroot`.
+   `artix-chroot`, or plain `chroot` where `artools` is not installed.
 3. On success, points the default boot entry at the new set and regenerates
    grub.cfg. **Reboot to activate.**
 4. On failure, deletes the half-built set and leaves the running system
@@ -114,6 +114,16 @@ What it does:
 
 The running system is never modified, so an interrupted or failed update is a
 no-op.
+
+> **API filesystems in the update chroot.** `artools` (which provides
+> `artix-chroot`) is a host/ISO dependency and is *not* installed into deployed
+> systems, so `deploytix update` and `rollback` normally chroot with plain
+> `chroot`. That mounts nothing, so deploytix mounts `/proc`, `/sys`, `/dev`
+> (+ `pts`, `shm`), `/run` and `/tmp` into the target itself and releases them
+> afterwards (`utils::command::chroot_api_setup_cmd`). Without `/proc` the
+> `/etc/mtab` symlink (`../proc/self/mounts`) dangles and pacman aborts the
+> transaction with *"could not determine filesystem mount points"*; `grub-probe`
+> and `mkinitcpio` fail for the same reason.
 
 ---
 
