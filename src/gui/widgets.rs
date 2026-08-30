@@ -17,7 +17,9 @@ pub fn step_indicator(ui: &mut Ui, current: WizardStep) {
     let radius = 14.0;
     let y_circle = rect.top() + 20.0;
     let y_label = y_circle + radius + 10.0;
-    let margin_x = 45.0;
+    // Scale the side margin with the width so the outer labels stay inside
+    // the panel in narrow windows instead of running off the edge.
+    let margin_x = (rect.width() / (steps.len() as f32 * 2.0)).clamp(24.0, 45.0);
     let usable = rect.width() - margin_x * 2.0;
     let step_dx = if steps.len() > 1 {
         usable / (steps.len() - 1) as f32
@@ -65,7 +67,7 @@ pub fn step_indicator(ui: &mut Ui, current: WizardStep) {
             theme::TEXT_MUTED
         };
         let icon = if is_past {
-            "\u{2713}".to_string()
+            "\u{2714}".to_string()
         } else {
             format!("{}", i + 1)
         };
@@ -115,6 +117,51 @@ pub fn section(ui: &mut Ui, title: &str, add_body: impl FnOnce(&mut Ui)) {
             add_body(ui);
         });
     ui.add_space(theme::SPACING_SM);
+}
+
+// ── Text fields ────────────────────────────────────────────────────────
+
+/// Render a labelled single-line text field that fills its column.
+///
+/// A text edit defaults to `spacing.text_edit_width` (280 pt), which together
+/// with an inline label overruns a narrow column; stacking the label above a
+/// full-width field keeps the row inside the column at any size.
+pub fn text_row(ui: &mut Ui, label: &str, value: &mut String) {
+    ui.label(label);
+    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+}
+
+/// [`text_row`] for secrets: the field masks what it contains.
+pub fn password_row(ui: &mut Ui, label: &str, value: &mut String) {
+    ui.label(label);
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .password(true)
+            .desired_width(f32::INFINITY),
+    );
+}
+
+// ── Combo boxes ────────────────────────────────────────────────────────
+
+/// Render a labelled combo box that spans the full width of its column.
+///
+/// Combo boxes size themselves to their selected text by default, which
+/// overflows a narrow column and pushes into the neighbouring one.  Stacking
+/// the label above a width-bounded combo keeps every option readable no matter
+/// how narrow the column gets.
+pub fn combo_row<R>(
+    ui: &mut Ui,
+    label: &str,
+    id_salt: &str,
+    selected_text: String,
+    contents: impl FnOnce(&mut Ui) -> R,
+) {
+    ui.label(label);
+    let width = (ui.available_width() - theme::SPACING_SM).max(120.0);
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected_text)
+        .width(width)
+        .show_ui(ui, contents);
 }
 
 // ── Validation messages ────────────────────────────────────────────────

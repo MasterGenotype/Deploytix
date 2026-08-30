@@ -22,7 +22,7 @@ pub fn show(ui: &mut Ui, install: &InstallState) {
     } else if install.finished {
         widgets::section(ui, "Success", |ui| {
             ui.label(
-                RichText::new("\u{2713} Installation completed successfully!")
+                RichText::new("\u{2714} Installation completed successfully!")
                     .color(theme::SUCCESS)
                     .strong(),
             );
@@ -39,9 +39,14 @@ pub fn show(ui: &mut Ui, install: &InstallState) {
 
     ui.add_space(theme::SPACING_SM);
 
+    // Give the log whatever vertical space is left rather than a fixed slab,
+    // so it neither overflows a short window nor wastes a tall one. The
+    // subtraction covers the section frame's own padding and heading.
+    let log_height = (ui.available_height() - 70.0).max(120.0);
+
     widgets::section(ui, "Log", |ui| {
         let scroll = egui::ScrollArea::vertical()
-            .max_height(280.0)
+            .max_height(log_height)
             .auto_shrink([false, false])
             .stick_to_bottom(true);
 
