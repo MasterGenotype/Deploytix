@@ -18,28 +18,29 @@ pub(crate) fn show_sections(
         if packages.install_session_switching && packages.network_backend == NetworkBackend::Iwd {
             packages.network_backend = NetworkBackend::NetworkManager;
         }
-        ui.horizontal(|ui| {
-            ui.label("Backend:");
-            egui::ComboBox::from_id_salt("network")
-                .selected_text(format!("{}", packages.network_backend))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut packages.network_backend,
-                        NetworkBackend::Iwd,
-                        "iwd + GUI frontend (AUR)",
-                    );
-                    ui.selectable_value(
-                        &mut packages.network_backend,
-                        NetworkBackend::NetworkManager,
-                        "NetworkManager + iwd",
-                    );
-                    ui.selectable_value(
-                        &mut packages.network_backend,
-                        NetworkBackend::NetworkManagerWpa,
-                        "NetworkManager + wpa_supplicant",
-                    );
-                });
-        });
+        widgets::combo_row(
+            ui,
+            "Backend:",
+            "network",
+            format!("{}", packages.network_backend),
+            |ui| {
+                ui.selectable_value(
+                    &mut packages.network_backend,
+                    NetworkBackend::Iwd,
+                    "iwd + GUI frontend (AUR)",
+                );
+                ui.selectable_value(
+                    &mut packages.network_backend,
+                    NetworkBackend::NetworkManager,
+                    "NetworkManager + iwd",
+                );
+                ui.selectable_value(
+                    &mut packages.network_backend,
+                    NetworkBackend::NetworkManagerWpa,
+                    "NetworkManager + wpa_supplicant",
+                );
+            },
+        );
         if packages.install_session_switching {
             widgets::info_text(
                 ui,
@@ -51,28 +52,25 @@ pub(crate) fn show_sections(
         // Sub-choice: iwd GUI frontend (AUR) only when standalone iwd is picked.
         if packages.network_backend == NetworkBackend::Iwd {
             ui.add_space(theme::SPACING_XS);
-            ui.horizontal(|ui| {
-                ui.label("Frontend:");
-                egui::ComboBox::from_id_salt("iwd_frontend")
-                    .selected_text(format!("{}", packages.iwd_frontend))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut packages.iwd_frontend,
-                            IwdFrontend::Iwgtk,
-                            "iwgtk (GTK)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.iwd_frontend,
-                            IwdFrontend::Iwdgui,
-                            "iwdgui (GTK)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.iwd_frontend,
-                            IwdFrontend::Iwqt,
-                            "iwqt (Qt)",
-                        );
-                    });
-            });
+            widgets::combo_row(
+                ui,
+                "Frontend:",
+                "iwd_frontend",
+                format!("{}", packages.iwd_frontend),
+                |ui| {
+                    ui.selectable_value(
+                        &mut packages.iwd_frontend,
+                        IwdFrontend::Iwgtk,
+                        "iwgtk (GTK)",
+                    );
+                    ui.selectable_value(
+                        &mut packages.iwd_frontend,
+                        IwdFrontend::Iwdgui,
+                        "iwdgui (GTK)",
+                    );
+                    ui.selectable_value(&mut packages.iwd_frontend, IwdFrontend::Iwqt, "iwqt (Qt)");
+                },
+            );
             if !packages.install_yay {
                 widgets::info_text(
                     ui,
@@ -88,15 +86,9 @@ pub(crate) fn show_sections(
         // from the very first boot (Steam's first-run bootstrap in Game Mode
         // needs network before its own OOBE network page exists).
         ui.label("Pre-seed Wi-Fi network (optional):");
-        ui.horizontal(|ui| {
-            ui.label("SSID:");
-            ui.text_edit_singleline(&mut packages.wifi_ssid);
-        });
+        widgets::text_row(ui, "SSID:", &mut packages.wifi_ssid);
         if !packages.wifi_ssid.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("Passphrase:");
-                ui.add(egui::TextEdit::singleline(&mut packages.wifi_password).password(true));
-            });
+            widgets::password_row(ui, "Passphrase:", &mut packages.wifi_password);
             widgets::info_text(
                 ui,
                 "Credentials are written to the installed system so it auto-connects \
@@ -133,9 +125,12 @@ pub(crate) fn show_sections(
     });
 
     widgets::section(ui, "Desktop Environment", |ui| {
-        egui::ComboBox::from_id_salt("desktop")
-            .selected_text(format!("{}", packages.desktop_env))
-            .show_ui(ui, |ui| {
+        widgets::combo_row(
+            ui,
+            "Environment:",
+            "desktop",
+            format!("{}", packages.desktop_env),
+            |ui| {
                 ui.selectable_value(
                     &mut packages.desktop_env,
                     DesktopEnvironment::None,
@@ -152,7 +147,8 @@ pub(crate) fn show_sections(
                     "GNOME",
                 );
                 ui.selectable_value(&mut packages.desktop_env, DesktopEnvironment::Xfce, "XFCE");
-            });
+            },
+        );
 
         if packages.desktop_env != DesktopEnvironment::None {
             // The gamescope ↔ desktop loop is built on greetd; coerce the
@@ -165,38 +161,39 @@ pub(crate) fn show_sections(
             }
 
             ui.add_space(theme::SPACING_XS);
-            ui.horizontal(|ui| {
-                ui.label("Display manager:");
-                egui::ComboBox::from_id_salt("display_manager")
-                    .selected_text(format!("{}", packages.display_manager))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut packages.display_manager,
-                            DisplayManager::Greetd,
-                            "greetd (auto-login, deploytix default)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.display_manager,
-                            DisplayManager::Sddm,
-                            "SDDM (login screen)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.display_manager,
-                            DisplayManager::Gdm,
-                            "GDM (login screen)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.display_manager,
-                            DisplayManager::Lightdm,
-                            "LightDM (login screen)",
-                        );
-                        ui.selectable_value(
-                            &mut packages.display_manager,
-                            DisplayManager::None,
-                            "None (TTY login, startx)",
-                        );
-                    });
-            });
+            widgets::combo_row(
+                ui,
+                "Display manager:",
+                "display_manager",
+                format!("{}", packages.display_manager),
+                |ui| {
+                    ui.selectable_value(
+                        &mut packages.display_manager,
+                        DisplayManager::Greetd,
+                        "greetd (auto-login, deploytix default)",
+                    );
+                    ui.selectable_value(
+                        &mut packages.display_manager,
+                        DisplayManager::Sddm,
+                        "SDDM (login screen)",
+                    );
+                    ui.selectable_value(
+                        &mut packages.display_manager,
+                        DisplayManager::Gdm,
+                        "GDM (login screen)",
+                    );
+                    ui.selectable_value(
+                        &mut packages.display_manager,
+                        DisplayManager::Lightdm,
+                        "LightDM (login screen)",
+                    );
+                    ui.selectable_value(
+                        &mut packages.display_manager,
+                        DisplayManager::None,
+                        "None (TTY login, startx)",
+                    );
+                },
+            );
             if packages.install_session_switching {
                 widgets::info_text(
                     ui,

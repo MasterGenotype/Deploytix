@@ -6,22 +6,13 @@ use egui::Ui;
 /// Render user configuration sections. Returns `true` when valid.
 pub(crate) fn show_sections(ui: &mut Ui, user: &mut UserState) -> bool {
     widgets::section(ui, "Account", |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Username:");
-            ui.text_edit_singleline(&mut user.username);
-        });
+        widgets::text_row(ui, "Username:", &mut user.username);
         ui.add_space(theme::SPACING_XS);
 
-        ui.horizontal(|ui| {
-            ui.label("Password:");
-            ui.add(egui::TextEdit::singleline(&mut user.password).password(true));
-        });
+        widgets::password_row(ui, "Password:", &mut user.password);
         ui.add_space(theme::SPACING_XS);
 
-        ui.horizontal(|ui| {
-            ui.label("Confirm:");
-            ui.add(egui::TextEdit::singleline(&mut user.password_confirm).password(true));
-        });
+        widgets::password_row(ui, "Confirm:", &mut user.password_confirm);
         ui.add_space(theme::SPACING_SM);
 
         ui.checkbox(&mut user.sudoer, "Add user to wheel group (sudo access)");

@@ -170,18 +170,18 @@ impl DeploytixGui {
             Ok(content) => match std::fs::write(&self.install.save_config_path, &content) {
                 Ok(()) => {
                     self.install.save_config_status = Some((
-                        format!("\u{2713} Saved to {}", self.install.save_config_path),
+                        format!("\u{2714} Saved to {}", self.install.save_config_path),
                         false,
                     ));
                 }
                 Err(e) => {
                     self.install.save_config_status =
-                        Some((format!("\u{2717} Write failed: {}", e), true));
+                        Some((format!("\u{2716} Write failed: {}", e), true));
                 }
             },
             Err(e) => {
                 self.install.save_config_status =
-                    Some((format!("\u{2717} Serialization failed: {}", e), true));
+                    Some((format!("\u{2716} Serialization failed: {}", e), true));
             }
         }
     }
@@ -382,10 +382,12 @@ impl DeploytixGui {
             } => {
                 let warn_basestrap = matches!(inv.kind, PacmanKind::Basestrap);
                 let mut close_with: Option<PacmanDecision> = None;
+                let (modal_width, body_height) = modal_bounds(ctx);
                 egui::Window::new(format!("Review: {}", inv.label))
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(640.0)
+                    .default_width(modal_width)
+                    .max_width(modal_width)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ctx, |ui| {
                         ui.label(
@@ -407,23 +409,27 @@ impl DeploytixGui {
                             );
                             ui.add_space(theme::SPACING_XS);
                         }
-                        ui.label("Packages (one per line):");
-                        ui.add(
-                            egui::TextEdit::multiline(edited_packages)
-                                .desired_rows(8)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        ui.add_space(theme::SPACING_XS);
-                        ui.label("Extra flags (one per line):");
-                        ui.add(
-                            egui::TextEdit::multiline(edited_flags)
-                                .desired_rows(2)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
+                        egui::ScrollArea::vertical()
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                ui.label("Packages (one per line):");
+                                ui.add(
+                                    egui::TextEdit::multiline(edited_packages)
+                                        .desired_rows(8)
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                ui.add_space(theme::SPACING_XS);
+                                ui.label("Extra flags (one per line):");
+                                ui.add(
+                                    egui::TextEdit::multiline(edited_flags)
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                            });
                         ui.add_space(theme::SPACING_SM);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.button("Approve").clicked() {
                                 close_with = Some(PacmanDecision::Approve);
                             }
@@ -467,43 +473,50 @@ impl DeploytixGui {
                 reply: _,
             } => {
                 let mut close_with: Option<(ExtraPackages, bool)> = None;
+                let (modal_width, body_height) = modal_bounds(ctx);
                 egui::Window::new("Install extra packages?")
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(640.0)
+                    .default_width(modal_width)
+                    .max_width(modal_width)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ctx, |ui| {
-                        ui.label("Repository packages (pacman -S, space-separated):");
-                        ui.add(
-                            egui::TextEdit::multiline(pacman_text)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        ui.add_space(theme::SPACING_XS);
-                        if *can_use_yay {
-                            ui.label("AUR packages (yay -S, space-separated):");
-                            ui.add(
-                                egui::TextEdit::multiline(aur_text)
-                                    .desired_rows(3)
-                                    .desired_width(f32::INFINITY)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new(
-                                    "AUR field disabled — install_yay = false.",
-                                )
-                                .italics(),
-                            );
-                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                ui.label("Repository packages (pacman -S, space-separated):");
+                                ui.add(
+                                    egui::TextEdit::multiline(pacman_text)
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                ui.add_space(theme::SPACING_XS);
+                                if *can_use_yay {
+                                    ui.label("AUR packages (yay -S, space-separated):");
+                                    ui.add(
+                                        egui::TextEdit::multiline(aur_text)
+                                            .desired_rows(3)
+                                            .desired_width(f32::INFINITY)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "AUR field disabled — install_yay = false.",
+                                        )
+                                        .italics(),
+                                    );
+                                }
+                                ui.add_space(theme::SPACING_SM);
+                                ui.checkbox(
+                                    save_to_config,
+                                    "Save these extras to my config \
+                                     (~/.config/deploytix/last-install.toml)",
+                                );
+                            });
                         ui.add_space(theme::SPACING_SM);
-                        ui.checkbox(
-                            save_to_config,
-                            "Save these extras to my config (~/.config/deploytix/last-install.toml)",
-                        );
-                        ui.add_space(theme::SPACING_SM);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.button("Install").clicked() {
                                 let extras = ExtraPackages {
                                     pacman: pacman_text
@@ -511,10 +524,7 @@ impl DeploytixGui {
                                         .map(|s| s.to_string())
                                         .collect(),
                                     aur: if *can_use_yay {
-                                        aur_text
-                                            .split_whitespace()
-                                            .map(|s| s.to_string())
-                                            .collect()
+                                        aur_text.split_whitespace().map(|s| s.to_string()).collect()
                                     } else {
                                         Vec::new()
                                     },
@@ -565,6 +575,11 @@ impl eframe::App for DeploytixGui {
                         .size(18.0)
                         .color(theme::ACCENT),
                 );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(theme::SPACING_MD);
+                    zoom_controls(ui);
+                });
             });
             ui.add_space(theme::SPACING_XS);
             widgets::step_indicator(ui, self.step);
@@ -630,6 +645,9 @@ impl eframe::App for DeploytixGui {
         });
 
         // ── Main content ───────────────────────────────────────────
+        // The panel shrinks to whatever the header/footer leave behind; each
+        // step scrolls internally so no control is ever clipped, whatever the
+        // zoom factor or window size.
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(theme::SPACING_MD);
 
@@ -667,6 +685,53 @@ impl eframe::App for DeploytixGui {
                 }
             }
         });
+    }
+}
+
+/// Width for a prompt modal, and the height its scrollable body may take,
+/// both derived from the current viewport so the action buttons stay on
+/// screen whatever the zoom factor or window size.
+fn modal_bounds(ctx: &egui::Context) -> (f32, f32) {
+    let screen = ctx.screen_rect();
+    let width = (screen.width() * 0.9).min(640.0);
+    // Leave room for the title bar, the button row and the window margins.
+    let body_height = (screen.height() - 160.0).max(120.0);
+    (width, body_height)
+}
+
+/// Zoom out / reset / zoom in controls shown in the header.
+///
+/// Laid out right-to-left, so the buttons are declared in reverse of their
+/// on-screen order.
+fn zoom_controls(ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let zoom = ctx.zoom_factor();
+
+    if ui
+        .add_enabled(zoom < theme::MAX_ZOOM, egui::Button::new("\u{2795}"))
+        .on_hover_text("Zoom in (Ctrl +)")
+        .clicked()
+    {
+        theme::adjust_zoom(&ctx, theme::ZOOM_STEP);
+    }
+
+    if ui
+        .button(format!("{}%", (zoom * 100.0).round() as i32))
+        .on_hover_text(format!(
+            "Reset zoom to {}%",
+            (theme::DEFAULT_ZOOM * 100.0).round() as i32
+        ))
+        .clicked()
+    {
+        theme::reset_zoom(&ctx);
+    }
+
+    if ui
+        .add_enabled(zoom > theme::MIN_ZOOM, egui::Button::new("\u{2796}"))
+        .on_hover_text("Zoom out (Ctrl -)")
+        .clicked()
+    {
+        theme::adjust_zoom(&ctx, -theme::ZOOM_STEP);
     }
 }
 

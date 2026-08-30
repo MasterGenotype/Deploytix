@@ -17,286 +17,287 @@ pub fn show(
 ) -> bool {
     widgets::page_heading(ui, "Review Configuration");
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        // ── Summary table ──────────────────────────────────────────
-        widgets::section(ui, "Configuration Summary", |ui| {
-            let parts_str: String = disk
-                .partitions
-                .iter()
-                .map(|p| {
-                    if p.size_mib == 0 {
-                        format!("{} (remainder)", p.mount_point)
-                    } else {
-                        format!("{} ({} GiB)", p.mount_point, p.size_mib / 1024)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let mut gpu_list = Vec::new();
-            if packages.gpu_nvidia {
-                gpu_list.push("NVIDIA");
-            }
-            if packages.gpu_amd {
-                gpu_list.push("AMD");
-            }
-            if packages.gpu_intel {
-                gpu_list.push("Intel");
-            }
-            let gpu_str = if gpu_list.is_empty() {
-                "None".to_string()
-            } else {
-                gpu_list.join(", ")
-            };
-
-            egui::Grid::new("summary_grid")
-                .num_columns(2)
-                .spacing([20.0, 4.0])
-                .show(ui, |ui| {
-                    row(ui, "Target Disk", disk.selected_device_path());
-                    row(ui, "Partitions", &parts_str);
-                    row(ui, "Filesystem", &format!("{}", disk.filesystem));
-                    row(
-                        ui,
-                        "Encryption",
-                        if disk.encryption {
-                            "Enabled"
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // ── Summary table ──────────────────────────────────────────
+            widgets::section(ui, "Configuration Summary", |ui| {
+                let parts_str: String = disk
+                    .partitions
+                    .iter()
+                    .map(|p| {
+                        if p.size_mib == 0 {
+                            format!("{} (remainder)", p.mount_point)
                         } else {
-                            "Disabled"
-                        },
-                    );
-                    if disk.encryption {
+                            format!("{} ({} GiB)", p.mount_point, p.size_mib / 1024)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let mut gpu_list = Vec::new();
+                if packages.gpu_nvidia {
+                    gpu_list.push("NVIDIA");
+                }
+                if packages.gpu_amd {
+                    gpu_list.push("AMD");
+                }
+                if packages.gpu_intel {
+                    gpu_list.push("Intel");
+                }
+                let gpu_str = if gpu_list.is_empty() {
+                    "None".to_string()
+                } else {
+                    gpu_list.join(", ")
+                };
+
+                egui::Grid::new("summary_grid")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        row(ui, "Target Disk", disk.selected_device_path());
+                        row(ui, "Partitions", &parts_str);
+                        row(ui, "Filesystem", &format!("{}", disk.filesystem));
                         row(
                             ui,
-                            "Boot Encryption",
-                            if disk.boot_encryption {
-                                "Enabled (LUKS1)"
+                            "Encryption",
+                            if disk.encryption {
+                                "Enabled"
                             } else {
                                 "Disabled"
                             },
                         );
-                    }
-                    row(
-                        ui,
-                        "Integrity",
-                        if disk.integrity {
-                            "Enabled (HMAC-SHA256)"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(ui, "Swap", &format!("{}", disk.swap_type));
-                    row(ui, "Init System", &format!("{}", system.init_system));
-                    row(ui, "Bootloader", &format!("{}", system.bootloader));
-                    row(
-                        ui,
-                        "SecureBoot",
-                        if system.secureboot {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(ui, "Hostname", &system.hostname);
-                    row(ui, "Username", &user.username);
-                    row(ui, "Network", &format!("{}", packages.network_backend));
-                    row(ui, "Desktop", &format!("{}", packages.desktop_env));
-                    if packages.desktop_env != crate::config::DesktopEnvironment::None {
+                        if disk.encryption {
+                            row(
+                                ui,
+                                "Boot Encryption",
+                                if disk.boot_encryption {
+                                    "Enabled (LUKS1)"
+                                } else {
+                                    "Disabled"
+                                },
+                            );
+                        }
                         row(
                             ui,
-                            "Display Manager",
-                            &format!("{}", packages.display_manager),
+                            "Integrity",
+                            if disk.integrity {
+                                "Enabled (HMAC-SHA256)"
+                            } else {
+                                "Disabled"
+                            },
                         );
-                    }
-                    row(ui, "GPU Drivers", &gpu_str);
-                    row(
-                        ui,
-                        "Wine",
-                        if packages.install_wine {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "Gaming",
-                        if packages.install_gaming {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "Session Switching",
-                        if packages.install_session_switching {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "yay AUR Helper",
-                        if packages.install_yay {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "Btrfs Tools",
-                        if packages.install_btrfs_tools {
-                            "Enabled (snapper, btrfs-assistant)"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "grub-btrfs",
-                        if packages.install_grub_btrfs {
-                            "Enabled (snapshot boot menu + snapper root config)"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                    row(
-                        ui,
-                        "Immutable root",
-                        if packages.immutable_root {
-                            "Enabled (read-only /usr + /, transactional updates)"
-                        } else {
-                            "Disabled"
-                        },
-                    );
-                });
-        });
+                        row(ui, "Swap", &format!("{}", disk.swap_type));
+                        row(ui, "Init System", &format!("{}", system.init_system));
+                        row(ui, "Bootloader", &format!("{}", system.bootloader));
+                        row(
+                            ui,
+                            "SecureBoot",
+                            if system.secureboot {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(ui, "Hostname", &system.hostname);
+                        row(ui, "Username", &user.username);
+                        row(ui, "Network", &format!("{}", packages.network_backend));
+                        row(ui, "Desktop", &format!("{}", packages.desktop_env));
+                        if packages.desktop_env != crate::config::DesktopEnvironment::None {
+                            row(
+                                ui,
+                                "Display Manager",
+                                &format!("{}", packages.display_manager),
+                            );
+                        }
+                        row(ui, "GPU Drivers", &gpu_str);
+                        row(
+                            ui,
+                            "Wine",
+                            if packages.install_wine {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "Gaming",
+                            if packages.install_gaming {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "Session Switching",
+                            if packages.install_session_switching {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "yay AUR Helper",
+                            if packages.install_yay {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "Btrfs Tools",
+                            if packages.install_btrfs_tools {
+                                "Enabled (snapper, btrfs-assistant)"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "grub-btrfs",
+                            if packages.install_grub_btrfs {
+                                "Enabled (snapshot boot menu + snapper root config)"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "Immutable root",
+                            if packages.immutable_root {
+                                "Enabled (read-only /usr + /, transactional updates)"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                    });
+            });
 
-        // ── Save configuration ─────────────────────────────────────
-        widgets::section(ui, "Save Configuration", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Path:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut install.save_config_path).desired_width(250.0),
-                );
-                if ui.button("\u{1f4be} Save Config").clicked() {
-                    install.save_requested = true;
+            // ── Save configuration ─────────────────────────────────────
+            widgets::section(ui, "Save Configuration", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Path:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut install.save_config_path)
+                            .desired_width(250.0),
+                    );
+                    if ui.button("\u{1f4be} Save Config").clicked() {
+                        install.save_requested = true;
+                    }
+                });
+                if let Some((msg, is_error)) = &install.save_config_status {
+                    let color = if *is_error {
+                        theme::ERROR
+                    } else {
+                        theme::SUCCESS
+                    };
+                    ui.label(RichText::new(msg).color(color));
                 }
             });
-            if let Some((msg, is_error)) = &install.save_config_status {
-                let color = if *is_error {
-                    theme::ERROR
-                } else {
-                    theme::SUCCESS
-                };
-                ui.label(RichText::new(msg).color(color));
-            }
-        });
 
-        // ── Interactive review ──────────────────────────────────────
-        widgets::section(ui, "Interactive Review", |ui| {
-            ui.checkbox(
-                &mut install.interactive_enabled,
-                "Review every pacman / basestrap / yay command before it runs",
-            );
-            if install.interactive_enabled {
-                widgets::info_text(
-                    ui,
-                    "A modal will open for each install (basestrap + every selected \
+            // ── Interactive review ──────────────────────────────────────
+            widgets::section(ui, "Interactive Review", |ui| {
+                ui.checkbox(
+                    &mut install.interactive_enabled,
+                    "Review every pacman / basestrap / yay command before it runs",
+                );
+                if install.interactive_enabled {
+                    widgets::info_text(
+                        ui,
+                        "A modal will open for each install (basestrap + every selected \
                      optional package set). You can edit the package list, skip, or \
                      cancel. After main installation finishes, a final prompt collects \
                      additional pacman / AUR packages to install.",
-                );
-            }
-        });
-
-        // ── Rehearsal ───────────────────────────────────────────────
-        widgets::section(ui, "Rehearsal Install", |ui| {
-            ui.horizontal(|ui| {
-                let running = install.rehearsal_running;
-                let btn = ui.add_enabled(
-                    !running,
-                    egui::Button::new(if running {
-                        "\u{23f3} Running..."
-                    } else {
-                        "\u{1f3ad} Rehearse"
-                    }),
-                );
-                if btn.clicked() {
-                    install.rehearsal_requested = true;
+                    );
                 }
-                ui.label(
-                    RichText::new(
-                        "Full install on disk, record everything, then wipe (DESTRUCTIVE)",
-                    )
-                    .color(theme::ERROR)
-                    .size(11.0),
-                );
             });
 
-            if let Some(ref results) = install.rehearsal_results {
-                ui.add_space(theme::SPACING_XS);
-
-                // Summary line
-                let (pass, fail) =
-                    results.iter().fold(
-                        (0, 0),
-                        |(p, f), line| {
-                            if line.success {
-                                (p + 1, f)
-                            } else {
-                                (p, f + 1)
-                            }
-                        },
-                    );
-                let summary_color = if fail > 0 {
-                    theme::ERROR
-                } else {
-                    theme::SUCCESS
-                };
-                ui.label(
-                    RichText::new(format!("Rehearsal: {} passed, {} failed", pass, fail))
-                        .color(summary_color)
-                        .strong(),
-                );
-
-                // Scrollable results
-                let scroll = egui::ScrollArea::vertical()
-                    .id_salt("rehearsal_results")
-                    .max_height(200.0)
-                    .auto_shrink([false, false]);
-                scroll.show(ui, |ui| {
-                    for line in results {
-                        let color = if line.success {
-                            theme::SUCCESS
+            // ── Rehearsal ───────────────────────────────────────────────
+            widgets::section(ui, "Rehearsal Install", |ui| {
+                ui.horizontal(|ui| {
+                    let running = install.rehearsal_running;
+                    let btn = ui.add_enabled(
+                        !running,
+                        egui::Button::new(if running {
+                            "\u{23f3} Running..."
                         } else {
-                            theme::ERROR
-                        };
-                        ui.label(
-                            RichText::new(&line.text)
-                                .monospace()
-                                .size(11.0)
-                                .color(color),
-                        );
+                            "\u{1f3ad} Rehearse"
+                        }),
+                    );
+                    if btn.clicked() {
+                        install.rehearsal_requested = true;
                     }
+                    ui.label(
+                        RichText::new(
+                            "Full install on disk, record everything, then wipe (DESTRUCTIVE)",
+                        )
+                        .color(theme::ERROR)
+                        .size(11.0),
+                    );
                 });
-            }
-        });
 
-        // ── Install options ────────────────────────────────────────
-        widgets::section(ui, "Install Options", |ui| {
-            ui.label(
-                RichText::new("\u{26a0} WARNING: This will ERASE ALL DATA on the selected disk!")
+                if let Some(ref results) = install.rehearsal_results {
+                    ui.add_space(theme::SPACING_XS);
+
+                    // Summary line
+                    let (pass, fail) = results.iter().fold((0, 0), |(p, f), line| {
+                        if line.success {
+                            (p + 1, f)
+                        } else {
+                            (p, f + 1)
+                        }
+                    });
+                    let summary_color = if fail > 0 {
+                        theme::ERROR
+                    } else {
+                        theme::SUCCESS
+                    };
+                    ui.label(
+                        RichText::new(format!("Rehearsal: {} passed, {} failed", pass, fail))
+                            .color(summary_color)
+                            .strong(),
+                    );
+
+                    // Scrollable results
+                    let scroll = egui::ScrollArea::vertical()
+                        .id_salt("rehearsal_results")
+                        .max_height(200.0)
+                        .auto_shrink([false, false]);
+                    scroll.show(ui, |ui| {
+                        for line in results {
+                            let color = if line.success {
+                                theme::SUCCESS
+                            } else {
+                                theme::ERROR
+                            };
+                            ui.label(
+                                RichText::new(&line.text)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(color),
+                            );
+                        }
+                    });
+                }
+            });
+
+            // ── Install options ────────────────────────────────────────
+            widgets::section(ui, "Install Options", |ui| {
+                ui.label(
+                    RichText::new(
+                        "\u{26a0} WARNING: This will ERASE ALL DATA on the selected disk!",
+                    )
                     .color(theme::ERROR)
                     .strong(),
-            );
-            ui.add_space(theme::SPACING_XS);
-            ui.checkbox(&mut install.confirmed, "I understand and want to proceed");
+                );
+                ui.add_space(theme::SPACING_XS);
+                ui.checkbox(&mut install.confirmed, "I understand and want to proceed");
+            });
         });
-    });
 
     install.confirmed
 }

@@ -63,18 +63,19 @@ pub(crate) fn show_sections(ui: &mut Ui, disk: &mut DiskState) -> bool {
 }
 
 fn filesystem_section(ui: &mut Ui, filesystem: &mut Filesystem, swap_type: &mut SwapType) {
-    ui.horizontal(|ui| {
-        ui.label("Filesystem:");
-        egui::ComboBox::from_id_salt("filesystem")
-            .selected_text(format!("{}", filesystem))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
-                ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
-                ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
-                ui.selectable_value(filesystem, Filesystem::Zfs, "zfs");
-                ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
-            });
-    });
+    widgets::combo_row(
+        ui,
+        "Filesystem:",
+        "filesystem",
+        format!("{}", filesystem),
+        |ui| {
+            ui.selectable_value(filesystem, Filesystem::Btrfs, "btrfs");
+            ui.selectable_value(filesystem, Filesystem::Ext4, "ext4");
+            ui.selectable_value(filesystem, Filesystem::Xfs, "xfs");
+            ui.selectable_value(filesystem, Filesystem::Zfs, "zfs");
+            ui.selectable_value(filesystem, Filesystem::F2fs, "f2fs");
+        },
+    );
     ui.add_space(theme::SPACING_XS);
 
     let supports_swap_file = *filesystem == Filesystem::Btrfs || *filesystem == Filesystem::Ext4;
@@ -82,18 +83,19 @@ fn filesystem_section(ui: &mut Ui, filesystem: &mut Filesystem, swap_type: &mut 
         *swap_type = SwapType::Partition;
     }
 
-    ui.horizontal(|ui| {
-        ui.label("Swap Type:");
-        egui::ComboBox::from_id_salt("swap_type")
-            .selected_text(format!("{}", swap_type))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(swap_type, SwapType::Partition, "Swap Partition");
-                if supports_swap_file {
-                    ui.selectable_value(swap_type, SwapType::FileZram, "Swap File + ZRAM");
-                }
-                ui.selectable_value(swap_type, SwapType::ZramOnly, "ZRAM Only");
-            });
-    });
+    widgets::combo_row(
+        ui,
+        "Swap Type:",
+        "swap_type",
+        format!("{}", swap_type),
+        |ui| {
+            ui.selectable_value(swap_type, SwapType::Partition, "Swap Partition");
+            if supports_swap_file {
+                ui.selectable_value(swap_type, SwapType::FileZram, "Swap File + ZRAM");
+            }
+            ui.selectable_value(swap_type, SwapType::ZramOnly, "ZRAM Only");
+        },
+    );
 
     if *swap_type == SwapType::FileZram || *swap_type == SwapType::ZramOnly {
         ui.add_space(theme::SPACING_XS);
@@ -112,10 +114,7 @@ fn encryption_section(
 
     if *encryption {
         ui.add_space(theme::SPACING_SM);
-        ui.horizontal(|ui| {
-            ui.label("Password:");
-            ui.add(egui::TextEdit::singleline(password).password(true));
-        });
+        widgets::password_row(ui, "Password:", password);
         ui.add_space(theme::SPACING_XS);
 
         ui.checkbox(integrity, "Enable dm-integrity (per-sector HMAC-SHA256)");
@@ -156,22 +155,14 @@ fn lvm_section(
         );
         ui.add_space(theme::SPACING_SM);
 
-        ui.horizontal(|ui| {
-            ui.label("Volume Group Name:");
-            ui.text_edit_singleline(vg_name);
-        });
+        widgets::text_row(ui, "Volume Group Name:", vg_name);
         ui.add_space(theme::SPACING_XS);
 
-        ui.horizontal(|ui| {
-            ui.label("Thin Pool Name:");
-            ui.text_edit_singleline(pool_name);
-        });
+        widgets::text_row(ui, "Thin Pool Name:", pool_name);
         ui.add_space(theme::SPACING_XS);
 
-        ui.horizontal(|ui| {
-            ui.label("Thin Pool Size (% of VG):");
-            ui.add(egui::Slider::new(pool_percent, 50..=100).suffix("%"));
-        });
+        ui.label("Thin Pool Size (% of VG):");
+        ui.add(egui::Slider::new(pool_percent, 50..=100).suffix("%"));
         ui.add_space(theme::SPACING_XS);
 
         widgets::info_text(
@@ -224,7 +215,7 @@ fn partition_section(
         let mount = partitions[i].mount_point.clone();
         let label = partitions[i].effective_label();
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(format!("{} ({})", mount, label));
 
             if is_remainder {
@@ -255,7 +246,7 @@ fn partition_section(
                 partitions[i].size_mib = gib * 1024;
             }
 
-            if mount != "/" && ui.small_button("\u{2715}").clicked() {
+            if mount != "/" && ui.small_button("\u{00d7}").clicked() {
                 remove_idx = Some(i);
             }
         });
@@ -282,21 +273,31 @@ fn partition_section(
     }
     ui.add_space(theme::SPACING_SM);
 
-    // Add new partition form
+    // Add new partition form.  Laid out as a two-column grid rather than one
+    // wide row so the fields stay inside the column at any width.
     ui.label(RichText::new("Add Partition").strong());
     ui.add_space(theme::SPACING_XS);
-    ui.horizontal(|ui| {
-        ui.label("Mount:");
-        ui.add(egui::TextEdit::singleline(new_mount).desired_width(100.0));
-        ui.label("Size (GiB, 0=rest):");
-        ui.add(egui::TextEdit::singleline(new_size).desired_width(60.0));
-        ui.label("Label:");
-        ui.add(egui::TextEdit::singleline(new_label).desired_width(80.0));
+    let field_width = (ui.available_width() * 0.45).clamp(60.0, 220.0);
+    egui::Grid::new("add_partition_form")
+        .num_columns(2)
+        .spacing([theme::SPACING_SM, theme::SPACING_XS])
+        .show(ui, |ui| {
+            ui.label("Mount:");
+            ui.add(egui::TextEdit::singleline(new_mount).desired_width(field_width));
+            ui.end_row();
 
-        if ui.button("\u{2795} Add").clicked() {
-            try_add_partition(partitions, new_mount, new_size, new_label);
-        }
-    });
+            ui.label("Size (GiB, 0=rest):");
+            ui.add(egui::TextEdit::singleline(new_size).desired_width(field_width));
+            ui.end_row();
+
+            ui.label("Label:");
+            ui.add(egui::TextEdit::singleline(new_label).desired_width(field_width));
+            ui.end_row();
+        });
+    ui.add_space(theme::SPACING_XS);
+    if ui.button("\u{2795} Add").clicked() {
+        try_add_partition(partitions, new_mount, new_size, new_label);
+    }
 }
 
 fn try_add_partition(

@@ -33,10 +33,63 @@ pub const SPACING_XS: f32 = 4.0;
 pub const SPACING_SM: f32 = 8.0;
 pub const SPACING_MD: f32 = 16.0;
 
+// ── Layout ─────────────────────────────────────────────────────────────
+
+/// Narrowest a configuration column may get before the grid drops to fewer
+/// columns.  Below this, combo boxes and sliders start colliding with their
+/// labels and the panel looks "sandwiched".
+pub const MIN_COLUMN_WIDTH: f32 = 300.0;
+
+// ── Zoom ───────────────────────────────────────────────────────────────
+
+/// Zoom factor applied on startup.  The layout is fully scrollable and
+/// reflows to fewer columns when cramped, so this is only a starting point —
+/// the user can change it from the header controls or with Ctrl +/-/0.
+pub const DEFAULT_ZOOM: f32 = 0.75;
+
+/// Smallest zoom factor reachable from the header controls.
+pub const MIN_ZOOM: f32 = 0.50;
+
+/// Largest zoom factor reachable from the header controls.
+pub const MAX_ZOOM: f32 = 2.00;
+
+/// Increment applied by the zoom in/out buttons.
+pub const ZOOM_STEP: f32 = 0.05;
+
+/// Nudge the zoom factor by `delta`, clamped to the supported range.
+pub fn adjust_zoom(ctx: &egui::Context, delta: f32) {
+    let next = (ctx.zoom_factor() + delta).clamp(MIN_ZOOM, MAX_ZOOM);
+    ctx.set_zoom_factor(next);
+}
+
+/// Restore the startup zoom factor.
+pub fn reset_zoom(ctx: &egui::Context) {
+    ctx.set_zoom_factor(DEFAULT_ZOOM);
+}
+
 // ── Theme application ──────────────────────────────────────────────────
+
+/// Add Hack as a fallback for the proportional font family.
+///
+/// egui's proportional stack is Ubuntu-Light → NotoEmoji → emoji-icon-font,
+/// and none of the three carries the arrows this UI uses, so "\u{2190} Back"
+/// and "Next \u{2192}" render as tofu boxes.  Hack is already bundled with
+/// epaint's default fonts for the monospace family, so appending it here
+/// fills the gaps without adding an asset or a byte to the binary.
+fn install_font_fallbacks(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        if !proportional.iter().any(|name| name == "Hack") {
+            proportional.push("Hack".to_owned());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
 
 /// Apply the Deploytix dark theme to the egui context.
 pub fn apply(ctx: &egui::Context) {
+    install_font_fallbacks(ctx);
+
     let mut visuals = Visuals::dark();
 
     // Panel and window backgrounds
@@ -85,8 +138,10 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.set_visuals(visuals);
 
-    // Scale down so the full configuration grid fits on one screen.
-    ctx.set_zoom_factor(0.75);
+    // Start scaled down so the configuration grid fits on one screen on a
+    // typical display.  Nothing depends on this value: the panel scrolls and
+    // reflows, so any zoom the user picks stays usable.
+    ctx.set_zoom_factor(DEFAULT_ZOOM);
 
     // Adjust spacing for a more spacious feel
     let mut style = (*ctx.style()).clone();
