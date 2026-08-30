@@ -126,5 +126,30 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
                  init-specific service that runs as that user on UDP port 26760.",
             );
         }
+
+        ui.add_space(theme::SPACING_XS);
+
+        // ── Legion Go family controller quirks (no prerequisites) ─────────
+        ui.checkbox(
+            &mut packages.handheld_controller_quirks,
+            "Legion Go controller quirks \u{2014} stop the pads disconnecting/reconnecting",
+        );
+        match crate::configure::handheld_quirks::detect_host_model() {
+            Some(model) => widgets::info_text(
+                ui,
+                &format!(
+                    "{} detected. Writes a udev rule that pins USB runtime power \
+                     management off for the controllers, binds them to xpad on kernels \
+                     that predate their IDs, and opens their hidraw nodes to the session user.",
+                    model.as_str()
+                ),
+            ),
+            None => widgets::info_text(
+                ui,
+                "This machine is not a Legion Go family handheld. Leave this on only \
+                 when deploying to removable media that will boot on one \u{2014} the rule \
+                 is inert on other hardware.",
+            ),
+        }
     });
 }

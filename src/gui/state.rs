@@ -215,6 +215,9 @@ pub struct PackagesState {
     pub install_hhd: bool,
     pub install_decky_loader: bool,
     pub install_evdevhook2: bool,
+    /// Seeded from the host's DMI, so a Legion Go family machine arrives at
+    /// the panel with the quirks already ticked.
+    pub handheld_controller_quirks: bool,
     pub gpu_nvidia: bool,
     pub gpu_amd: bool,
     pub gpu_intel: bool,
@@ -241,6 +244,8 @@ impl Default for PackagesState {
             install_hhd: false,
             install_decky_loader: false,
             install_evdevhook2: false,
+            handheld_controller_quirks: crate::configure::handheld_quirks::detect_host_model()
+                .is_some(),
             gpu_nvidia: false,
             gpu_amd: false,
             gpu_intel: false,

@@ -52,7 +52,7 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 | `config/` | TOML config parsing (`DeploymentConfig`), validation, interactive wizard |
 | `disk/` | Block device detection, partition layout computation (`ComputedLayout`), sfdisk scripting, formatting |
 | `install/` | Installer orchestrator, basestrap, chroot ops, fstab/crypttab generation |
-| `configure/` | In-chroot config: bootloader (GRUB), encryption, mkinitcpio hooks, locale, users, network, services, SecureBoot |
+| `configure/` | In-chroot config: bootloader (GRUB), encryption, mkinitcpio hooks, locale, users, network, services, SecureBoot, handheld controller quirks |
 | `desktop/` | DE-specific package lists and setup (KDE, GNOME, XFCE, none) |
 | `cleanup/` | Unmount and optional disk wipe |
 | `gui/` | egui wizard panels (7-step), behind `--features gui` |
