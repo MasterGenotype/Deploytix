@@ -493,4 +493,81 @@ mod tests {
     fn headless_config_renders_no_desktop_session() {
         assert!(render_desktop_session(&DesktopEnvironment::None).is_none());
     }
+
+    /// Boot -> Steam latency guard.
+    ///
+    /// Gamescope's startup (DRM master, Vulkan init, two Xwayland servers) is
+    /// the long pole between power-on and the gamepad UI, so it must be the
+    /// first thing spawned and everything else must overlap it. audio-startup
+    /// used to run in the foreground *ahead* of gamescope, putting its whole
+    /// runtime on the critical path of every single boot.
+    #[test]
+    fn gamescope_is_spawned_before_anything_else_can_block() {
+        let launch = STEAM_GAMESCOPE_SESSION
+            .find("$GAMESCOPE_CMD &")
+            .expect("gamescope is launched in the background");
+        let audio = STEAM_GAMESCOPE_SESSION
+            .find(".local/bin/audio-startup\" &")
+            .expect("audio-startup is launched in the background");
+        let ready = STEAM_GAMESCOPE_SESSION
+            .find("read -r response_x_display")
+            .expect("session waits on gamescope's ready fd");
+
+        assert!(
+            launch < audio,
+            "gamescope must be spawned before audio-startup, not after it"
+        );
+        assert!(
+            audio < ready,
+            "audio-startup must overlap the ready-fd wait, not follow it"
+        );
+    }
+
+    /// Nothing between the start of the session script and the ready-fd read
+    /// may sleep: every second spent there is a second of black screen. The
+    /// wait for gamescope is the fifo read itself, which is event-driven.
+    #[test]
+    fn session_startup_path_contains_no_fixed_sleeps() {
+        let ready = STEAM_GAMESCOPE_SESSION
+            .find("read -r response_x_display")
+            .expect("session waits on gamescope's ready fd");
+
+        for (n, line) in STEAM_GAMESCOPE_SESSION[..ready].lines().enumerate() {
+            let code = line.trim();
+            assert!(
+                !code.starts_with("sleep "),
+                "line {} sleeps on the boot -> Steam path: {}",
+                n + 1,
+                code
+            );
+        }
+    }
+
+    /// A cold boot has no previous session to tear down, so the greeter must
+    /// detect that and return immediately. The unconditional TERM/settle/KILL
+    /// cycle it replaced cost a flat second before greetd IPC was even
+    /// reached, on the one boot where the user is staring at nothing.
+    #[test]
+    fn greeter_skips_stale_cleanup_when_nothing_is_running() {
+        let cleanup = SESSION_MANAGER
+            .find("cleanup_stale_sessions() {")
+            .expect("greeter defines stale-session cleanup");
+        let body = &SESSION_MANAGER[cleanup..];
+
+        let guard = body
+            .find("if ! _stale_any; then")
+            .expect("cleanup short-circuits when no teardown target is running");
+        let kill = body
+            .find("_stale_kill \"\"")
+            .expect("cleanup signals teardown targets");
+
+        assert!(
+            guard < kill,
+            "the no-op check must come before any pkill pass"
+        );
+        assert!(
+            !body[guard..kill].contains("sleep "),
+            "the cold-boot fast path must not sleep"
+        );
+    }
 }

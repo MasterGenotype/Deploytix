@@ -33,42 +33,87 @@ echo "[session-manager] ==== starting at $(date -Is) pid=$$ ===="
 # context routinely hangs or exits non-deterministically, which was the
 # primary cause of the "greeter exited without creating a session" respawn
 # loop. pkill alone is sufficient to reap any lingering steam processes.
+
+# Teardown targets as "<mode>:<pattern>", where mode x matches an exact
+# binary name (pkill/pgrep -x) and f matches the full command line (-f).
+# One table drives detection, SIGTERM and SIGKILL so the three passes can
+# never drift apart.
+STALE_PROCS=(
+    "x:gamescope"
+    "f:steam.*-steamos3"
+    "x:steam"
+    "x:steamwebhelper"
+    "x:kwin_wayland"
+    "x:kwin_wayland_wrapper"
+    "x:startplasma-wayland"
+    "x:plasma_session"
+    "x:kded6"
+    "f:kactivitymanagerd"
+    "f:xdg-desktop-portal-kde"
+    "f:Xwayland :"
+    "x:pipewire"
+    "x:pipewire-pulse"
+    "x:wireplumber"
+)
+
+# True if any teardown target is still running.
+_stale_any() {
+    local entry mode pat
+    for entry in "${STALE_PROCS[@]}"; do
+        mode="${entry%%:*}"
+        pat="${entry#*:}"
+        case "$mode" in
+            x) pgrep -x "$pat" >/dev/null 2>&1 && return 0 ;;
+            f) pgrep -f "$pat" >/dev/null 2>&1 && return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Signal every teardown target. $1 is the pkill signal flag ("" for the
+# default SIGTERM, "-9" for the fallback pass). Every pkill is allowed to
+# "fail" (no match) without propagating a non-zero exit, which matters if
+# `set -e` is ever enabled above.
+_stale_kill() {
+    local sig="$1" entry mode pat
+    for entry in "${STALE_PROCS[@]}"; do
+        mode="${entry%%:*}"
+        pat="${entry#*:}"
+        case "$mode" in
+            x) pkill $sig -x "$pat" 2>/dev/null || true ;;
+            f) pkill $sig -f "$pat" 2>/dev/null || true ;;
+        esac
+    done
+}
+
 cleanup_stale_sessions() {
+    # Cold boot is the common case and the one that decides boot -> Steam
+    # latency: there is no previous session to tear down, so skip the whole
+    # TERM/settle/KILL cycle rather than paying a flat second (plus ~30
+    # pkill spawns) before greetd IPC is even reached.
+    if ! _stale_any; then
+        echo "[session-manager] No stale session processes; skipping cleanup"
+        return 0
+    fi
+
     echo "[session-manager] Cleaning up stale session processes"
-    # Graceful SIGTERM pass — every pkill is allowed to "fail" (no match)
-    # without propagating a non-zero exit, which matters if `set -e` is ever
-    # enabled above.
-    pkill -x gamescope               2>/dev/null || true
-    pkill -f 'steam.*-steamos3'      2>/dev/null || true
-    pkill -x steam                   2>/dev/null || true
-    pkill -x steamwebhelper          2>/dev/null || true
-    pkill -x kwin_wayland            2>/dev/null || true
-    pkill -x kwin_wayland_wrapper    2>/dev/null || true
-    pkill -x startplasma-wayland     2>/dev/null || true
-    pkill -x plasma_session          2>/dev/null || true
-    pkill -x kded6                   2>/dev/null || true
-    pkill -f kactivitymanagerd       2>/dev/null || true
-    pkill -f xdg-desktop-portal-kde  2>/dev/null || true
-    pkill -f 'Xwayland :'            2>/dev/null || true
-    pkill -x pipewire                2>/dev/null || true
-    pkill -x pipewire-pulse          2>/dev/null || true
-    pkill -x wireplumber             2>/dev/null || true
-    sleep 1 || true
+    _stale_kill ""
+
+    # Poll for the graceful pass to land instead of sleeping a fixed second.
+    # Processes that honour SIGTERM are typically gone within tens of
+    # milliseconds; the 20 x 50 ms ceiling still bounds the pathological
+    # case at the same one second the old fixed sleep cost unconditionally.
+    local waited=0
+    while _stale_any && [ "$waited" -lt 20 ]; do
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+
     # SIGKILL fallback for anything that ignored SIGTERM.
-    pkill -9 -x gamescope            2>/dev/null || true
-    pkill -9 -x steam                2>/dev/null || true
-    pkill -9 -x steamwebhelper       2>/dev/null || true
-    pkill -9 -x kwin_wayland         2>/dev/null || true
-    pkill -9 -x kwin_wayland_wrapper 2>/dev/null || true
-    pkill -9 -x startplasma-wayland  2>/dev/null || true
-    pkill -9 -x plasma_session       2>/dev/null || true
-    pkill -9 -x kded6                2>/dev/null || true
-    pkill -9 -f kactivitymanagerd    2>/dev/null || true
-    pkill -9 -f xdg-desktop-portal-kde 2>/dev/null || true
-    pkill -9 -f 'Xwayland :'         2>/dev/null || true
-    pkill -9 -x pipewire             2>/dev/null || true
-    pkill -9 -x pipewire-pulse       2>/dev/null || true
-    pkill -9 -x wireplumber          2>/dev/null || true
+    if _stale_any; then
+        echo "[session-manager] SIGTERM ignored by some processes; escalating to SIGKILL"
+        _stale_kill "-9"
+    fi
 }
 
 detect_desktop_command() {

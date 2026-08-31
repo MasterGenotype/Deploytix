@@ -1898,3 +1898,62 @@ mod steam_bootstrap_tests {
         assert!(!script.contains("set -e"));
     }
 }
+
+#[cfg(test)]
+mod audio_startup_tests {
+    use super::AUDIO_STARTUP_SCRIPT;
+
+    /// audio-startup runs on the boot -> Steam path (backgrounded by
+    /// steam-gamescope-session, and as an XDG autostart entry in desktop
+    /// sessions). It used to serialise three fixed sleeps totalling four
+    /// seconds; the only real ordering constraint is that pipewire's core
+    /// socket exists before its clients connect, so wait for the socket.
+    #[test]
+    fn audio_startup_waits_on_the_socket_not_the_clock() {
+        assert!(
+            AUDIO_STARTUP_SCRIPT.contains("wait_for_socket"),
+            "audio-startup must poll for pipewire's socket"
+        );
+        assert!(
+            AUDIO_STARTUP_SCRIPT.contains("pipewire-0"),
+            "the readiness check must name pipewire's core socket"
+        );
+
+        for (n, line) in AUDIO_STARTUP_SCRIPT.lines().enumerate() {
+            let code = line.trim();
+            let Some(secs) = code.strip_prefix("sleep ") else {
+                continue;
+            };
+            // Only the sub-second poll interval inside wait_for_socket is
+            // allowed; anything measured in whole seconds is a fixed delay.
+            let secs: f64 = secs.parse().expect("sleep takes a literal duration");
+            assert!(
+                secs < 0.5,
+                "line {} sleeps {}s on the audio startup path",
+                n + 1,
+                secs
+            );
+        }
+    }
+
+    /// Both pipewire clients connect to the same socket, so neither has to
+    /// wait for the other — starting them back to back keeps the tail short.
+    #[test]
+    fn pipewire_clients_start_after_the_socket_check() {
+        let wait = AUDIO_STARTUP_SCRIPT
+            .find("if ! wait_for_socket")
+            .expect("audio-startup blocks on the socket check");
+        let pulse = AUDIO_STARTUP_SCRIPT
+            .find("start_if_missing pipewire-pulse")
+            .expect("audio-startup starts pipewire-pulse");
+        let wireplumber = AUDIO_STARTUP_SCRIPT
+            .find("start_if_missing wireplumber")
+            .expect("audio-startup starts wireplumber");
+
+        assert!(wait < pulse && wait < wireplumber);
+        assert!(
+            !AUDIO_STARTUP_SCRIPT[pulse..wireplumber].contains("sleep"),
+            "the two clients must not be serialised behind a sleep"
+        );
+    }
+}

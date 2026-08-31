@@ -35,7 +35,10 @@ greetd (PID 1-managed)
                        +--> gamescope (Wayland compositor, backgrounded)
                        |     +--> Xwayland x2
                        |
-                       +--> audio-startup (pipewire, pipewire-pulse, wireplumber)
+                       +--> audio-startup (backgrounded, runs in parallel with
+                       |    gamescope startup: pipewire, pipewire-pulse, wireplumber)
+                       |
+                       +--> [blocks on gamescope's ready fd]
                        |
                        +--> steam -steamos3 -gamepadui (foreground, blocks)
 ```
@@ -203,6 +206,57 @@ non-gaming iwd installs) so the system auto-connects immediately on boot.
 - `session_switching.rs` -- deploys the above
 - `network.rs` -- Wi-Fi pre-seeding
 - `deployment.rs` -- `wifi_ssid`/`wifi_password` config fields, validation, wizard
+
+### 6. Slow Boot -- Fixed Sleeps on the Path to Game Mode
+
+**Problem**: Roughly five seconds elapsed between greetd starting and gamescope
+being spawned, all of it spent sleeping rather than doing work. On a handheld
+that is five seconds of black screen on every single boot.
+
+**Root cause**: Three unconditional delays, all serialised ahead of gamescope:
+
+1. `deploytix-session-manager`'s `cleanup_stale_sessions()` ran a full
+   SIGTERM -> `sleep 1` -> SIGKILL cycle (about 30 `pkill` spawns) before
+   reaching the greetd IPC call -- even on a cold boot, where there is by
+   definition no previous session to tear down.
+2. `steam-gamescope-session` ran `audio-startup` **in the foreground**, before
+   launching gamescope.
+3. `audio-startup` itself was `sleep 2` (settle) + `sleep 1` + `sleep 1`
+   between starting pipewire, pipewire-pulse and wireplumber.
+
+**Solution** -- wait on state, not on the clock, and overlap what can overlap:
+
+1. **`deploytix-session-manager`**: one `STALE_PROCS` table now drives detection,
+   SIGTERM and SIGKILL, so the three passes cannot drift apart. `cleanup_stale_sessions()`
+   returns immediately when `_stale_any` finds nothing (the cold-boot case), and
+   otherwise polls at 50 ms for the graceful pass to land instead of sleeping a
+   flat second. The SIGKILL pass runs only against processes that actually
+   ignored SIGTERM.
+2. **`steam-gamescope-session`**: gamescope is spawned first -- its startup (DRM
+   master, Vulkan device init, two Xwayland servers) is the long pole -- and
+   `audio-startup` is backgrounded so it runs *during* that startup rather than
+   before it. Nothing between the top of the script and the ready-fd `read`
+   blocks. Steam does not need PipeWire to exist before it launches; it opens
+   audio devices lazily.
+3. **`audio-startup`**: the only real ordering constraint is that pipewire's core
+   socket exists before its clients connect, so `wait_for_socket` polls
+   `$XDG_RUNTIME_DIR/pipewire-0` at 50 ms (5 s ceiling, then it proceeds anyway
+   and logs). pipewire-pulse and wireplumber are independent clients of that one
+   socket, so they start together instead of one-per-sleep.
+
+Net effect: about 5 s of unconditional sleeping removed from the boot -> Game Mode
+path, and gamescope now starts within milliseconds of the session script.
+
+**Files changed**:
+- `deploytix-session-manager.sh` -- `STALE_PROCS`, `_stale_any`, `_stale_kill`,
+  rewritten `cleanup_stale_sessions()`
+- `steam-gamescope-session.sh` -- sections 9/10 reordered (gamescope, then
+  backgrounded audio)
+- `audio-startup.sh` -- `wait_for_socket` replaces the fixed sleeps
+
+Guarded by regression tests in `session_switching.rs` (spawn ordering, no fixed
+sleeps before the ready-fd read, cold-boot cleanup fast path) and `packages.rs`
+(socket wait, no whole-second sleeps).
 
 ---
 

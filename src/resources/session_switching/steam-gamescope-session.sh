@@ -186,22 +186,31 @@ GAMESCOPE_CMD="/usr/bin/gamescope \
     -R $socket \
     -T $stats"
 
-# --------- 9. Audio ---------
-# Never let a flaky audio-startup tear down the whole session. audio-startup
-# may legitimately return non-zero on a fresh boot (e.g. its own `set -e`
-# tripping on a `pkill` that matched no stale daemon), and with `set -e`
-# above, the final command after the final `&&` in a list is NOT protected
-# from exiting the shell. Use an explicit `if`+`|| true` to isolate it.
-if [ -x "$HOME/.local/bin/audio-startup" ]; then
-    echo "[steam-session] Running audio-startup"
-    "$HOME/.local/bin/audio-startup" || \
-        echo "[steam-session] audio-startup returned non-zero; continuing"
-fi
-
-# --------- 10. Launch Gamescope (background) ---------
+# --------- 9. Launch Gamescope (background) ---------
+# Gamescope goes first and nothing between here and the ready-fd read is
+# allowed to block: compositor startup (DRM master, Vulkan device init,
+# two Xwayland servers) is the long pole on the boot -> Steam path, so it
+# must be running while we do everything else rather than after it.
 echo "[steam-session] Starting gamescope..."
 $GAMESCOPE_CMD &
 gamescope_pid=$!
+
+# --------- 10. Audio (background, parallel with gamescope startup) ---------
+# Steam does not need PipeWire to exist before it launches — it opens audio
+# devices lazily — so audio-startup runs concurrently with gamescope's
+# initialisation instead of ahead of it. Running it in the foreground here
+# used to add its full runtime to every boot before gamescope was even
+# spawned; now it overlaps with work we are waiting on anyway.
+#
+# Never let a flaky audio-startup tear down the whole session. audio-startup
+# may legitimately return non-zero on a fresh boot (e.g. its own `set -e`
+# tripping on a `pkill` that matched no stale daemon). Backgrounding it also
+# keeps `set -e` out of the picture: a non-zero exit from an unwaited-for
+# background job cannot kill this shell.
+if [ -x "$HOME/.local/bin/audio-startup" ]; then
+    "$HOME/.local/bin/audio-startup" &
+    echo "[steam-session] Running audio-startup in background (pid=$!)"
+fi
 
 # --------- 11. Wait for Ready ---------
 if read -r response_x_display response_wl_display <>"$socket"; then
