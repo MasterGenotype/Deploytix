@@ -22,6 +22,34 @@ const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile
     search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
     video xfs zfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
 
+/// Files embedded into the standalone GRUB image, as `grub-mkstandalone`
+/// `target=source` arguments, built as a bash array so a missing optional file
+/// is simply omitted.
+///
+/// `grub.cfg` alone is not enough once grub-btrfs is in play. grub-btrfs writes
+/// its snapshot entries to a *separate* `grub-btrfs.cfg` and has grub.cfg reach
+/// them with:
+///
+/// ```text
+/// if [ ! -e "${prefix}/grub-btrfs.cfg" ]; then echo ""
+/// else submenu 'Artix Linux snapshots' { configfile "${prefix}/grub-btrfs.cfg" } fi
+/// ```
+///
+/// In a standalone image `${prefix}` is `(memdisk)/boot/grub`, not the real
+/// `/boot/grub`. So unless the file is embedded too, that existence test fails
+/// on every boot and the snapshot submenu silently never appears — however many
+/// snapshots exist and however correctly `grub-btrfs.cfg` was written to disk.
+///
+/// Embedding also keeps the entries inside the signed binary, where SecureBoot
+/// covers them, rather than trusting a file on the ESP.
+const STANDALONE_EMBED_FILES: &str = r#"EMBED=( "boot/grub/grub.cfg=/boot/grub/grub.cfg" )
+# grub-btrfs snapshot entries live in their own file, reached from grub.cfg via
+# ${prefix}/grub-btrfs.cfg — which is inside the memdisk for a standalone image.
+# Embed it too, or the submenu's existence test fails and no snapshots show.
+if [ -f /boot/grub/grub-btrfs.cfg ]; then
+    EMBED+=( "boot/grub/grub-btrfs.cfg=/boot/grub/grub-btrfs.cfg" )
+fi"#;
+
 /// Whether this configuration boots through a standalone GRUB EFI binary
 /// (grub.cfg embedded as a memdisk, rebuilt + re-signed on change) instead of
 /// a standard grub-install with an on-disk grub.cfg.
@@ -333,13 +361,15 @@ fn run_grub_mkstandalone(cmd: &CommandRunner, device: &str, install_root: &str) 
 
     // Create standalone GRUB with embedded config and modules
     let grub_mkstandalone_cmd = format!(
-        "grub-mkstandalone \
+        "{embed}
+grub-mkstandalone \
             --format=x86_64-efi \
             --output=/boot/efi/EFI/BOOT/BOOTX64.EFI \
             --disable-shim-lock \
-            --modules=\"{}\" \
-            \"boot/grub/grub.cfg=/boot/grub/grub.cfg\"",
-        GRUB_STANDALONE_MODULES
+            --modules=\"{modules}\" \
+            \"${{EMBED[@]}}\"",
+        embed = STANDALONE_EMBED_FILES,
+        modules = GRUB_STANDALONE_MODULES
     );
     cmd.run_in_chroot(install_root, &grub_mkstandalone_cmd)?;
 
@@ -548,16 +578,19 @@ echo "Regenerating GRUB config..."
 grub-mkconfig -o /boot/grub/grub.cfg
 
 echo "Rebuilding standalone GRUB EFI binary..."
+{embed}
+
 grub-mkstandalone \
     --format=x86_64-efi \
     --output=/boot/efi/EFI/BOOT/BOOTX64.EFI \
     --disable-shim-lock \
     --modules="$MODULES" \
-    "boot/grub/grub.cfg=/boot/grub/grub.cfg"
+    "${{EMBED[@]}}"
 {secureboot}
 echo "GRUB reinstallation complete"
 "#,
             modules = GRUB_STANDALONE_MODULES,
+            embed = STANDALONE_EMBED_FILES,
             secureboot = secureboot_block,
         )
     } else {
@@ -1070,6 +1103,54 @@ GRUB_CMDLINE_LINUX_DEFAULT="{}"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_image_embeds_the_snapshot_entries() {
+        let root = temp_install_root("standalone_embed");
+        let mut cfg = DeploymentConfig::sample();
+        cfg.system.secureboot = true;
+        cfg.system.secureboot_method = SecureBootMethod::Sbctl;
+        cfg.disk.encryption = true;
+        assert!(uses_standalone_grub(&cfg));
+
+        create_grub_reinstall_script(&cfg, "/dev/sda", true, &root).unwrap();
+        let script = fs::read_to_string(format!("{root}/usr/local/bin/reinstall-grub")).unwrap();
+
+        // grub.cfg reaches the snapshot entries via ${prefix}/grub-btrfs.cfg,
+        // and ${prefix} is inside the memdisk for a standalone image — so the
+        // entries have to be embedded or the submenu never appears.
+        assert!(script.contains("boot/grub/grub-btrfs.cfg=/boot/grub/grub-btrfs.cfg"));
+        assert!(script.contains("\"${EMBED[@]}\""));
+        // Optional: grub-btrfs may not be installed, or may have removed the
+        // file when no snapshots exist. A missing source must not fail the build.
+        assert!(script.contains("if [ -f /boot/grub/grub-btrfs.cfg ]; then"));
+        // Regenerated before it is embedded, so the image never carries a stale copy.
+        let regen = script.find("grub-mkconfig -o /boot/grub/grub.cfg").unwrap();
+        let embed = script.find("EMBED=(").unwrap();
+        assert!(
+            regen < embed,
+            "grub.cfg must be regenerated before embedding"
+        );
+        assert_valid_bash(&script);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn assert_valid_bash(script: &str) {
+        use std::io::Write;
+        if let Ok(mut child) = std::process::Command::new("bash")
+            .arg("-n")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success(), "not valid bash:\n{script}");
+        }
+    }
 
     fn temp_install_root(tag: &str) -> String {
         let dir = std::env::temp_dir().join(format!(

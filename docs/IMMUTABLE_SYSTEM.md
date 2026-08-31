@@ -94,6 +94,16 @@ pointer move + `grub-mkconfig`.
 > *"Root filesystem isn't btrfs"* and **exits 0**, dropping the snapshot menu
 > while reporting success.
 >
+> **Snapshot entries inside a signed EFI binary.** grub-btrfs writes its entries
+> to a *separate* `grub-btrfs.cfg` and has grub.cfg reach them with
+> `configfile ${prefix}/grub-btrfs.cfg`. In a standalone image `${prefix}` is
+> `(memdisk)/boot/grub`, **not** the real `/boot/grub` — so unless that file is
+> embedded alongside grub.cfg, the submenu's own `[ ! -e ... ]` test fails on
+> every boot and no snapshot menu appears, however many sets exist and however
+> correctly `grub-btrfs.cfg` was written to disk. Both `grub-mkstandalone`
+> invocations embed it when present. Embedding also brings the entries under the
+> SecureBoot signature instead of trusting a file on the ESP.
+>
 > **Signed EFI binaries.** Where sbctl SecureBoot meets an encrypted disk the
 > installer builds standalone GRUB, embedding grub.cfg in the signed binary. A
 > pointer move that only rewrote `/boot/grub/grub.cfg` would never be read at
