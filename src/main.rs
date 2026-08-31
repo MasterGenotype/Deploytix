@@ -464,6 +464,9 @@ fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -
         return Err(DeploytixError::NotRoot.into());
     }
     let cmd = CommandRunner::new(dry_run);
+    // An update is a full `pacman` transaction in a chroot — as long and as
+    // input-free as an install, so it gets the same idle inhibitors.
+    let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Updating Artix Linux"));
     // Backend dispatch: LVM A/B systems carry the slot-state file on /boot; the
     // btrfs backend is signalled by the `.deploytix-pair` marker at `/`.
     if is_lvm_ab() {
@@ -496,6 +499,9 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
     use deploytix::utils::command::CommandRunner;
 
     let cmd = CommandRunner::new(dry_run);
+    // Acquired after the `--list` early-outs below would have fired, so a
+    // read-only listing never touches the host's power management.
+    let mut _awake = None;
     if is_lvm_ab() {
         if list {
             lvm_ab::print_slots(&cmd)?;
@@ -504,6 +510,7 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
         if !dry_run && !nix::unistd::geteuid().is_root() {
             return Err(DeploytixError::NotRoot.into());
         }
+        _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
         lvm_ab::run_rollback(&cmd, target.as_deref(), reboot)?;
         return Ok(());
     }
@@ -514,6 +521,7 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
     if !dry_run && !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
     }
+    _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
     run_rollback(&cmd, target.as_deref(), reboot)?;
     Ok(())
 }

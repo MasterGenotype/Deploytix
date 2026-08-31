@@ -70,6 +70,14 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 
 **Signal-Safe Cleanup**: SIGINT/SIGTERM handlers catch interruptions and automatically unmount filesystems and close LUKS containers.
 
+**Idle Inhibition**: `utils::idle::keep_awake()` returns an RAII guard that holds
+every idle inhibitor the host supports — kernel VT blanking off, X screensaver +
+DPMS off via `xset`, and an `elogind-inhibit`/`systemd-inhibit` child holding a
+`sleep:idle:handle-lid-switch` lock. Every layer is best-effort and releases on
+drop. Held for `Installer::run()` and for `deploytix update`/`rollback`; skipped
+in dry-run. A blanked screen mid-`basestrap` reads as a hang and gets the machine
+power-cycled, so this is data safety, not comfort.
+
 ### Dual Binary Setup
 
 - `src/main.rs` — CLI entry point (always built)

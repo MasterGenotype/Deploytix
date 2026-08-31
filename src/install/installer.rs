@@ -32,6 +32,7 @@ use crate::install::{
 use crate::utils::command::{CommandRunner, OperationRecord};
 use crate::utils::deps::ensure_dependencies;
 use crate::utils::error::{DeploytixError, Result};
+use crate::utils::idle;
 use crate::utils::prompt::{prompt_password, warn_confirm};
 use crate::utils::signal;
 use std::fs;
@@ -186,6 +187,16 @@ impl Installer {
         // instead of immediate termination.
         signal::install_signal_handlers();
 
+        // Hold off console blanking, X DPMS and elogind's idle/lid actions for
+        // the whole run.  Phases 4-6 go many minutes without user input, and a
+        // blanked screen mid-`basestrap` reads as a hang — users power-cycle.
+        // Skipped for a dry run, which must not touch the host at all.
+        let mut _awake = if self.cmd.is_dry_run() {
+            None
+        } else {
+            Some(idle::keep_awake("Installing Artix Linux"))
+        };
+
         info!(
             "Starting Deploytix installation on {} ({} partitions, {} init)",
             self.config.disk.device,
@@ -212,6 +223,11 @@ impl Installer {
         // Re-raise the caught signal so the parent shell sees the
         // correct exit status (e.g. 128 + signal number).
         if signal::is_interrupted() {
+            // `reraise()` terminates the process with the default handler, so
+            // `Drop` never runs past this point — release explicitly.
+            if let Some(ref mut awake) = _awake {
+                awake.release();
+            }
             signal::reraise();
         }
 
