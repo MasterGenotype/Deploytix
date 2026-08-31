@@ -55,7 +55,9 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 | `configure/` | In-chroot config: bootloader (GRUB), encryption, mkinitcpio hooks, locale, users, network, services, SecureBoot, handheld controller quirks |
 | `desktop/` | DE-specific package lists and setup (KDE, GNOME, XFCE, none) |
 | `cleanup/` | Unmount and optional disk wipe |
+| `immutable/` | Transactional immutable root: snapshot sets, boot pointer, per-set kernel archives, update/rollback, history, lockdown |
 | `gui/` | egui wizard panels (7-step), behind `--features gui` |
+| `gui_update/` | egui updater for immutable installs (`deploytix-update-gui`), behind `--features gui` |
 | `utils/` | `CommandRunner` (dry-run aware), `DeploytixError`, prompts, signal handlers |
 
 ### Key Patterns
@@ -69,6 +71,22 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 **Init System Abstraction**: `InitSystem` enum provides `base_package()`, `service_dir()`, `enabled_dir()`. Package naming follows Artix convention: `{package}-{init}` (e.g., `iwd-runit`).
 
 **Signal-Safe Cleanup**: SIGINT/SIGTERM handlers catch interruptions and automatically unmount filesystems and close LUKS containers.
+
+**Per-Set Kernels on a Shared `/boot`**: `/boot` is a separate, non-snapshotted
+partition, so its kernel is shared while `/usr/lib/modules/<ver>` lives inside
+each set. `immutable/bootset.rs` keeps each set's images under
+`/boot/deploytix/<id>/` and restores them over the canonical `/boot/vmlinuz-*` /
+`/boot/initramfs-*` names on **every** boot-pointer move. The invariant: the
+canonical images always match the set the pointer selects — so a rollback boots
+the kernel its modules match, and a failed update cannot leave a newer kernel
+over an older set. Only canonical names are booted; `10_linux` and grub-btrfs
+glob the top level of `/boot`, so the nested archives are invisible to them.
+
+**Updates Chain**: `deploytix update` sources the *next boot pointer*, never the
+pristine `@` (which is read-only for the system's life). A second update in the
+same session fills the set already staged rather than starting a rival one. The
+running root comes from `/proc/cmdline`, the staged pointer from grub.cfg — see
+`immutable/update.rs`.
 
 **Device-Scoped Teardown**: Cleanup never selects devices by name. A host deployed by deploytix runs on containers named by the same scheme the installer uses (`Crypt-Root`, `Crypt-Home`, …), and `resolve_mapper_name()` disambiguates a collision to `Crypt-Root-1` rather than avoiding it. So `disk/mapping.rs` resolves *ownership* — the physical disks backing a dm node, walked through `/sys/class/block/…/slaves` — and both teardown paths act only on mappings backed by the disk being installed to. The `cleanup` subcommand derives that disk from what is mounted under `/install` plus `--device`, and does nothing when it can determine neither.
 
