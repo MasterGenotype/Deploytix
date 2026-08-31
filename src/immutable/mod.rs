@@ -39,6 +39,9 @@ pub const ROOT_SUBVOL: &str = "@";
 pub const USR_SUBVOL: &str = "@usr";
 /// The writable `/etc` subvolume (kept out of the read-only root).
 pub const ETC_SUBVOL: &str = "@etc";
+/// Where `@etc` is mounted — the probe for the root filesystem on a booted
+/// immutable system, whose `/` is an overlay and names no block device.
+pub const ETC_MOUNTPOINT: &str = "/etc";
 
 /// Pairing marker written inside each root subvolume/snapshot. It records the
 /// `@usr` and `@etc` subvolume paths that belong with this root, so the
@@ -78,18 +81,105 @@ pub fn write_live_pair_marker(cmd: &CommandRunner, root: &str) -> Result<()> {
     Ok(())
 }
 
-/// Detect the immutable subvolume filesystems on the running/installed system.
+/// Detect the immutable subvolume filesystems on the running system.
 ///
-/// `@usr` lives on its own `Crypt-Usr` container in multi-volume layouts and on
-/// the root filesystem otherwise; we pick based on which mapper device exists.
+/// Resolved from the live mount table rather than assumed, because the
+/// [`ROOT_FS_DEVICE`]/[`USR_FS_DEVICE`] mapper names only exist on an encrypted
+/// layout whose names were not disambiguated. An unencrypted immutable install
+/// has no `/dev/mapper/Crypt-*` at all, and `resolve_mapper_name()` can hand a
+/// second deploytix system `Crypt-Root-1`; in both cases the constants name a
+/// device that is missing or, worse, someone else's.
+///
+/// `/etc` is the probe rather than `/`: on a booted immutable system `/` is an
+/// overlayfs whose source reads as `overlay`, while `@etc` is a plain subvolume
+/// mount of the root btrfs. `/usr` answers for the usr filesystem, which is a
+/// separate container only in multi-volume encrypted layouts.
 pub fn detect_devices() -> ImmutableDevices {
-    let usr_fs = if Path::new(USR_FS_DEVICE).exists() {
-        USR_FS_DEVICE.to_string()
-    } else {
-        ROOT_FS_DEVICE.to_string()
-    };
-    ImmutableDevices {
-        root_fs: ROOT_FS_DEVICE.to_string(),
-        usr_fs,
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    detect_devices_from(&mounts)
+}
+
+/// [`detect_devices`] against a given mount table, so the resolution is testable.
+fn detect_devices_from(mounts: &str) -> ImmutableDevices {
+    let root_fs = mount_source(mounts, ETC_MOUNTPOINT)
+        .or_else(|| mount_source(mounts, "/"))
+        .unwrap_or_else(|| ROOT_FS_DEVICE.to_string());
+
+    let usr_fs = mount_source(mounts, "/usr").unwrap_or_else(|| {
+        // No separate /usr mount: it is a subvolume of the root filesystem —
+        // unless the legacy container happens to be present.
+        if Path::new(USR_FS_DEVICE).exists() {
+            USR_FS_DEVICE.to_string()
+        } else {
+            root_fs.clone()
+        }
+    });
+
+    ImmutableDevices { root_fs, usr_fs }
+}
+
+/// Backing device of `mount_point` in a `/proc/self/mounts` table.
+///
+/// The last entry wins, matching the kernel: a later mount over the same point
+/// shadows the earlier one. Pseudo-filesystems (`overlay`, `tmpfs`) are skipped
+/// — only a real block device can carry a btrfs subvolume.
+fn mount_source(mounts: &str, mount_point: &str) -> Option<String> {
+    mounts.lines().rev().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let source = fields.next()?;
+        let target = fields.next()?;
+        (target == mount_point && source.starts_with("/dev/")).then(|| source.to_string())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn devices_resolve_from_the_live_mount_table() {
+        // Encrypted multi-volume: /etc and /usr are separate containers, and /
+        // is an overlay that names no device.
+        let m = "overlay / overlay ro,lowerdir=/x 0 0\n\
+                 /dev/mapper/Crypt-Usr /usr btrfs ro,subvol=/@usr 0 0\n\
+                 /dev/mapper/Crypt-Root /etc btrfs rw,subvol=/@etc 0 0\n";
+        let d = detect_devices_from(m);
+        assert_eq!(d.root_fs, "/dev/mapper/Crypt-Root");
+        assert_eq!(d.usr_fs, "/dev/mapper/Crypt-Usr");
+        assert!(!d.usr_on_root());
+    }
+
+    #[test]
+    fn unencrypted_immutable_resolves_a_real_partition() {
+        // No /dev/mapper/Crypt-* exists at all here; the hardcoded constants
+        // would have named a device that is simply not there.
+        let m = "/dev/nvme0n1p3 / btrfs ro,subvol=/@ 0 0\n\
+                 /dev/nvme0n1p3 /etc btrfs rw,subvol=/@etc 0 0\n\
+                 /dev/nvme0n1p2 /boot ext4 rw 0 0\n";
+        let d = detect_devices_from(m);
+        assert_eq!(d.root_fs, "/dev/nvme0n1p3");
+        // @usr shares the root filesystem when it is not its own container.
+        assert_eq!(d.usr_fs, "/dev/nvme0n1p3");
+        assert!(d.usr_on_root());
+    }
+
+    #[test]
+    fn a_disambiguated_container_name_is_followed() {
+        // resolve_mapper_name() hands a second deploytix system Crypt-Root-1;
+        // the constant would have pointed at the *other* system's container.
+        let m = "/dev/mapper/Crypt-Root-1 /etc btrfs rw,subvol=/@etc 0 0\n";
+        assert_eq!(detect_devices_from(m).root_fs, "/dev/mapper/Crypt-Root-1");
+    }
+
+    #[test]
+    fn a_later_mount_over_the_same_point_wins() {
+        let m = "/dev/sda1 /etc btrfs rw 0 0\n/dev/sdb2 /etc btrfs rw 0 0\n";
+        assert_eq!(detect_devices_from(m).root_fs, "/dev/sdb2");
+    }
+
+    #[test]
+    fn an_unreadable_mount_table_falls_back_to_the_constants() {
+        let d = detect_devices_from("");
+        assert_eq!(d.root_fs, ROOT_FS_DEVICE);
     }
 }

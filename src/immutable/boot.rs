@@ -144,12 +144,42 @@ pub fn activate_target(
                 &set_pointer_sed(&format!("{GRUB_CHROOT}/etc/default/grub"), root_subvol),
             ],
         )?;
-        cmd.run_in_chroot(GRUB_CHROOT, &format!("grub-mkconfig -o {GRUB_CFG}"))?;
+        cmd.run_in_chroot(GRUB_CHROOT, &regen_command(GRUB_CHROOT))?;
         Ok(())
     })();
     let _ = cmd.run("sh", &["-c", &unmount_grub_chroot_cmd()]);
     result
 }
+
+/// The command that makes a boot-pointer change take effect, run inside the
+/// chroot of the target set.
+///
+/// A bare `grub-mkconfig` is not always enough. Where sbctl SecureBoot meets an
+/// encrypted disk the installer builds **standalone** GRUB: grub.cfg is embedded
+/// in a signed EFI binary, and the on-disk `/boot/grub/grub.cfg` this would
+/// rewrite is never read at boot. Every `deploytix update` and `rollback` would
+/// report success while the pointer and the snapshot menu silently failed to
+/// move. Those systems carry `/usr/local/bin/reinstall-grub`, which regenerates
+/// grub.cfg *and* rebuilds and re-signs the binary — the same command the
+/// installer points `GRUB_BTRFS_MKCONFIG` at.
+///
+/// The script exists on plain encrypted layouts too, where it also re-runs
+/// `grub-install`; a pointer move does not need that, so only the standalone
+/// variant (identified by the `grub-mkstandalone` it runs) is used here.
+fn regen_command(chroot: &str) -> String {
+    let script = format!("{chroot}{REINSTALL_GRUB}");
+    let standalone = std::fs::read_to_string(&script)
+        .map(|s| s.contains("grub-mkstandalone"))
+        .unwrap_or(false);
+    if standalone {
+        REINSTALL_GRUB.to_string()
+    } else {
+        format!("grub-mkconfig -o {GRUB_CFG}")
+    }
+}
+
+/// Rebuild-and-re-sign pipeline written by the installer on encrypted layouts.
+pub const REINSTALL_GRUB: &str = "/usr/local/bin/reinstall-grub";
 
 /// Read the current `rootflags=subvol=` pointer from the generated grub.cfg (the
 /// first menuentry's — i.e. the default). `@` when none is found.
@@ -170,6 +200,37 @@ pub fn current_boot_pointer(cmd: &CommandRunner) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_grub_regenerates_through_the_resign_pipeline() {
+        let dir = std::env::temp_dir().join(format!("deploytix-regen-{}", std::process::id()));
+        let bin = dir.join("usr/local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+
+        // No script at all: an unencrypted layout regenerates in place.
+        assert_eq!(regen_command(&root), format!("grub-mkconfig -o {GRUB_CFG}"));
+
+        // Plain encrypted: the script exists but only re-runs grub-install,
+        // which a pointer move does not need.
+        std::fs::write(
+            bin.join("reinstall-grub"),
+            "#!/bin/bash\ngrub-install ...\n",
+        )
+        .unwrap();
+        assert_eq!(regen_command(&root), format!("grub-mkconfig -o {GRUB_CFG}"));
+
+        // Standalone: grub.cfg is embedded in a signed EFI binary, so writing
+        // the on-disk copy alone would leave the pointer where it was.
+        std::fs::write(
+            bin.join("reinstall-grub"),
+            "#!/bin/bash\ngrub-mkconfig -o /boot/grub/grub.cfg\ngrub-mkstandalone ...\nsbctl sign-all\n",
+        )
+        .unwrap();
+        assert_eq!(regen_command(&root), REINSTALL_GRUB);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn running_root_subvol_takes_the_last_rootflags_like_the_hook() {

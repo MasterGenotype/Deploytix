@@ -85,6 +85,27 @@ installed, so the grub.cfg it writes predates `/etc/grub.d/41_snapshots-btrfs`.
 Because the pointer + marker drive everything, switching systems is just a
 pointer move + `grub-mkconfig`.
 
+> **Nothing regenerates grub against the live root.** Two things enforce that.
+> `activate_target` uses the chroot below. And grub-btrfsd — which fires whenever
+> the watched snapshot directory changes — is pointed at
+> `/usr/local/bin/deploytix-grub-regen`, a guard that refuses on an overlay root.
+> Without it the daemon would overwrite the good grub.cfg the chroot just wrote:
+> `41_snapshots-btrfs` reads *"not a btrfs filesystem"* off an overlay, prints
+> *"Root filesystem isn't btrfs"* and **exits 0**, dropping the snapshot menu
+> while reporting success.
+>
+> **Signed EFI binaries.** Where sbctl SecureBoot meets an encrypted disk the
+> installer builds standalone GRUB, embedding grub.cfg in the signed binary. A
+> pointer move that only rewrote `/boot/grub/grub.cfg` would never be read at
+> boot, so `activate_target` runs `/usr/local/bin/reinstall-grub` there instead —
+> it regenerates, rebuilds and re-signs.
+>
+> **Devices are resolved, not assumed.** `detect_devices()` reads the backing
+> devices out of `/proc/self/mounts` (probing `/etc`, since `/` is an overlay and
+> names no block device). The `/dev/mapper/Crypt-*` constants are only a
+> fallback: they do not exist on an unencrypted install, and `resolve_mapper_name`
+> can hand a second deploytix system `Crypt-Root-1`.
+
 > **Regenerating grub off an overlay root.** On a booted immutable system `/` is
 > an overlayfs, and `grub-probe` aborts with *"failed to get canonical path of
 > `overlay'"* if run against it — producing an empty grub.cfg. So `update` and
