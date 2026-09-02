@@ -101,8 +101,16 @@ deploytix -n update              # dry-run: print the plan, change nothing
 
 What it does:
 
-1. Snapshots the current `{@, @usr, @etc}` into a new **writable** set and writes
-   its pairing marker.
+1. Snapshots the **running** `{root, usr, etc}` trio into a new **writable** set
+   and writes its pairing marker.
+
+   The running trio is read from the kernel cmdline's `rootflags=subvol=` — what
+   the initramfs actually mounted — not from the boot pointer in grub.cfg (which
+   names what boots *next*) and not from the mount table (`/` is an overlayfs,
+   so it cannot name the subvolume underneath). On a never-updated system that
+   trio is the base `{@, @usr, @etc}`; afterwards it is the previously activated
+   set. Snapshotting the running set rather than the base is what makes updates
+   **stack**: update 2 contains update 1's changes.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
    `artix-chroot`, or plain `chroot` where `artools` is not installed.
@@ -111,6 +119,9 @@ What it does:
 4. On failure, deletes the half-built set and leaves the running system
    untouched.
 5. Prunes sets beyond `--keep`, never removing the running set or the new one.
+   "Running" here is the set resolved in step 1, captured *before* the pointer
+   moves — reading the pointer after activation would name the set just staged
+   and leave the booted one eligible for deletion.
 
 The running system is never modified, so an interrupted or failed update is a
 no-op.

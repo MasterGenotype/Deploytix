@@ -15,7 +15,7 @@
 //! runs `grub-mkconfig` there — writing the shared `/boot/grub/grub.cfg`.
 
 use crate::configure::bootloader::REINSTALL_GRUB_PATH;
-use crate::immutable::snapshot::{self, ImmutableDevices};
+use crate::immutable::snapshot::{self, ImmutableDevices, SubvolSet};
 use crate::immutable::{detect_devices, PAIR_MARKER};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
@@ -26,6 +26,59 @@ use tracing::info;
 pub const GRUB_CFG: &str = "/boot/grub/grub.cfg";
 /// Scratch mountpoint for the grub-regeneration chroot.
 const GRUB_CHROOT: &str = "/run/deploytix-grub";
+/// Kernel cmdline of the running system.
+const PROC_CMDLINE: &str = "/proc/cmdline";
+
+/// The root subvolume named by a kernel cmdline's `rootflags=subvol=`.
+///
+/// Mirrors `resolve_root_subvol()` in the generated mountcrypt hook — the code
+/// that actually performed the mount — so this reports what the system really
+/// booted: the last occurrence wins (kernel behaviour for repeated parameters)
+/// and surrounding double quotes are stripped (grub-btrfs emits them).
+/// `None` when the cmdline names no subvolume.
+pub fn parse_root_subvol(cmdline: &str) -> Option<String> {
+    let mut found = None;
+    for token in cmdline.split_whitespace() {
+        let Some(flags) = token.strip_prefix("rootflags=") else {
+            continue;
+        };
+        for flag in flags.split(',') {
+            if let Some(value) = flag.strip_prefix("subvol=") {
+                let value = value.trim_matches('"');
+                if !value.is_empty() {
+                    found = Some(value.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The root subvolume the running system booted from; the base `@` when the
+/// cmdline says nothing (an unreadable `/proc/cmdline`, or a layout that does
+/// not pass `rootflags`).
+///
+/// This is deliberately **not** [`current_boot_pointer`]: that reads grub.cfg,
+/// which names what boots *next*. After an update stages a new set the two
+/// differ, and confusing them is how the running system ends up unprotected.
+pub fn running_root_subvol() -> String {
+    std::fs::read_to_string(PROC_CMDLINE)
+        .ok()
+        .and_then(|cmdline| parse_root_subvol(&cmdline))
+        .unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string())
+}
+
+/// The snapshot set id the running system booted from; `@` for the base install.
+pub fn running_set_id() -> String {
+    let root = running_root_subvol();
+    pointer_set_id(&root).unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string())
+}
+
+/// The `{root, usr, etc}` subvolumes the running system booted from — the
+/// source a new snapshot set must be built from so updates compose.
+pub fn running_subvols() -> SubvolSet {
+    SubvolSet::for_root(&running_root_subvol())
+}
 
 /// How `deploytix regen-grub` regenerates grub.cfg on the running system.
 ///
@@ -259,6 +312,49 @@ mod tests {
     fn activate_dry_run_is_safe() {
         let cmd = CommandRunner::new(true);
         activate_target(&cmd, &devices(), "@").unwrap();
+    }
+
+    #[test]
+    fn root_subvol_is_parsed_the_way_the_initramfs_parses_it() {
+        // The plain case: what a staged set's default entry carries.
+        assert_eq!(
+            parse_root_subvol(
+                "BOOT_IMAGE=/vmlinuz-linux root=/dev/mapper/Crypt-Root \
+                 rootflags=subvol=@deploytix-sets/1700000000/root rw quiet"
+            ),
+            Some("@deploytix-sets/1700000000/root".to_string())
+        );
+        // grub-btrfs quotes its value, and appends its rootflags after the one
+        // from GRUB_CMDLINE_LINUX_DEFAULT — last occurrence wins, matching the
+        // kernel and mountcrypt's resolve_root_subvol().
+        assert_eq!(
+            parse_root_subvol(
+                "rootflags=subvol=@ rootflags=subvolid=5,subvol=\"@snapshots/3/snapshot\""
+            ),
+            Some("@snapshots/3/snapshot".to_string())
+        );
+        // The base install.
+        assert_eq!(parse_root_subvol("rootflags=subvol=@ rw"), Some("@".into()));
+        // Nothing to find: a non-subvolume layout, or an unreadable cmdline.
+        assert_eq!(parse_root_subvol("root=UUID=1234 rw"), None);
+        assert_eq!(parse_root_subvol("rootflags=ro,noatime"), None);
+        assert_eq!(parse_root_subvol("rootflags=subvol="), None);
+    }
+
+    #[test]
+    fn running_subvols_pair_with_the_running_root() {
+        // Whatever /proc/cmdline says on the test host, the mapping from a root
+        // subvolume to its trio must hold in both directions.
+        assert_eq!(SubvolSet::for_root("@"), SubvolSet::base());
+        assert_eq!(
+            SubvolSet::for_root("@deploytix-sets/42/root"),
+            SubvolSet::of_set("42")
+        );
+        // running_subvols() must agree with running_root_subvol() on this host.
+        assert_eq!(
+            running_subvols(),
+            SubvolSet::for_root(&running_root_subvol())
+        );
     }
 
     #[test]
