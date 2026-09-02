@@ -105,7 +105,7 @@ deploytix generate-desktop-file [--de kde] [-o f]   # Generate .desktop launcher
 # Immutable-root systems (see "Living with a Deployed System")
 deploytix update [pkgs...] [--keep N] [--reboot]    # Transactional update
 deploytix rollback [id|@] [--list] [--reboot]       # Roll back to a snapshot set
-deploytix regen-grub                                # Regenerate grub.cfg the way this system needs
+deploytix regen-grub                                # Rebuild the boot menu for the current target
 
 # Global flags
 deploytix -v ...       # Verbose output
@@ -153,7 +153,7 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
 - **`/` and `/usr` are read-only.** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so they're covered too. `/etc` is a **writable** subvolume (`@etc`); `/var` and `/home` are writable and persistent. Stray writes to the rest of `/` (e.g. `/tmp`, `/root`) go to an **ephemeral overlay** and are cleared on reboot.
 - **You don't run `pacman -Syu` directly** — `/usr` is read-only, so it can't succeed anyway. Interactive shells get a friendly nudge toward `deploytix update` before it even tries; use `deploytix update` instead.
 - **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically.
-- **Rollback is instant and reversible.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot. Nothing is deleted, so you can roll "forward" again. Each set restores `{@, @usr, @etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
+- **Rollback goes backwards, and only backwards.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot at an **older** target. Selecting a newer one is refused — moving forward is `deploytix update`'s job, which builds a new set from the running system and activates it. Nothing is deleted either way. Each set restores its `{root, usr, etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
 - **Everyday example:**
 
   ```bash

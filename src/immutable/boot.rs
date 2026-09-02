@@ -16,7 +16,7 @@
 
 use crate::configure::bootloader::REINSTALL_GRUB_PATH;
 use crate::immutable::snapshot::{self, ImmutableDevices, SubvolSet};
-use crate::immutable::{detect_devices, PAIR_MARKER};
+use crate::immutable::PAIR_MARKER;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::path::Path;
@@ -83,64 +83,31 @@ pub fn running_subvols() -> SubvolSet {
     SubvolSet::for_root(&running_root_subvol())
 }
 
-/// How `deploytix regen-grub` regenerates grub.cfg on the running system.
+/// Whether the running system is a transactional immutable btrfs install.
 ///
-/// grub-btrfs's snapshot entries only reach the menu through a regeneration,
-/// and the right way to regenerate depends on the layout: the immutable
-/// watcher (`deploytix-grub-btrfsd`) and users call `deploytix regen-grub`
-/// rather than having to know which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegenStrategy {
-    /// Immutable btrfs root: the live `/` is an overlayfs, so mount the
-    /// active snapshot set at a scratch chroot and run `grub-mkconfig` there
-    /// ([`activate_target`] with the current pointer).
-    ImmutableChroot,
-    /// Encrypted / standalone layouts: the reinstall-grub pipeline the pacman
-    /// hook uses (mkconfig, then grub-install or a standalone rebuild, then
-    /// SecureBoot re-signing) — a bare mkconfig would leave an embedded
-    /// standalone config stale.
-    ReinstallScript,
-    /// Plain `grub-mkconfig` against the live root.
-    Mkconfig,
+/// The live pairing marker at `/` is written by the installer and carried by
+/// every snapshot set, so its presence is the signal. Everything in this module
+/// applies only to such a system.
+pub fn is_immutable_btrfs() -> bool {
+    Path::new(&format!("/{PAIR_MARKER}")).exists()
 }
 
-impl RegenStrategy {
-    /// One-line description for logs.
-    pub fn describe(self) -> &'static str {
-        match self {
-            RegenStrategy::ImmutableChroot => {
-                "immutable root: grub-mkconfig in a chroot of the active snapshot set"
-            }
-            RegenStrategy::ReinstallScript => "reinstall-grub pipeline",
-            RegenStrategy::Mkconfig => "grub-mkconfig",
-        }
-    }
-}
-
-/// Pick the regeneration strategy from what is present on the running system:
-/// the live pairing marker signals an immutable btrfs root, the reinstall
-/// script an encrypted/standalone layout.
-pub fn detect_regen_strategy() -> RegenStrategy {
-    if Path::new(&format!("/{PAIR_MARKER}")).exists() {
-        RegenStrategy::ImmutableChroot
-    } else if Path::new(REINSTALL_GRUB_PATH).exists() {
-        RegenStrategy::ReinstallScript
-    } else {
-        RegenStrategy::Mkconfig
-    }
-}
-
-/// Regenerate grub.cfg with `strategy`, leaving the boot pointer where it is.
-pub fn regenerate_grub(cmd: &CommandRunner, strategy: RegenStrategy) -> Result<()> {
-    match strategy {
-        RegenStrategy::ImmutableChroot => {
-            let devices = detect_devices();
-            let pointer = current_boot_pointer(cmd)?;
-            activate_target(cmd, &devices, &pointer)
-        }
-        RegenStrategy::ReinstallScript => cmd.run(REINSTALL_GRUB_PATH, &[]).map(|_| ()),
-        RegenStrategy::Mkconfig => cmd.run("grub-mkconfig", &["-o", GRUB_CFG]).map(|_| ()),
-    }
+/// The command that rebuilds the boot configuration, run **inside** the
+/// regeneration chroot.
+///
+/// One rule, decided in the chroot rather than by inspecting the host: if the
+/// system has the `reinstall-grub` pipeline, use it, because on a standalone
+/// GRUB install (SecureBoot sbctl + encryption) grub.cfg is embedded in the
+/// signed EFI binary and a bare `grub-mkconfig` writes a file nothing reads —
+/// the menu, snapshot entries included, would never change. The pipeline runs
+/// `grub-mkconfig` and then rebuilds and re-signs the binary, so it is the
+/// correct superset on every layout that has it. Only a system without it
+/// (unencrypted, plain grub-install) falls back to bare `grub-mkconfig`.
+fn regenerate_grub_cmd() -> String {
+    format!(
+        "if [ -x {REINSTALL_GRUB_PATH} ]; then {REINSTALL_GRUB_PATH}; \
+         else grub-mkconfig -o {GRUB_CFG}; fi"
+    )
 }
 
 /// The set id embedded in a boot pointer, if it points at a snapshot set.
@@ -215,10 +182,25 @@ fn unmount_grub_chroot_cmd() -> String {
     format!("umount -R {GRUB_CHROOT} 2>/dev/null || true; rmdir {GRUB_CHROOT} 2>/dev/null || true")
 }
 
-/// Make `root_subvol` the default boot: mount it (and its paired usr/etc) at a
-/// scratch chroot, point that root's `/etc/default/grub` at itself, and
-/// regenerate `/boot/grub/grub.cfg` from inside the chroot — where `/` is a real
-/// btrfs root, so `grub-probe` succeeds. Takes effect on the next reboot.
+/// Make `root_subvol` the default boot, completely.
+///
+/// This is the only place the boot configuration is written, and it does the
+/// whole job — `update` and `rollback` both go through it and neither needs to
+/// follow up with anything:
+///
+/// 1. Mount `root_subvol` and its paired `usr`/`etc` at a scratch chroot. `/` is
+///    a real btrfs root there, so `grub-probe` succeeds and grub-btrfs's
+///    generator produces the snapshot entries — neither works against the live
+///    overlay root.
+/// 2. Point that root's `/etc/default/grub` at itself.
+/// 3. Rebuild the boot configuration from inside the chroot with
+///    [`regenerate_grub_cmd`], which handles a standalone (signed, embedded)
+///    GRUB as well as an on-disk grub.cfg.
+/// 4. Point the *running* system's `/etc/default/grub` at the same target, so a
+///    later regeneration by anything else reproduces this pointer instead of
+///    reverting it (see [`sync_live_pointer_cmd`]).
+///
+/// Takes effect on the next reboot.
 pub fn activate_target(
     cmd: &CommandRunner,
     devices: &ImmutableDevices,
@@ -244,7 +226,7 @@ pub fn activate_target(
                 &set_pointer_sed(&format!("{GRUB_CHROOT}/etc/default/grub"), root_subvol),
             ],
         )?;
-        cmd.run_in_chroot(GRUB_CHROOT, &format!("grub-mkconfig -o {GRUB_CFG}"))?;
+        cmd.run_in_chroot(GRUB_CHROOT, &regenerate_grub_cmd())?;
         Ok(())
     })();
     let _ = cmd.run("sh", &["-c", &unmount_grub_chroot_cmd()]);
@@ -408,19 +390,19 @@ mod tests {
         );
     }
 
+    /// A standalone GRUB install keeps grub.cfg inside the signed EFI binary,
+    /// so a bare `grub-mkconfig` writes a file nothing reads and the menu never
+    /// changes. The regeneration must prefer the reinstall pipeline, which
+    /// rebuilds and re-signs it.
     #[test]
-    fn regenerate_dry_run_is_safe_for_every_strategy() {
-        // Each strategy must issue its commands through the dry-run runner
-        // without touching the host (the immutable one reads the pointer,
-        // which dry-run reports as `@`).
-        let cmd = CommandRunner::new(true);
-        for strategy in [
-            RegenStrategy::ImmutableChroot,
-            RegenStrategy::ReinstallScript,
-            RegenStrategy::Mkconfig,
-        ] {
-            regenerate_grub(&cmd, strategy).unwrap();
-            assert!(!strategy.describe().is_empty());
-        }
+    fn regeneration_prefers_the_reinstall_pipeline_over_a_bare_mkconfig() {
+        let c = regenerate_grub_cmd();
+        assert!(c.contains("if [ -x /usr/local/bin/reinstall-grub ]"));
+        // The fallback exists only for systems without the pipeline.
+        let fallback = c.find("grub-mkconfig").unwrap();
+        let guard = c.find("reinstall-grub").unwrap();
+        assert!(guard < fallback, "the pipeline must be tried first: {c}");
+        assert!(c.contains("grub-mkconfig -o /boot/grub/grub.cfg"));
+        assert_valid_shell(&c);
     }
 }

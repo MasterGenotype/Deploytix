@@ -264,10 +264,9 @@ enum Commands {
         reboot: bool,
     },
 
-    /// Regenerate the GRUB configuration the way this system needs it: in a
-    /// scratch chroot of the active snapshot set on an immutable btrfs root,
-    /// through the reinstall-grub pipeline on encrypted layouts, or with a
-    /// plain grub-mkconfig otherwise. Picks up new grub-btrfs snapshot entries.
+    /// Rebuild the boot menu for the currently selected target, without moving
+    /// the boot pointer. `update` and `rollback` already do this themselves;
+    /// this is for snapshots created outside deploytix (snapper's).
     RegenGrub,
 
     /// Generate desktop file for the GUI launcher
@@ -535,34 +534,40 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
     Ok(())
 }
 
-/// `deploytix regen-grub` — regenerate grub.cfg with the strategy this system
-/// needs. The immutable snapshot watcher (`deploytix-grub-btrfsd`) calls this
-/// whenever `/.snapshots` changes; it is also the right manual command after
-/// creating snapshots by hand.
+/// `deploytix regen-grub` — rebuild the boot menu for the target already
+/// selected, without moving the boot pointer.
+///
+/// `update` and `rollback` rebuild the menu themselves, so this is not part of
+/// either flow. It exists for snapshots created outside deploytix — snapper's,
+/// which appear in the menu only once something regenerates — and is what the
+/// `grub-btrfsd` service runs on this backend.
 fn cmd_regen_grub(dry_run: bool) -> Result<()> {
-    use deploytix::immutable::boot::{detect_regen_strategy, regenerate_grub};
-    use deploytix::immutable::lvm_ab::detect as is_lvm_ab;
+    use deploytix::immutable::boot::{activate_target, current_boot_pointer, is_immutable_btrfs};
+    use deploytix::immutable::detect_devices;
     use deploytix::utils::command::CommandRunner;
 
     if !dry_run && !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot.into());
     }
-    // The A/B backend keeps its boot pointer with in-place edits of grub.cfg
-    // (no grub-mkconfig: grub-probe cannot canonicalize the dm-verity root),
-    // and grub-btrfs is not supported on LVM thin anyway.
-    if is_lvm_ab() {
+    // This backend is the transactional immutable btrfs root and nothing else.
+    if !dry_run && !is_immutable_btrfs() {
         return Err(DeploytixError::ConfigError(
-            "this is an LVM A/B immutable system: its boot pointer lives in in-place edits of \
-             grub.cfg, which a full grub-mkconfig would discard. Nothing to regenerate."
+            "not a transactional immutable btrfs system (no /.deploytix-pair marker); \
+             `deploytix regen-grub` only applies to those installs"
                 .to_string(),
         )
         .into());
     }
     let cmd = CommandRunner::new(dry_run);
-    let strategy = detect_regen_strategy();
-    info!("Regenerating GRUB configuration ({})", strategy.describe());
-    regenerate_grub(&cmd, strategy)?;
-    info!("GRUB configuration regenerated");
+    // Re-activate the target that is already selected: same pointer, freshly
+    // enumerated menu.
+    let pointer = current_boot_pointer(&cmd)?;
+    info!(
+        "Rebuilding the boot menu for {} (pointer unchanged)",
+        pointer
+    );
+    activate_target(&cmd, &detect_devices(), &pointer)?;
+    info!("Boot menu rebuilt");
     Ok(())
 }
 

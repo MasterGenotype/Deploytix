@@ -149,8 +149,11 @@ deploytix rollback <id> --reboot # activate immediately
 ```
 
 Rollback only moves the boot pointer + regenerates grub.cfg — nothing is deleted,
-so it is itself reversible (roll "forward" to a newer set). The interactive
-grub-btrfs menu remains as a manual recovery path.
+so the set you left is still on disk. Returning to it is **not** a rollback and
+this command will not do it: rollback moves backwards only, and selecting a
+newer set is rejected with a pointer to `deploytix update`, which is how you
+move forward — it builds a new set from the running system and activates it.
+The interactive grub-btrfs menu remains as a manual recovery path.
 
 ---
 
@@ -173,21 +176,19 @@ Two things keep that list current:
   btrfs"* and `grub-probe` fails outright. Immutable installs therefore run
   `/usr/local/bin/deploytix-grub-btrfsd` instead (written by the grub-btrfs
   phase, same service name and `/.snapshots` watch), which calls
-  `deploytix regen-grub` on every change. That command reads the current boot
-  pointer from grub.cfg and re-runs `activate_target` for it: mount the
-  pointed-at set at the scratch chroot, `grub-mkconfig` there, pointer
-  unchanged.
+  `deploytix regen-grub` on every change. That command re-runs
+  `activate_target` for the target already selected: mount that set at the
+  scratch chroot, rebuild the menu there, pointer unchanged.
 
 ```
-deploytix regen-grub             # regenerate grub.cfg for the current pointer
-deploytix -n regen-grub          # dry-run: show the strategy and commands
+deploytix regen-grub             # rebuild the menu for the current target
+deploytix -n regen-grub          # dry-run: print the commands, change nothing
 ```
 
-`regen-grub` is layout-aware, so it is also the right command on a mutable
-deploytix install (reinstall-grub pipeline on encrypted layouts, plain
-`grub-mkconfig` otherwise). On the LVM A/B backend it refuses: that backend
-keeps its slot pointer with in-place edits of grub.cfg that a `grub-mkconfig`
-would discard.
+`regen-grub` is **not** part of the update or rollback flow — both rebuild the
+menu themselves through the same `activate_target`, and neither needs a
+follow-up command. It exists only for snapshots created outside deploytix, and
+refuses to run on anything that is not a transactional immutable btrfs system.
 
 ---
 
@@ -238,7 +239,7 @@ bypasses it.
 | Subvolume roles, marker, device detection, live marker | `src/immutable/mod.rs` |
 | `@etc` creation + mount | `src/immutable/etc.rs` |
 | Paired snapshot sets | `src/immutable/snapshot.rs` |
-| Boot pointer (grub), `deploytix regen-grub` strategy | `src/immutable/boot.rs` |
+| Boot pointer + the one boot-config rebuild (`activate_target`) | `src/immutable/boot.rs` |
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
 | grub-btrfsd replacement (`deploytix-grub-btrfsd`) | `src/configure/grub_btrfs.rs` |

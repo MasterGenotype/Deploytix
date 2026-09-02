@@ -106,7 +106,7 @@ deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
 deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
-deploytix regen-grub                               # Regenerate grub.cfg (chroot on immutable btrfs, reinstall-grub, or grub-mkconfig)
+deploytix regen-grub                               # Rebuild the boot menu for the current target (snapshots made outside deploytix)
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
