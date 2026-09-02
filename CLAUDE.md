@@ -55,6 +55,7 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 | `configure/` | In-chroot config: bootloader (GRUB), encryption, mkinitcpio hooks, locale, users, network, services, SecureBoot, handheld controller quirks |
 | `desktop/` | DE-specific package lists and setup (KDE, GNOME, XFCE, none) |
 | `cleanup/` | Unmount and optional disk wipe |
+| `diagnostics/` | Read-only reports on a deployed system (controller USB identity, drivers, power state) |
 | `gui/` | egui wizard panels (7-step), behind `--features gui` |
 | `utils/` | `CommandRunner` (dry-run aware), `DeploytixError`, prompts, signal handlers |
 
@@ -96,6 +97,7 @@ deploytix list-disks [--all]                 # List available disks
 deploytix validate <config>                  # Validate config file
 deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
+deploytix controllers [--all]                # Report controller USB identity, drivers, power state
 deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
 ```

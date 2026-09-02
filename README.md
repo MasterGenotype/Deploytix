@@ -307,6 +307,7 @@ The `[packages]` section provides a full gaming/handheld device stack:
 - **Handheld Daemon (HHD)** — Gamepad remapping, TDP control, per-game profiles (AUR: `hhd-git`). Writes init-specific service files.
 - **Decky Loader** — Steam plugin framework (AUR: `decky-loader-bin`). Writes init-specific service files.
 - **evdevhook2** — Cemuhook UDP motion server for DualShock/DualSense/Joy-Con controllers (AUR: `evdevhook2-git`). Installs udev rules and service files.
+- **Controller Diagnostics** — `deploytix controllers` reports each attached pad's USB identity (including `bcdDevice`), remote-wakeup capability, runtime power state, and the driver bound to every USB interface and HID child, flagging the combinations that cause disconnect/reconnect loops. Read-only, unprivileged, and reads sysfs directly so it needs no `usbutils`.
 - **Handheld Controller Quirks** — Stops the controllers on Lenovo Legion Go family handhelds (Legion Go, Legion Go 2, Legion Go S) repeatedly disconnecting and reconnecting: pins USB runtime power management off for the pads, binds them to `xpad` on kernels that predate their IDs, and opens their hidraw nodes to the session user. Applied automatically when the installing host's DMI identifies one of those machines; `handheld_controller_quirks = true`/`false` forces the decision. See `docs/HANDHELD_CONTROLLER_QUIRKS.md`.
 - **Wine** — Wine compatibility layer packages.
 - **GPU Drivers** — NVIDIA, AMD, and/or Intel driver stacks.

@@ -15,10 +15,11 @@
 //!    controller firmware re-enumerates instead of resuming — userspace sees
 //!    a disconnect immediately followed by a reconnect.
 //! 2. **Driver binding.** The Legion Go controller IDs reached `xpad`
-//!    upstream, but the Legion Go 2 IDs are newer than many stable kernels.
-//!    With no `xpad` match the vendor-specific interface falls through to
-//!    `hid-generic`, which misreads the report descriptor and makes the pad
-//!    flap between present and gone.
+//!    upstream. With no `xpad` match the vendor-specific interface falls
+//!    through to `hid-generic`, which misreads the report descriptor and
+//!    makes the pad flap between present and gone. A kernel that already
+//!    carries the ID binds `xpad` itself and the rule is a no-op there
+//!    (observed on a Legion Go 2), so this covers older kernels only.
 //! 3. **hidraw permissions.** Handheld Daemon and Steam both open the raw
 //!    HID interface. Upstream HHD's own user rules only match product IDs
 //!    `618*`, which misses `0x61eb` and the Legion Go 2 range; a daemon that
@@ -165,8 +166,9 @@ SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="17ef", ATTR{idPro
 
 # 2. Bind the controllers to xpad on kernels that predate their IDs.
 #
-# The Legion Go controller IDs landed in xpad upstream; the Legion Go 2 IDs
-# are newer than many stable kernels. With no xpad match the vendor-specific
+# The Legion Go controller IDs landed in xpad upstream, so a current kernel
+# binds them itself and this rule is a no-op. With no xpad match the
+# vendor-specific
 # interface falls through to hid-generic, which misreads the report
 # descriptor and makes the pad flap between present and gone. Registering
 # the ID through xpad's new_id is a no-op when the running kernel already

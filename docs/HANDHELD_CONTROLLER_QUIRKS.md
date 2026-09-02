@@ -51,10 +51,14 @@ every USB device on the machine and costs idle battery life on a handheld.
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="17ef", ATTR{idProduct}=="61??", RUN+="/bin/sh -c '/usr/bin/modprobe xpad; echo 17ef %s{idProduct} > /sys/bus/usb/drivers/xpad/new_id 2>/dev/null || true'"
 ```
 
-The Legion Go controller IDs landed in `xpad` upstream, but the Legion Go 2
-IDs are newer than many stable kernels. With no `xpad` match the
-vendor-specific interface falls through to `hid-generic`, which misreads the
-report descriptor and makes the pad flap between present and gone.
+The Legion Go controller IDs landed in `xpad` upstream. With no `xpad` match
+the vendor-specific interface falls through to `hid-generic`, which misreads
+the report descriptor and makes the pad flap between present and gone.
+
+**On a kernel that already knows the ID this rule does nothing.** An observed
+Legion Go 2 binds `xpad` to interface 0 natively (class `ff`, subclass `5d`,
+protocol `01` — the Xbox 360 signature), so the rule is a no-op there. It
+earns its place only on kernels predating the entry.
 
 Writing the ID to `xpad`'s `new_id` is a no-op when the running kernel
 already knows it — the write fails with `EEXIST`, which the `|| true`
@@ -117,21 +121,63 @@ machine picks it up without the user needing to know the flag exists.
 After first boot on the handheld:
 
 ```bash
-# The rule loaded (no output means udev accepted the whole file).
+deploytix controllers
+```
+
+That reports, for every attached pad: its `vendor:product`, `bcdDevice`,
+serial, whether the device declares remote-wakeup capability, its runtime
+power state, the driver bound to each USB interface, and the driver bound to
+each HID child — plus whether this rule file is installed. It reads sysfs
+directly, so it needs neither root nor `usbutils`. Add `--all` to widen the
+report from known controller vendors to every USB device.
+
+### Reading the output
+
+The pairing that causes the flapping is **`remote wakeup: NOT supported`**
+together with **`control=auto`** — a device that cannot signal a resume, left
+eligible for runtime suspend. The report flags that combination explicitly.
+With this rule file in place `control` reads `on` instead, and the note
+changes to say the device will not be suspended.
+
+An observed Legion Go 2 pad reports `bmAttributes=0x80`: bus-powered, bit 5
+clear, so no remote-wakeup capability. That is the direct evidence for rule 1.
+
+The report also flags a **split across HID drivers** — some children on
+`hid-generic` while others hold a vendor driver. That is not automatically a
+fault: a driver may probe an interface and decline it on purpose. Only the
+kernel log separates that from a missing match entry:
+
+```bash
+sudo dmesg | grep -i 'hid\|xpad\|17ef'
+```
+
+### Raw checks
+
+```bash
+# udev accepted the whole file (no output means it parsed cleanly).
 udevadm verify /etc/udev/rules.d/60-deploytix-handheld-controllers.rules
 
-# Runtime PM is pinned on for the controllers.
-for d in /sys/bus/usb/devices/*; do
-  [ "$(cat "$d/idVendor" 2>/dev/null)" = "17ef" ] || continue
-  echo "$d $(cat "$d/idProduct") control=$(cat "$d/power/control")"
-done
+# Everything usb-devices knows, if it is installed.
+usb-devices | grep -B3 -A9 61eb
 
-# The pads are on xpad, not hid-generic.
-ls -l /sys/bus/usb/drivers/xpad/
-
-# No more flapping.
-dmesg -w | grep -i 'usb\|xpad'
+# Watch for flapping live.
+sudo dmesg -w | grep -i 'usb\|xpad'
 ```
+
+## Telling the two generations apart
+
+The Legion Go 2 controller enumerates as **`17ef:61eb`** with the product
+string "Legion Controller for Windows" — the same identity the Legion Go 1
+controller reports. Vendor and product ID therefore **cannot** distinguish
+the two generations, and neither can any udev rule or driver match table
+keyed on them.
+
+`bcdDevice` is the remaining descriptor field that could differ, which is why
+`deploytix controllers` prints it prominently. An observed Legion Go 2 pad
+reports `01.00`. If a Legion Go 1 pad also reports `01.00`, then nothing in
+the USB descriptors separates them, and generation-specific handling would
+have to come from the host's DMI or from probing the vendor protocol in
+userspace.
 
 ## Source
 

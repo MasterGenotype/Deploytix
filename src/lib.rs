@@ -4,6 +4,7 @@ pub mod cleanup;
 pub mod config;
 pub mod configure;
 pub mod desktop;
+pub mod diagnostics;
 pub mod disk;
 pub mod immutable;
 pub mod install;

@@ -16,7 +16,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use deploytix::config::DeploymentConfig;
 use deploytix::pkgdeps::cli as deps_cli;
 use deploytix::utils::error::DeploytixError;
-use deploytix::{cleanup, config, desktop, disk, install, resources};
+use deploytix::{cleanup, config, desktop, diagnostics, disk, install, resources};
 
 #[derive(clap::Args, Debug, Clone, Default)]
 struct DepsCommonArgs {
@@ -179,6 +179,15 @@ enum Commands {
         all: bool,
     },
 
+    /// Report on attached game controllers: USB identity (including
+    /// bcdDevice), remote-wakeup capability, runtime power state, and the
+    /// driver bound to each USB interface and HID child
+    Controllers {
+        /// Report every USB device, not just known controller vendors
+        #[arg(short, long)]
+        all: bool,
+    },
+
     /// Inspect the partition table already on a disk, and show what a
     /// home-preserving recovery install would keep versus destroy
     Inspect {
@@ -330,6 +339,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::ListDisks { all }) => {
             cmd_list_disks(all)?;
+        }
+        Some(Commands::Controllers { all }) => {
+            cmd_controllers(all)?;
         }
         Some(Commands::Inspect {
             device,
@@ -515,6 +527,15 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
         return Err(DeploytixError::NotRoot.into());
     }
     run_rollback(&cmd, target.as_deref(), reboot)?;
+    Ok(())
+}
+
+/// Print the handheld controller diagnostic report.
+///
+/// Read-only and unprivileged: everything comes from sysfs, so this works
+/// on a freshly deployed system with no `usbutils` installed.
+fn cmd_controllers(all: bool) -> Result<()> {
+    print!("{}", diagnostics::controllers::report(all)?);
     Ok(())
 }
 
