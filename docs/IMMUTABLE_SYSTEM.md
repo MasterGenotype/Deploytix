@@ -76,9 +76,7 @@ The live system's `@` carries `usr=@usr` / `etc=@etc`.
    - mounts `@var`, `@log`, `@home` read-write.
 
 Because the pointer + marker drive everything, switching systems is just a
-pointer move + a boot-config rebuild. Both `update` and `rollback` do the whole
-thing through one function, `activate_target` in `src/immutable/boot.rs`; no
-follow-up command is needed after either.
+pointer move + `grub-mkconfig`.
 
 > **Regenerating grub off an overlay root.** On a booted immutable system `/` is
 > an overlayfs, and `grub-probe` aborts with *"failed to get canonical path of
@@ -86,46 +84,8 @@ follow-up command is needed after either.
 > `rollback` never run `grub-mkconfig` against the live `/`. Instead they mount
 > the target `{root,usr,etc}` set at a scratch chroot (a **real** btrfs root
 > where `grub-probe` works), point that root's `/etc/default/grub` at itself, and
-> rebuild the boot configuration from inside the chroot.
-
-### Where the pointer is recorded
-
-Three files carry it, and only one is authoritative:
-
-| File | Role |
-|------|------|
-| `/boot/deploytix-boot.conf` | **The record.** What deploytix last activated. Read by `rollback`, `regen-grub` and the updater GUI. |
-| the boot configuration | What GRUB reads. On a standard install `/boot/grub/grub.cfg`; on a standalone install the copy embedded in the signed EFI binary. |
-| `/etc/default/grub` | The template a regeneration rebuilds from. Written for **both** the target set and the running system. |
-
-The record exists because the pointer cannot be read back reliably. On a
-standalone install the configuration GRUB actually reads lives inside
-`BOOTX64.EFI`'s memdisk — `/boot/grub/grub.cfg` is only the source
-`grub-mkstandalone` built it from, so a regeneration that never reached the
-binary would leave the two disagreeing and any read of grub.cfg reporting a
-pointer that does not boot. The LVM A/B backend records its active slot the same
-way, in `lvm_ab::STATE_FILE`. Installs predating the record fall back to reading
-grub.cfg.
-
-The running system's template is written as well as the target's because grub.cfg
-is a *derived* file: the `95-grub-reinstall.hook` pacman hook and a stock
-`grub-btrfsd` both rebuild it from the **live** root's template, and would
-otherwise revert a staged pointer to whatever is booted now.
-
-### Standalone GRUB (SecureBoot sbctl + encryption)
-
-The boot configuration is embedded in a signed EFI binary, so every rebuild must
-go through `/usr/local/bin/reinstall-grub` — `grub-mkconfig`, then
-`grub-mkstandalone`, then `sbctl sign-all`. A bare `grub-mkconfig` writes a file
-nothing reads, and the menu never changes. `activate_target` runs the pipeline
-whenever the system has it, from inside the chroot, with `/boot` (and the ESP
-under it) and `/var` bind-mounted so the rebuild and the signing database are
-both reachable.
-
-The snapshot submenu needs one more thing here: the stub inside the embedded
-config cannot point at `${prefix}` (the memdisk), so the generated snapshot list
-is kept on the EFI System Partition and reached through a GRUB variable. See
-Fix 5 in [GRUB_BTRFS_COMPAT_FIXES.md](GRUB_BTRFS_COMPAT_FIXES.md).
+> run `grub-mkconfig` from inside the chroot to write the shared
+> `/boot/grub/grub.cfg`. See `activate_target` in `src/immutable/boot.rs`.
 
 ---
 
@@ -141,32 +101,21 @@ deploytix -n update              # dry-run: print the plan, change nothing
 
 What it does:
 
-1. Snapshots the **running** `{root, usr, etc}` trio into a new **writable** set
-   and writes its pairing marker.
-
-   The running trio is read from the kernel cmdline's `rootflags=subvol=` — what
-   the initramfs actually mounted — not from the boot pointer in grub.cfg (which
-   names what boots *next*) and not from the mount table (`/` is an overlayfs,
-   so it cannot name the subvolume underneath). On a never-updated system that
-   trio is the base `{@, @usr, @etc}`; afterwards it is the previously activated
-   set. Snapshotting the running set rather than the base is what makes updates
-   **stack**: update 2 contains update 1's changes.
+1. Snapshots the current `{@, @usr, @etc}` into a new **writable** set and writes
+   its pairing marker.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
-   `artix-chroot`, or plain `chroot` where `artools-base` is not installed.
+   `artix-chroot`, or plain `chroot` where `artools` is not installed.
 3. On success, points the default boot entry at the new set and regenerates
    grub.cfg. **Reboot to activate.**
 4. On failure, deletes the half-built set and leaves the running system
    untouched.
 5. Prunes sets beyond `--keep`, never removing the running set or the new one.
-   "Running" here is the set resolved in step 1, captured *before* the pointer
-   moves — reading the pointer after activation would name the set just staged
-   and leave the booted one eligible for deletion.
 
 The running system is never modified, so an interrupted or failed update is a
 no-op.
 
-> **API filesystems in the update chroot.** `artools-base` (which provides
+> **API filesystems in the update chroot.** `artools` (which provides
 > `artix-chroot`) is a host/ISO dependency and is *not* installed into deployed
 > systems, so `deploytix update` and `rollback` normally chroot with plain
 > `chroot`. That mounts nothing, so deploytix mounts `/proc`, `/sys`, `/dev`
@@ -189,46 +138,8 @@ deploytix rollback <id> --reboot # activate immediately
 ```
 
 Rollback only moves the boot pointer + regenerates grub.cfg — nothing is deleted,
-so the set you left is still on disk. Returning to it is **not** a rollback and
-this command will not do it: rollback moves backwards only, and selecting a
-newer set is rejected with a pointer to `deploytix update`, which is how you
-move forward — it builds a new set from the running system and activates it.
-The interactive grub-btrfs menu remains as a manual recovery path.
-
----
-
-## Snapshot entries in the GRUB menu
-
-grub-btrfs lists every snapshot on the root filesystem that contains a `/boot`
-directory — deploytix sets (`@deploytix-sets/<id>/root`) and snapper's
-`@snapshots/<n>/snapshot` alike — under an *"Artix Linux snapshots"* submenu.
-Selecting one boots it read-only with the ephemeral overlay; a set's
-`.deploytix-pair` marker pulls in its matching `/usr` and `/etc`.
-
-Two things keep that list current:
-
-- `deploytix update` / `rollback` regenerate grub.cfg (in the chroot, see
-  above), and grub-btrfs's generator runs as part of that.
-- For snapshots created outside deploytix (snapper timeline, `snapper create`),
-  the `grub-btrfsd` service is meant to regenerate on the fly. The **stock
-  daemon cannot do that here**: it runs the generator against the live `/`,
-  which is an overlayfs — the generator exits with *"Root filesystem isn't
-  btrfs"* and `grub-probe` fails outright. Immutable installs therefore run
-  `/usr/local/bin/deploytix-grub-btrfsd` instead (written by the grub-btrfs
-  phase, same service name and `/.snapshots` watch), which calls
-  `deploytix regen-grub` on every change. That command re-runs
-  `activate_target` for the target already selected: mount that set at the
-  scratch chroot, rebuild the menu there, pointer unchanged.
-
-```
-deploytix regen-grub             # rebuild the menu for the current target
-deploytix -n regen-grub          # dry-run: print the commands, change nothing
-```
-
-`regen-grub` is **not** part of the update or rollback flow — both rebuild the
-menu themselves through the same `activate_target`, and neither needs a
-follow-up command. It exists only for snapshots created outside deploytix, and
-refuses to run on anything that is not a transactional immutable btrfs system.
+so it is itself reversible (roll "forward" to a newer set). The interactive
+grub-btrfs menu remains as a manual recovery path.
 
 ---
 
@@ -279,10 +190,9 @@ bypasses it.
 | Subvolume roles, marker, device detection, live marker | `src/immutable/mod.rs` |
 | `@etc` creation + mount | `src/immutable/etc.rs` |
 | Paired snapshot sets | `src/immutable/snapshot.rs` |
-| Boot pointer record, the one boot-config rebuild (`activate_target`) | `src/immutable/boot.rs` |
+| Boot pointer (grub) | `src/immutable/boot.rs` |
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
-| grub-btrfsd replacement (`deploytix-grub-btrfsd`) | `src/configure/grub_btrfs.rs` |
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |

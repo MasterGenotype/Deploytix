@@ -128,7 +128,7 @@ struct Cli {
     verbose: bool,
 
     /// Preview actions without changing the system (dry-run). Applies to
-    /// `update`, `rollback` and `regen-grub`.
+    /// `update` and `rollback`.
     #[arg(short = 'n', long, global = true)]
     dry_run: bool,
 
@@ -264,11 +264,6 @@ enum Commands {
         reboot: bool,
     },
 
-    /// Rebuild the boot menu for the currently selected target, without moving
-    /// the boot pointer. `update` and `rollback` already do this themselves;
-    /// this is for snapshots created outside deploytix (snapper's).
-    RegenGrub,
-
     /// Generate desktop file for the GUI launcher
     GenerateDesktopFile {
         /// Desktop environment (kde, gnome, xfce, none)
@@ -370,9 +365,6 @@ fn main() -> Result<()> {
             reboot,
         }) => {
             cmd_rollback(target, list, reboot, cli.dry_run)?;
-        }
-        Some(Commands::RegenGrub) => {
-            cmd_regen_grub(cli.dry_run)?;
         }
         Some(Commands::GenerateDesktopFile { de, bindir, output }) => {
             cmd_generate_desktop_file(de, bindir, output)?;
@@ -531,43 +523,6 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
     }
     _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
     run_rollback(&cmd, target.as_deref(), reboot)?;
-    Ok(())
-}
-
-/// `deploytix regen-grub` — rebuild the boot menu for the target already
-/// selected, without moving the boot pointer.
-///
-/// `update` and `rollback` rebuild the menu themselves, so this is not part of
-/// either flow. It exists for snapshots created outside deploytix — snapper's,
-/// which appear in the menu only once something regenerates — and is what the
-/// `grub-btrfsd` service runs on this backend.
-fn cmd_regen_grub(dry_run: bool) -> Result<()> {
-    use deploytix::immutable::boot::{activate_target, current_boot_pointer, is_immutable_btrfs};
-    use deploytix::immutable::detect_devices;
-    use deploytix::utils::command::CommandRunner;
-
-    if !dry_run && !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
-    }
-    // This backend is the transactional immutable btrfs root and nothing else.
-    if !dry_run && !is_immutable_btrfs() {
-        return Err(DeploytixError::ConfigError(
-            "not a transactional immutable btrfs system (no /.deploytix-pair marker); \
-             `deploytix regen-grub` only applies to those installs"
-                .to_string(),
-        )
-        .into());
-    }
-    let cmd = CommandRunner::new(dry_run);
-    // Re-activate the target that is already selected: same pointer, freshly
-    // enumerated menu.
-    let pointer = current_boot_pointer(&cmd)?;
-    info!(
-        "Rebuilding the boot menu for {} (pointer unchanged)",
-        pointer
-    );
-    activate_target(&cmd, &detect_devices(), &pointer)?;
-    info!("Boot menu rebuilt");
     Ok(())
 }
 

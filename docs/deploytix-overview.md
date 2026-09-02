@@ -251,7 +251,7 @@ Cargo.toml
 ### Native dependency loading
 
 - The compiled binary is statically self-contained (in portable mode), but at runtime it shells out to: `sfdisk`, `wipefs`, `partprobe`, `udevadm`, `mkfs.{vfat,ext4,btrfs,xfs,f2fs}`, `mkswap`, `swapon`/`swapoff`, `mount`/`umount`, `blkid`, `cryptsetup`, `pvcreate`/`vgcreate`/`lvcreate`/`vgchange`, `mkinitcpio`, `grub-install`/`grub-mkconfig`, `basestrap`, `artix-chroot`/`chroot`, `pacman`/`pacman-key`, `repo-add`, `makepkg`, `sudo`, `efibootmgr`, `sbctl`/`sbsigntools`, `zpool`/`zfs`. Missing host binaries are detected by `utils::deps::ensure_dependencies()` and installed automatically via `pacman -S --noconfirm`.
-- The host system **must** be Artix (not Arch) because `basestrap` and `artix-chroot` (from `artools-base`) are Artix-only.
+- The host system **must** be Artix (not Arch) because `basestrap`, `artix-chroot`, and `artools` are Artix-only.
 
 ### Configuration files
 

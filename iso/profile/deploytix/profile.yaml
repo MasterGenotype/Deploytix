@@ -48,12 +48,8 @@ livefs:
     - gamescope-git
     - dosfstools
     # artools + its profile trees and YAML parser, so the live medium can run
-    # buildiso itself rather than only being a product of it. Upstream split
-    # artools into three: -base (basestrap, artix-chroot — what deploytix
-    # calls), -pkg (package building) and -iso (buildiso).
-    - artools-base
-    - artools-pkg
-    - artools-iso
+    # buildiso itself rather than only being a product of it.
+    - artools
     - iso-profiles
     - go-yq
     # xset: deploytix turns the X screensaver and DPMS off for the length of an

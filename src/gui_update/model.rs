@@ -165,6 +165,16 @@ fn sort_key(row: &SnapshotRow) -> u64 {
     row.target.parse::<u64>().unwrap_or(0)
 }
 
+/// The btrfs set currently mounted at `/`, from a `findmnt -no FSROOT /` value.
+///
+/// The boot pointer says what will boot *next*; this says what is booted *now*,
+/// and the two differ whenever an update is staged. FSROOT is the subvolume
+/// path with a leading slash: `/@deploytix-sets/123/root` or `/@`.
+pub fn running_set_from_fsroot(fsroot: &str) -> String {
+    let subvol = fsroot.trim().trim_start_matches('/');
+    crate::immutable::boot::pointer_set_id(subvol).unwrap_or_else(|| "@".to_string())
+}
+
 /// The A/B slot currently booted, from `/proc/cmdline`.
 ///
 /// The `verity-ab` hook is handed `deploytix.slot=<X>`; the slot-state file
@@ -419,16 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn running_set_is_read_from_the_kernel_cmdline() {
-        // The btrfs backend reads the running set from the kernel cmdline (see
-        // immutable::boot::running_set_id): on an immutable system `/` is an
-        // overlayfs, so the mount table cannot name the underlying subvolume.
-        assert_eq!(
-            crate::immutable::boot::parse_root_subvol(
-                "root=/dev/mapper/Crypt-Root rootflags=subvol=@deploytix-sets/123/root rw"
-            ),
-            Some("@deploytix-sets/123/root".to_string())
-        );
+    fn running_set_is_read_from_the_mounted_subvolume() {
+        assert_eq!(running_set_from_fsroot("/@deploytix-sets/123/root"), "123");
+        // The pristine base install.
+        assert_eq!(running_set_from_fsroot("/@"), "@");
+        // findmnt output carries a trailing newline.
+        assert_eq!(running_set_from_fsroot("/@deploytix-sets/9/root\n"), "9");
     }
 
     #[test]

@@ -48,9 +48,7 @@ package_deploytix-git() {
         'cryptsetup: LUKS encryption support'
         'lvm2: LVM thin provisioning layout'
         'grub: GRUB bootloader'
-        'artools-base: basestrap and artix-chroot for Artix installation'
-        'artools-pkg: Artix package building'
-        'artools-iso: Artix ISO building'
+        'artools: basestrap for Artix installation'
     )
     provides=('deploytix')
     conflicts=('deploytix')

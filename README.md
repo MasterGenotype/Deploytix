@@ -4,7 +4,7 @@ A portable Rust CLI and GUI application for automated deployment of **Artix Linu
 
 Can also be built into a package and included in an ISO for installation via bootable media.
 
-> **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap` and `artix-chroot`, from `artools-base`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
+> **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap`, `artix-chroot`, `artools`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
 
 ## Installation
 
@@ -105,11 +105,10 @@ deploytix generate-desktop-file [--de kde] [-o f]   # Generate .desktop launcher
 # Immutable-root systems (see "Living with a Deployed System")
 deploytix update [pkgs...] [--keep N] [--reboot]    # Transactional update
 deploytix rollback [id|@] [--list] [--reboot]       # Roll back to a snapshot set
-deploytix regen-grub                                # Rebuild the boot menu for the current target
 
 # Global flags
 deploytix -v ...       # Verbose output
-deploytix -n ...       # Dry-run (preview; applies to update/rollback/regen-grub)
+deploytix -n ...       # Dry-run (preview; applies to update/rollback)
 ```
 
 ## Installation Pipeline
@@ -153,7 +152,7 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
 - **`/` and `/usr` are read-only.** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so they're covered too. `/etc` is a **writable** subvolume (`@etc`); `/var` and `/home` are writable and persistent. Stray writes to the rest of `/` (e.g. `/tmp`, `/root`) go to an **ephemeral overlay** and are cleared on reboot.
 - **You don't run `pacman -Syu` directly** — `/usr` is read-only, so it can't succeed anyway. Interactive shells get a friendly nudge toward `deploytix update` before it even tries; use `deploytix update` instead.
 - **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically.
-- **Rollback goes backwards, and only backwards.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot at an **older** target. Selecting a newer one is refused — moving forward is `deploytix update`'s job, which builds a new set from the running system and activates it. Nothing is deleted either way. Each set restores its `{root, usr, etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
+- **Rollback is instant and reversible.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot. Nothing is deleted, so you can roll "forward" again. Each set restores `{@, @usr, @etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
 - **Everyday example:**
 
   ```bash
@@ -165,8 +164,6 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
   ```
 
 - **Recovery if a staged update won't boot:** pick the previous entry (or a `snapshot`) from the GRUB menu, then `sudo deploytix rollback` to make it the default. `/boot` (kernel + initramfs) is a shared partition, so a rollback restores userspace but keeps the most recently installed kernel — the boot machinery is version-independent, so this is safe; only kernel *contents* aren't rolled back.
-
-- **Snapshot entries in the GRUB menu.** With `install_grub_btrfs`, every snapshot (deploytix sets and snapper's) shows up under an *"Artix Linux snapshots"* submenu. On an immutable install the live `/` is an overlay that grub-btrfs's generator cannot read, so the `grub-btrfsd` service runs a deploytix watcher that regenerates through a chroot of the active set instead. `sudo deploytix regen-grub` does the same thing by hand — after creating snapshots manually, say.
 
 - **Graphical updater:** immutable deployments also get **Deploytix Update** (`deploytix-update-gui`, in the application menu), which drives the same transactional machinery — full upgrade, install repo packages or local `.pkg.tar.zst` files, and a snapshot list showing exactly which packages each update added, upgraded or removed, with rollback per entry. Every update (from the GUI *or* the CLI) records its package diff under `/var/lib/deploytix/history/`, which is what makes that list possible: the pacman database lives on the shared `/var` and is not snapshotted, so nothing else on disk knows what a given snapshot changed. It ships as its own package and is installed **only** when `immutable_root` is set — a mutable deployment never receives the binary, the desktop entry or the polkit action.
 
@@ -382,7 +379,7 @@ tests/                     # Integration tests: pkgdeps_integration
 
 **Host system (Artix Linux only):**
 
-- `basestrap` and `artix-chroot` (from `artools-base`; deploytix installs `artools-base`, `artools-pkg` and `artools-iso` together, since the former single `artools` package no longer exists)
+- `basestrap` and `artix-chroot` (from `artools`)
 - `pacman` — package manager
 - `sfdisk` — partition table creation (from `util-linux`)
 - `mkfs.vfat` (`dosfstools`), `mkfs.ext4` (`e2fsprogs`), and filesystem-specific tools (`btrfs-progs`, `xfsprogs`, `f2fs-tools`)

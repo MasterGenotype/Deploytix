@@ -4,8 +4,7 @@
 #
 # Usage: ./build-deploytix-iso.sh [OPTIONS]
 #
-# Requires: artools-iso (buildiso), artools-base, artools-pkg, makepkg,
-#           repo-add, go-yq
+# Requires: artools (buildiso), makepkg, repo-add, go-yq
 # Must be run from the Deploytix repository root or the iso/ directory.
 # Run 'git submodule update --init --recursive' once after cloning to populate vendor/.
 
@@ -176,7 +175,7 @@ check_prerequisites() {
 
     if (( ${#missing[@]} > 0 )); then
         die "Missing required commands: ${missing[*]}
-  Install: pacman -S artools-base artools-pkg artools-iso iso-profiles base-devel go-yq git"
+  Install: pacman -S artools iso-profiles base-devel go-yq git"
     fi
 
     [[ -f "${PKG_DIR}/PKGBUILD" ]] || die "PKGBUILD not found at ${PKG_DIR}/PKGBUILD"
@@ -679,10 +678,7 @@ generate_gui_profile() {
 
     cp "$de_profile" "$dest/profile.yaml"
 
-    # artools was split into artools-base (basestrap, artix-chroot — what
-    # deploytix calls), artools-pkg and artools-iso; the plain `artools` name no
-    # longer resolves, so all three are named explicitly.
-    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git", "alsa-utils", "artools-base", "artools-pkg", "artools-iso", "iso-profiles", "go-yq", "xorg-xset"]' "$dest/profile.yaml"
+    yq -i '.livefs.packages += ["deploytix-git", "deploytix-gui-git", "tkg-gui-git", "gamescope-git", "alsa-utils", "artools", "iso-profiles", "go-yq", "xorg-xset"]' "$dest/profile.yaml"
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
     # Remove packages from the base DE profile that are unavailable in Artix repos
     yq -i '.rootfs.packages -= ["artix-breeze-sddm"]' "$dest/profile.yaml"

@@ -3,9 +3,9 @@
 Enable deploytix to deploy a complete Artix Linux system from **any** Linux
 host (Ubuntu, Debian, Fedora, Arch, …) by provisioning a minimal Artix
 "helper" environment on demand and replacing every Artix-specific host tool
-with a portable equivalent. The end state: `basestrap` and `artix-chroot` (the
-`artools-base` half of the split `artools`) are no longer host requirements —
-they become one of two interchangeable backends.
+with a portable equivalent. The end state: `basestrap`, `artix-chroot`, and
+`artools` are no longer host requirements — they become one of two
+interchangeable backends.
 
 ## 1. Background & current failure
 
@@ -14,8 +14,8 @@ Phase 1:
 
 ```
 ⚠ Missing host system dependencies:
-  - basestrap (package: artools-base artools-pkg artools-iso)
-Packages to install: artools-base artools-pkg artools-iso
+  - basestrap (package: artools)
+Packages to install: artools
 Installing missing packages...
 ✗ IO error: No such file or directory (os error 2)      ← exec("pacman") on Ubuntu
 ```

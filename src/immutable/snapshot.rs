@@ -1,18 +1,14 @@
 //! Paired snapshot sets for the transactional immutable model.
 //!
-//! A *snapshot set* captures the three OS subvolumes — root, `usr` and `etc` —
-//! under a shared id so they roll back together. Sets live in a top-level
-//! [`SETS_DIR`] directory on each btrfs filesystem:
+//! A *snapshot set* captures the three OS subvolumes — `@` (root), `@usr` and
+//! `@etc` — under a shared id so they roll back together. Sets live in a
+//! top-level [`SETS_DIR`] directory on each btrfs filesystem:
 //!
 //! ```text
-//! root fs (Crypt-Root):  @deploytix-sets/<id>/root   (snapshot of the source root)
-//!                        @deploytix-sets/<id>/etc    (snapshot of the source etc)
-//! usr  fs (Crypt-Usr):   @deploytix-sets/<id>/usr    (snapshot of the source usr)
+//! root fs (Crypt-Root):  @deploytix-sets/<id>/root   (snapshot of @)
+//!                        @deploytix-sets/<id>/etc    (snapshot of @etc)
+//! usr  fs (Crypt-Usr):   @deploytix-sets/<id>/usr    (snapshot of @usr)
 //! ```
-//!
-//! The *source* is a [`SubvolSet`]: the install-time base `{@, @usr, @etc}` on a
-//! never-updated system, otherwise the set the system is currently running. Each
-//! update snapshots the running set, so updates compose.
 //!
 //! (In single-partition layouts the usr fs *is* the root fs, so all three land
 //! together.) Each set's root snapshot carries a [`crate::immutable::PAIR_MARKER`]
@@ -67,53 +63,6 @@ pub fn set_usr_subvol(id: &str) -> String {
     format!("{SETS_DIR}/{id}/usr")
 }
 
-/// The three OS subvolumes that together make up one bootable system state.
-///
-/// A new set is always snapshotted **from** one of these — normally the one the
-/// system is currently running — so that successive updates compose instead of
-/// each rebasing onto the install-time base.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubvolSet {
-    /// Root subvolume, on the root filesystem.
-    pub root: String,
-    /// `/usr` subvolume, on the usr filesystem (which may be the root one).
-    pub usr: String,
-    /// `/etc` subvolume, on the root filesystem.
-    pub etc: String,
-}
-
-impl SubvolSet {
-    /// The base subvolumes written at install time (`@`, `@usr`, `@etc`).
-    ///
-    /// Only the state a never-updated system boots; after the first update the
-    /// running state is a snapshot set, not this.
-    pub fn base() -> Self {
-        Self {
-            root: crate::immutable::ROOT_SUBVOL.to_string(),
-            usr: crate::immutable::USR_SUBVOL.to_string(),
-            etc: crate::immutable::ETC_SUBVOL.to_string(),
-        }
-    }
-
-    /// The subvolumes belonging to snapshot set `id`.
-    pub fn of_set(id: &str) -> Self {
-        Self {
-            root: set_root_subvol(id),
-            usr: set_usr_subvol(id),
-            etc: set_etc_subvol(id),
-        }
-    }
-
-    /// The set for a root subvolume path, by the sibling convention: a set's
-    /// root pairs with its own `usr`/`etc`, the base `@` with `@usr`/`@etc`.
-    pub fn for_root(root_subvol: &str) -> Self {
-        match crate::immutable::boot::pointer_set_id(root_subvol) {
-            Some(id) => Self::of_set(&id),
-            None => Self::base(),
-        }
-    }
-}
-
 /// Allocate a fresh, sortable set id (seconds since the Unix epoch).
 pub fn new_set_id() -> String {
     let secs = SystemTime::now()
@@ -138,61 +87,45 @@ fn with_fs_root(device: &str, id: &str, body: &str) -> String {
     )
 }
 
-/// Shell body that snapshots `source`'s root-fs subvolumes (root and etc) into
-/// a set. `-r` yields read-only (archival) snapshots; omit for writable ones a
+/// Shell body that snapshots the live root-fs subvolumes (`@`, `@etc`) into a
+/// set. `-r` yields read-only (archival) snapshots; omit for writable ones a
 /// transactional update can `pacman` into.
-fn root_fs_snapshot_body(source: &SubvolSet, readonly: bool) -> String {
+fn root_fs_snapshot_body(readonly: bool) -> String {
     let ro = if readonly { " -r" } else { "" };
     format!(
         "mkdir -p \"$m/{SETS_DIR}/$id\"; \
-         btrfs subvolume snapshot{ro} \"$m/{src_root}\" \"$m/{SETS_DIR}/$id/root\"; \
-         btrfs subvolume snapshot{ro} \"$m/{src_etc}\" \"$m/{SETS_DIR}/$id/etc\"",
+         btrfs subvolume snapshot{ro} \"$m/@\" \"$m/{SETS_DIR}/$id/root\"; \
+         btrfs subvolume snapshot{ro} \"$m/@etc\" \"$m/{SETS_DIR}/$id/etc\"",
         ro = ro,
-        src_root = source.root,
-        src_etc = source.etc,
     )
 }
 
-/// Shell body that snapshots `source`'s `/usr` into a set on the usr filesystem.
-fn usr_fs_snapshot_body(source: &SubvolSet, readonly: bool) -> String {
+/// Shell body that snapshots the live `@usr` into a set on the usr filesystem.
+fn usr_fs_snapshot_body(readonly: bool) -> String {
     let ro = if readonly { " -r" } else { "" };
     format!(
         "mkdir -p \"$m/{SETS_DIR}/$id\"; \
-         btrfs subvolume snapshot{ro} \"$m/{src_usr}\" \"$m/{SETS_DIR}/$id/usr\"",
+         btrfs subvolume snapshot{ro} \"$m/@usr\" \"$m/{SETS_DIR}/$id/usr\"",
         ro = ro,
-        src_usr = source.usr,
     )
 }
 
-/// Build the command that creates a full paired set from `source`.
-///
-/// `source` is normally the set the system is running (see
-/// [`crate::immutable::boot::running_subvols`]), so each update builds on the
-/// last one rather than on the install-time base.
+/// Build the command that creates a full paired set from the live subvolumes.
 ///
 /// Split into per-filesystem invocations (returned in run order). In
 /// single-partition layouts a single command snapshots all three.
-pub fn create_set_cmds(
-    devices: &ImmutableDevices,
-    id: &str,
-    source: &SubvolSet,
-    readonly: bool,
-) -> Vec<String> {
+pub fn create_set_cmds(devices: &ImmutableDevices, id: &str, readonly: bool) -> Vec<String> {
     if devices.usr_on_root() {
         let body = format!(
             "{}; {}",
-            root_fs_snapshot_body(source, readonly),
-            usr_fs_snapshot_body(source, readonly)
+            root_fs_snapshot_body(readonly),
+            usr_fs_snapshot_body(readonly)
         );
         vec![with_fs_root(&devices.root_fs, id, &body)]
     } else {
         vec![
-            with_fs_root(
-                &devices.root_fs,
-                id,
-                &root_fs_snapshot_body(source, readonly),
-            ),
-            with_fs_root(&devices.usr_fs, id, &usr_fs_snapshot_body(source, readonly)),
+            with_fs_root(&devices.root_fs, id, &root_fs_snapshot_body(readonly)),
+            with_fs_root(&devices.usr_fs, id, &usr_fs_snapshot_body(readonly)),
         ]
     }
 }
@@ -233,25 +166,20 @@ pub fn delete_set_cmds(devices: &ImmutableDevices, id: &str) -> Vec<String> {
     }
 }
 
-/// Create a paired snapshot set from `source` and write its pairing marker.
-/// Returns the new set id.
-///
-/// The new set's marker names its *own* `usr`/`etc`, overwriting the one
-/// inherited from `source`, so booting it mounts the matching trio.
+/// Create a paired snapshot set from the live subvolumes and write its pairing
+/// marker. Returns the new set id.
 pub fn create_set(
     cmd: &CommandRunner,
     devices: &ImmutableDevices,
-    source: &SubvolSet,
     readonly: bool,
 ) -> Result<String> {
     let id = new_set_id();
     info!(
-        "[immutable] Creating {} snapshot set {} from {}",
+        "[immutable] Creating {} snapshot set {}",
         if readonly { "read-only" } else { "writable" },
-        id,
-        source.root,
+        id
     );
-    for c in create_set_cmds(devices, &id, source, readonly) {
+    for c in create_set_cmds(devices, &id, readonly) {
         cmd.run("sh", &["-c", &c])?;
     }
     cmd.run("sh", &["-c", &write_pair_marker_cmd(&devices.root_fs, &id)])?;
@@ -327,7 +255,7 @@ mod tests {
 
     #[test]
     fn multi_volume_create_uses_two_commands() {
-        let cmds = create_set_cmds(&multi(), "42", &SubvolSet::base(), false);
+        let cmds = create_set_cmds(&multi(), "42", false);
         assert_eq!(cmds.len(), 2, "separate usr fs needs its own snapshot cmd");
         assert!(cmds[0].contains("subvolume snapshot \"$m/@\" \"$m/@deploytix-sets/$id/root\""));
         assert!(cmds[0].contains("subvolume snapshot \"$m/@etc\""));
@@ -338,52 +266,11 @@ mod tests {
 
     #[test]
     fn single_partition_create_uses_one_command() {
-        let cmds = create_set_cmds(&single(), "42", &SubvolSet::base(), true);
+        let cmds = create_set_cmds(&single(), "42", true);
         assert_eq!(cmds.len(), 1, "shared fs snapshots all three together");
         assert!(cmds[0].contains("subvolume snapshot -r \"$m/@\""));
         assert!(cmds[0].contains("subvolume snapshot -r \"$m/@usr\""));
         assert_valid_shell(&cmds[0]);
-    }
-
-    /// The bug this guards: `create_set` used to snapshot the hardcoded `@`,
-    /// so the second and every later update rebased onto the install-time base
-    /// instead of building on the running set — silently discarding every
-    /// earlier update.
-    #[test]
-    fn a_set_is_snapshotted_from_its_source_not_from_the_base() {
-        let source = SubvolSet::of_set("100");
-        let cmds = create_set_cmds(&multi(), "200", &source, false);
-
-        assert!(
-            cmds[0].contains(
-                "subvolume snapshot \"$m/@deploytix-sets/100/root\" \"$m/@deploytix-sets/$id/root\""
-            ),
-            "root must come from the source set, got: {}",
-            cmds[0]
-        );
-        assert!(cmds[0].contains("subvolume snapshot \"$m/@deploytix-sets/100/etc\""));
-        assert!(cmds[1].contains("subvolume snapshot \"$m/@deploytix-sets/100/usr\""));
-        // Nothing may reference the base subvolumes when the source is a set.
-        for c in &cmds {
-            assert!(!c.contains("\"$m/@\""), "base root leaked in: {c}");
-            assert!(!c.contains("\"$m/@usr\""), "base usr leaked in: {c}");
-            assert!(!c.contains("\"$m/@etc\""), "base etc leaked in: {c}");
-            assert_valid_shell(c);
-        }
-    }
-
-    #[test]
-    fn subvol_sets_resolve_by_root_path() {
-        assert_eq!(SubvolSet::for_root("@"), SubvolSet::base());
-        assert_eq!(
-            SubvolSet::for_root("@deploytix-sets/7/root"),
-            SubvolSet::of_set("7")
-        );
-        let base = SubvolSet::base();
-        assert_eq!(
-            (base.root.as_str(), base.usr.as_str(), base.etc.as_str()),
-            ("@", "@usr", "@etc")
-        );
     }
 
     #[test]

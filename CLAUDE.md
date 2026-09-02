@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deploytix is an automated Artix Linux deployment installer written in Rust. It provides both an interactive CLI wizard and an egui-based GUI for deploying Artix Linux to removable media and disks. It replaces manual installation sequences (partitioning, encryption, basestrap, chroot configuration) with a single tool supporting multiple init systems, filesystems, desktop environments, LUKS2 encryption, LVM thin provisioning, and btrfs subvolumes.
 
-**Artix-specific**: Requires `basestrap` and `artix-chroot` — these are not available on Arch Linux. They come from `artools-base`; upstream split `artools` into `artools-base`, `artools-pkg` and `artools-iso`, and deploytix installs all three (`ARTOOLS_PACKAGES` in `src/utils/deps.rs`).
+**Artix-specific**: Requires `basestrap`, `artix-chroot`, and `artools` — these are not available on Arch Linux.
 
 ## Build Commands
 
@@ -106,7 +106,6 @@ deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
 deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
-deploytix regen-grub                               # Rebuild the boot menu for the current target (snapshots made outside deploytix)
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
@@ -123,12 +122,8 @@ read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr, @etc}` ar
 snapshotted as atomic sets that roll back together. Updates build a new writable
 snapshot set + `pacman` in a chroot, activated on reboot. Boot-pointer changes
 regenerate grub.cfg inside a scratch chroot of the target set — never against the
-live overlay `/`, where `grub-probe` would fail. The same rule applies to
-grub-btrfs's snapshot menu: the `grub-btrfsd` service on these installs runs
-`/usr/local/bin/deploytix-grub-btrfsd`, a watcher that calls `deploytix regen-grub`
-(chroot regen of the current pointer) instead of the stock daemon.
-`src/immutable/` (snapshot sets, boot pointer, update/rollback, lockdown). See
-`docs/IMMUTABLE_SYSTEM.md`.
+live overlay `/`, where `grub-probe` would fail. `src/immutable/` (snapshot sets,
+boot pointer, update/rollback, lockdown). See `docs/IMMUTABLE_SYSTEM.md`.
 
 **LVM A/B backend** (requires `use_lvm_thin`). A/B dual-slot with **dm-verity**
 read-only roots: two root LVs (`root_a`/`root_b`, each including `/usr`) alternate,

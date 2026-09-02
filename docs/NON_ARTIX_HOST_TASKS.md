@@ -13,7 +13,7 @@ Derived from `NON_ARTIX_HOST_PLAN.md`. Ordered by milestone; M1–M3 are indepen
   - [ ] Implement `detect()` and `preferred_backend()` (Native iff `has_basestrap`)
 - [ ] Replace the Phase-1 hard failure (`pacman` ENOENT / `os error 2`) with a graceful decision flow in `prepare()`
   - [ ] Backend `native` available → proceed unchanged
-  - [ ] Otherwise: distro-aware notice offering (1) provision Artix helper automatically (default; show ~800 MB ISO download size, cache location, disk usage) or (2) abort with instructions (install artools-base / run from Artix)
+  - [ ] Otherwise: distro-aware notice offering (1) provision Artix helper automatically (default; show ~800 MB ISO download size, cache location, disk usage) or (2) abort with instructions (install artools / run from Artix)
   - [ ] CLI: `dialoguer` confirm prompt, respecting `--noconfirm`-style flags
   - [ ] Non-interactive/config-driven runs: `backend = "auto"` selects helper without prompting when stdin is not a TTY
 - [ ] Add `[host]` config section to `src/config/deployment.rs` (all optional): `backend` (`auto|native|helper`), `helper_dir`, `iso_cache_dir`, `iso_url`, `keep_helper`
@@ -24,7 +24,7 @@ Derived from `NON_ARTIX_HOST_PLAN.md`. Ordered by milestone; M1–M3 are indepen
 - [ ] Create `src/host/pkgmgr.rs` with adapters for Apt / Dnf / Zypper / Pacman
 - [ ] Replace hardcoded `pacman -S` install path in `src/utils/deps.rs:194-209` with the adapter keyed by `HostEnvironment.package_manager`
 - [ ] Add per-distro package-name maps for the host binary list (e.g. `sfdisk` → util-linux on Arch/Fedora but fdisk on Debian/Ubuntu; add `unsquashfs` → squashfs-tools)
-- [ ] Make the `basestrap → ARTOOLS_PACKAGES` mapping (`deps.rs`) required only for the `native` backend
+- [ ] Make the `basestrap → artools` mapping (`deps.rs:39`) required only for the `native` backend
 - [ ] Unknown package manager → list missing binaries with per-distro install hints instead of attempting installation
 - [ ] Audit `deps.rs` so the helper backend only demands what the host truly executes (`grub-install`/`mkinitcpio` are target-chroot tools, not host deps)
 

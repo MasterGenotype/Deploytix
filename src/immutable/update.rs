@@ -3,13 +3,7 @@
 //! The running system's `/` and `/usr` are read-only, so updates never modify it
 //! in place. Instead:
 //!
-//! 1. Snapshot the **running** `{root, usr, etc}` trio into a new *writable*
-//!    set. That is the base `{@, @usr, @etc}` only on a never-updated system;
-//!    once an update has been activated the running trio is a snapshot set, and
-//!    snapshotting it is what makes successive updates stack rather than each
-//!    one rebasing onto the install-time base. The running trio is read from
-//!    the kernel cmdline (see [`crate::immutable::boot::running_subvols`]),
-//!    which is what the initramfs itself mounted.
+//! 1. Snapshot the current `{@, @usr, @etc}` into a new **writable** set.
 //! 2. Mount that set (root + paired usr/etc, with `/var`, `/home`, `/boot`
 //!    bind-mounted so state and the kernel/initramfs are shared).
 //! 3. Run `pacman -Syu` (or install the requested packages) and regenerate the
@@ -177,29 +171,6 @@ fn ensure_immutable(cmd: &CommandRunner) -> Result<()> {
     }
 }
 
-/// Which of `sets` (oldest first) may be deleted, keeping the newest `keep` and
-/// never `running` or `keep_id`.
-///
-/// Split out from [`prune_sets`] because the protection is the whole point:
-/// deleting the set the system is booted from leaves it unbootable on the next
-/// reboot, and deleting the one just staged throws away the update.
-pub(crate) fn sets_to_prune(
-    sets: &[String],
-    keep: usize,
-    running: &str,
-    keep_id: &str,
-) -> Vec<String> {
-    let removable: Vec<String> = sets
-        .iter()
-        .filter(|id| id.as_str() != running && id.as_str() != keep_id)
-        .cloned()
-        .collect();
-    if removable.len() <= keep {
-        return Vec::new();
-    }
-    removable[..removable.len() - keep].to_vec()
-}
-
 /// Delete sets older than the newest `keep`, never touching `running` or `keep_id`.
 fn prune_sets(
     cmd: &CommandRunner,
@@ -209,8 +180,17 @@ fn prune_sets(
     keep_id: &str,
 ) -> Result<()> {
     let sets = snapshot::list_sets(cmd, &devices.root_fs)?;
-    for id in sets_to_prune(&sets, keep, running, keep_id) {
-        if let Err(e) = snapshot::delete_set(cmd, devices, &id) {
+    let removable: Vec<String> = sets
+        .iter()
+        .filter(|id| id.as_str() != running && id.as_str() != keep_id)
+        .cloned()
+        .collect();
+    if removable.len() <= keep {
+        return Ok(());
+    }
+    let to_delete = &removable[..removable.len() - keep];
+    for id in to_delete {
+        if let Err(e) = snapshot::delete_set(cmd, devices, id) {
             warn!("[immutable] Failed to prune set {}: {}", id, e);
         }
     }
@@ -226,18 +206,8 @@ pub fn run_update(
     ensure_immutable(cmd)?;
     let devices = detect_devices();
 
-    // What the system is running *now*, read from the kernel cmdline before
-    // anything moves the boot pointer. Two things depend on it: the new set is
-    // snapshotted from it (so updates stack instead of each one rebasing onto
-    // the install-time `@`), and pruning must never delete it.
-    let running = boot::running_set_id();
-    let source = boot::running_subvols();
-
-    info!(
-        "[immutable] Building transactional update set from the running system ({})",
-        source.root
-    );
-    let id = snapshot::create_set(cmd, &devices, &source, /* readonly = */ false)?;
+    info!("[immutable] Building transactional update set");
+    let id = snapshot::create_set(cmd, &devices, /* readonly = */ false)?;
 
     let (local_files, repo_names) = classify_args(extra_packages);
 
@@ -290,13 +260,9 @@ pub fn run_update(
 
     match result {
         Ok(_) => {
-            // Point the next boot at the set just built. `id` is the newest set
-            // by construction (ids are epoch seconds), so this is always a step
-            // forward, never back onto an older one.
             boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
-            // `running` was captured before the activation above: reading the
-            // boot pointer here would return the set we just staged, leaving
-            // the actually-booted set unprotected and eligible for deletion.
+            let running = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+                .unwrap_or_else(|| "@".to_string());
             prune_sets(cmd, &devices, opts.keep_sets, &running, &id)?;
             info!(
                 "[immutable] Update ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
@@ -383,40 +349,6 @@ mod tests {
         ]);
         assert_eq!(files, vec!["pkg/deploytix-git-1-x86_64.pkg.tar.zst"]);
         assert_eq!(names, vec!["vim"]);
-    }
-
-    fn ids(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn pruning_keeps_the_newest_n_and_deletes_the_oldest() {
-        let sets = ids(&["1", "2", "3", "4", "5"]);
-        // running and keep_id are excluded first, then the newest `keep` of
-        // what remains survive.
-        assert_eq!(sets_to_prune(&sets, 2, "5", "5"), ids(&["1", "2"]));
-        assert!(sets_to_prune(&sets, 10, "5", "5").is_empty());
-        assert!(sets_to_prune(&[], 3, "@", "1").is_empty());
-    }
-
-    /// The regression: `run_update` read the boot pointer *after* staging the
-    /// new set, so `running` was the new set and the actually-booted one fell
-    /// into the deletable list. Deleting it makes the next boot fail and
-    /// destroys the obvious rollback target.
-    #[test]
-    fn the_running_set_is_never_pruned_even_when_it_is_old() {
-        let sets = ids(&["1", "2", "3", "4", "5"]);
-        // Booted on the oldest set, staging the newest, keeping just one.
-        let doomed = sets_to_prune(&sets, 1, "1", "5");
-        assert!(
-            !doomed.contains(&"1".to_string()),
-            "the running set must survive pruning, got {doomed:?}"
-        );
-        assert!(
-            !doomed.contains(&"5".to_string()),
-            "the staged set must survive"
-        );
-        assert_eq!(doomed, ids(&["2", "3"]));
     }
 
     #[test]

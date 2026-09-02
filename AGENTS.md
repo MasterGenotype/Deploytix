@@ -66,7 +66,7 @@ cargo test --test integration # Integration tests
 
 ### Artix-Specific Notes
 
-- Uses `basestrap` (from `artools-base`) instead of pacstrap for base system installation
+- Uses `basestrap` (from artools) instead of pacstrap for base system installation
 - Uses `artix-chroot` when available, falls back to plain chroot
 - Package naming follows Artix convention: `{package}-{init}` (e.g., `iwd-runit`, `grub-runit`)
 - mkinitcpio hooks differ from Arch; custom hooks in `configure/hooks.rs` for encryption

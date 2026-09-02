@@ -7,51 +7,38 @@ use std::collections::HashMap;
 use std::process::Command;
 use tracing::info;
 
-/// The Artix toolchain packages installed for `basestrap`.
-///
-/// `artools` was split into three: `artools-base` carries `basestrap` and
-/// `artix-chroot`, the two binaries deploytix actually calls; `artools-pkg`
-/// covers package building and `artools-iso` ISO building. All three are
-/// installed together — an installer host is expected to carry the full
-/// toolchain, and the old single `artools` name no longer resolves.
-const ARTOOLS_PACKAGES: &[&str] = &["artools-base", "artools-pkg", "artools-iso"];
-
-/// Binary to package mapping for Artix/Arch.
-///
-/// A binary maps to a *list* of packages: one binary can require several (the
-/// artools split), and the list is what reaches `pacman -S` as separate
-/// arguments.
-fn binary_to_package() -> HashMap<&'static str, &'static [&'static str]> {
-    let mut map: HashMap<&'static str, &'static [&'static str]> = HashMap::new();
+/// Binary to package mapping for Artix/Arch
+fn binary_to_package() -> HashMap<&'static str, &'static str> {
+    let mut map = HashMap::new();
     // Core partitioning
-    map.insert("sfdisk", &["util-linux"]);
-    map.insert("mkswap", &["util-linux"]);
-    map.insert("blkid", &["util-linux"]);
+    map.insert("sfdisk", "util-linux");
+    map.insert("mkswap", "util-linux");
+    map.insert("blkid", "util-linux");
 
     // Filesystems
-    map.insert("mkfs.vfat", &["dosfstools"]);
-    map.insert("mkfs.ext4", &["e2fsprogs"]);
-    map.insert("mkfs.btrfs", &["btrfs-progs"]);
-    map.insert("mkfs.xfs", &["xfsprogs"]);
-    map.insert("mkfs.f2fs", &["f2fs-tools"]);
-    map.insert("zpool", &["zfs-utils"]);
+    map.insert("mkfs.vfat", "dosfstools");
+    map.insert("mkfs.ext4", "e2fsprogs");
+    map.insert("mkfs.btrfs", "btrfs-progs");
+    map.insert("mkfs.xfs", "xfsprogs");
+    map.insert("mkfs.f2fs", "f2fs-tools");
+    map.insert("zpool", "zfs-utils");
 
     // Encryption
-    map.insert("cryptsetup", &["cryptsetup"]);
+    map.insert("cryptsetup", "cryptsetup");
     // dm-verity (LVM immutable A/B) — provided by cryptsetup
-    map.insert("veritysetup", &["cryptsetup"]);
+    map.insert("veritysetup", "cryptsetup");
 
     // LVM
-    map.insert("pvcreate", &["lvm2"]);
-    map.insert("vgcreate", &["lvm2"]);
-    map.insert("lvcreate", &["lvm2"]);
+    map.insert("pvcreate", "lvm2");
+    map.insert("vgcreate", "lvm2");
+    map.insert("lvcreate", "lvm2");
 
     // Bootloaders
-    map.insert("grub-install", &["grub"]);
-    map.insert("grub-mkconfig", &["grub"]);
+    map.insert("grub-install", "grub");
+    map.insert("grub-mkconfig", "grub");
 
     // Artix tools
-    map.insert("basestrap", ARTOOLS_PACKAGES);
+    map.insert("basestrap", "artools");
 
     map
 }
@@ -153,11 +140,9 @@ pub fn check_dependencies(
 
     for bin in required {
         if !binary_exists(bin) {
-            if let Some(&pkgs) = bin_to_pkg.get(bin) {
-                for pkg in pkgs {
-                    if !missing_packages.contains(&pkg.to_string()) {
-                        missing_packages.push(pkg.to_string());
-                    }
+            if let Some(&pkg) = bin_to_pkg.get(bin) {
+                if !missing_packages.contains(&pkg.to_string()) {
+                    missing_packages.push(pkg.to_string());
                 }
             } else {
                 // Unknown package, just report the binary
@@ -197,12 +182,10 @@ pub fn ensure_dependencies(
 
     for bin in required {
         if !binary_exists(bin) {
-            let pkgs: &[&str] = bin_to_pkg.get(bin).copied().unwrap_or(&["unknown"]);
-            missing_details.push((bin.to_string(), pkgs.join(" ")));
-            for pkg in pkgs {
-                if !missing_packages.contains(&pkg.to_string()) {
-                    missing_packages.push(pkg.to_string());
-                }
+            let pkg = bin_to_pkg.get(bin).copied().unwrap_or("unknown");
+            missing_details.push((bin.to_string(), pkg.to_string()));
+            if !missing_packages.contains(&pkg.to_string()) {
+                missing_packages.push(pkg.to_string());
             }
         }
     }
