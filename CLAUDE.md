@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deploytix is an automated Artix Linux deployment installer written in Rust. It provides both an interactive CLI wizard and an egui-based GUI for deploying Artix Linux to removable media and disks. It replaces manual installation sequences (partitioning, encryption, basestrap, chroot configuration) with a single tool supporting multiple init systems, filesystems, desktop environments, LUKS2 encryption, LVM thin provisioning, and btrfs subvolumes.
 
-**Artix-specific**: Requires `basestrap`, `artix-chroot`, and `artools` — these are not available on Arch Linux.
+**Artix-specific**: Requires `basestrap` and `artix-chroot` — these are not available on Arch Linux. They come from `artools-base`; upstream split `artools` into `artools-base`, `artools-pkg` and `artools-iso`, and deploytix installs all three (`ARTOOLS_PACKAGES` in `src/utils/deps.rs`).
 
 ## Build Commands
 

@@ -1,11 +1,16 @@
 # Building a Custom Deploytix ISO
 
-Build a bootable Artix Linux ISO with deploytix pre-installed using `buildiso` from artools.
+Build a bootable Artix Linux ISO with deploytix pre-installed using `buildiso` from `artools-iso`.
+
+> `artools` is now three packages — `artools-base` (`basestrap`, `artix-chroot`),
+> `artools-pkg` (package building) and `artools-iso` (`buildiso`). The shared
+> paths below (`/usr/share/artools`, `~/artools-workspace`,
+> `~/.config/artools`) are unchanged by the split.
 
 ## Prerequisites
 
 ```sh
-sudo pacman -S artools iso-profiles base-devel go-yq
+sudo pacman -S artools-base artools-pkg artools-iso iso-profiles base-devel go-yq
 ```
 
 The first run of `buildiso -q` generates `~/artools-workspace/`. Copy the profiles there if not already present:

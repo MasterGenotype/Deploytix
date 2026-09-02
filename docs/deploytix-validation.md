@@ -6,7 +6,7 @@ This document defines the test procedures used to validate a Deploytix change. T
 
 ### Required hardware / VMs
 
-- An Artix Linux host (cannot be Arch — `basestrap`, `artix-chroot`, `artools` are Artix-only).
+- An Artix Linux host (cannot be Arch — `basestrap` and `artix-chroot`, from `artools-base`, are Artix-only).
 - A target block device that is **not** the host root disk. Acceptable: a USB stick (USB 3 strongly recommended for basestrap throughput), a spare SSD, or a virtual disk attached to a libvirt/qemu guest. Minimum size: 32 GiB. Recommended: 128 GiB.
 - For SecureBoot tests: a UEFI machine (not a VM unless OVMF is configured) with SecureBoot enabled in firmware setup mode.
 

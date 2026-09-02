@@ -4,7 +4,7 @@ A portable Rust CLI and GUI application for automated deployment of **Artix Linu
 
 Can also be built into a package and included in an ISO for installation via bootable media.
 
-> **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap`, `artix-chroot`, `artools`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
+> **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap` and `artix-chroot`, from `artools-base`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
 
 ## Installation
 
@@ -379,7 +379,7 @@ tests/                     # Integration tests: pkgdeps_integration
 
 **Host system (Artix Linux only):**
 
-- `basestrap` and `artix-chroot` (from `artools`)
+- `basestrap` and `artix-chroot` (from `artools-base`; deploytix installs `artools-base`, `artools-pkg` and `artools-iso` together, since the former single `artools` package no longer exists)
 - `pacman` — package manager
 - `sfdisk` — partition table creation (from `util-linux`)
 - `mkfs.vfat` (`dosfstools`), `mkfs.ext4` (`e2fsprogs`), and filesystem-specific tools (`btrfs-progs`, `xfsprogs`, `f2fs-tools`)
