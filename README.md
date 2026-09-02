@@ -105,10 +105,11 @@ deploytix generate-desktop-file [--de kde] [-o f]   # Generate .desktop launcher
 # Immutable-root systems (see "Living with a Deployed System")
 deploytix update [pkgs...] [--keep N] [--reboot]    # Transactional update
 deploytix rollback [id|@] [--list] [--reboot]       # Roll back to a snapshot set
+deploytix regen-grub                                # Regenerate grub.cfg the way this system needs
 
 # Global flags
 deploytix -v ...       # Verbose output
-deploytix -n ...       # Dry-run (preview; applies to update/rollback)
+deploytix -n ...       # Dry-run (preview; applies to update/rollback/regen-grub)
 ```
 
 ## Installation Pipeline
@@ -164,6 +165,8 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
   ```
 
 - **Recovery if a staged update won't boot:** pick the previous entry (or a `snapshot`) from the GRUB menu, then `sudo deploytix rollback` to make it the default. `/boot` (kernel + initramfs) is a shared partition, so a rollback restores userspace but keeps the most recently installed kernel — the boot machinery is version-independent, so this is safe; only kernel *contents* aren't rolled back.
+
+- **Snapshot entries in the GRUB menu.** With `install_grub_btrfs`, every snapshot (deploytix sets and snapper's) shows up under an *"Artix Linux snapshots"* submenu. On an immutable install the live `/` is an overlay that grub-btrfs's generator cannot read, so the `grub-btrfsd` service runs a deploytix watcher that regenerates through a chroot of the active set instead. `sudo deploytix regen-grub` does the same thing by hand — after creating snapshots manually, say.
 
 - **Graphical updater:** immutable deployments also get **Deploytix Update** (`deploytix-update-gui`, in the application menu), which drives the same transactional machinery — full upgrade, install repo packages or local `.pkg.tar.zst` files, and a snapshot list showing exactly which packages each update added, upgraded or removed, with rollback per entry. Every update (from the GUI *or* the CLI) records its package diff under `/var/lib/deploytix/history/`, which is what makes that list possible: the pacman database lives on the shared `/var` and is not snapshotted, so nothing else on disk knows what a given snapshot changed. It ships as its own package and is installed **only** when `immutable_root` is set — a mutable deployment never receives the binary, the desktop entry or the polkit action.
 

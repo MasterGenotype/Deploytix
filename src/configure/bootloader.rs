@@ -22,6 +22,13 @@ const GRUB_STANDALONE_MODULES: &str = "all_video boot btrfs cat chain configfile
     search_fs_uuid search_fs_file search_label sleep smbios squash4 test true \
     video xfs zfs zstd cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512";
 
+/// The GRUB reinstall pipeline script written by [`create_grub_reinstall_hook`]
+/// on encrypted and LVM-thin layouts (grub-mkconfig, then grub-install or a
+/// standalone rebuild, then SecureBoot re-signing). Anything that needs a
+/// *complete* GRUB regeneration on such a system runs this rather than a bare
+/// `grub-mkconfig`: grub-btrfsd, `deploytix regen-grub`, the Phase 5.45 regen.
+pub const REINSTALL_GRUB_PATH: &str = "/usr/local/bin/reinstall-grub";
+
 /// Whether this configuration boots through a standalone GRUB EFI binary
 /// (grub.cfg embedded as a memdisk, rebuilt + re-signed on change) instead of
 /// a standard grub-install with an on-disk grub.cfg.
@@ -583,14 +590,14 @@ echo "GRUB reinstallation complete"
         )
     };
 
-    let script_path = format!("{}/reinstall-grub", script_dir);
+    let script_path = format!("{}{}", install_root, REINSTALL_GRUB_PATH);
     fs::write(&script_path, &script)?;
 
     let mut perms = fs::metadata(&script_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms)?;
 
-    info!("Created GRUB reinstall script at /usr/local/bin/reinstall-grub");
+    info!("Created GRUB reinstall script at {}", REINSTALL_GRUB_PATH);
     Ok(())
 }
 
@@ -690,16 +697,40 @@ pub fn create_grub_btrfs_compat(
 # Idempotent: markers record applied state. Re-run automatically whenever the
 # grub-btrfs package writes 41_snapshots-btrfs (91-patch-grub-btrfs.hook).
 # No-op when grub-btrfs is not installed.
+#
+# DEPLOYTIX_GRUB_BTRFS_ROOT (optional) prefixes every path, so the patch can
+# be applied to a mounted target from an installer host.
 
 set -euo pipefail
 
-TARGET="/etc/grub.d/41_snapshots-btrfs"
+ROOT="${{DEPLOYTIX_GRUB_BTRFS_ROOT:-}}"
+TARGET="${{ROOT}}/etc/grub.d/41_snapshots-btrfs"
 MARKER="# DEPLOYTIX-INTEGRITY-PATCH-V1"
-CONFIG="/etc/default/grub-btrfs/config"
+CONFIG="${{ROOT}}/etc/default/grub-btrfs/config"
 CONFIG_MARKER="# DEPLOYTIX-CRYPTODISK-V1"
 SOURCE_MARKER="# DEPLOYTIX-CRYPTSOURCE-V1"
 CRYPTODISK="{cryptodisk}"
 BOOT_LUKS_UUID="{boot_luks_uuid}"
+
+# Append `fallback` inside the command substitution of the
+# `<var>=$(${{grub_probe}} ... 2>/dev/null)` assignment, unless the line already
+# guards its probe with `||`. Anchoring on `2>/dev/null)` covers both the 4.13
+# release (`var=$(...) # comment`) and newer upstream (`var="$(...)"`); the
+# quoted form leaves no room for a comment inside the substitution, so the
+# audit marker goes at the end of the line.
+patch_probe_line() {{
+    local var="$1" fallback="$2"
+    sed -i \
+        -e "/^${{var}}=.*grub_probe/{{" \
+        -e '/||/b' \
+        -e "s@2>/dev/null)@2>/dev/null${{fallback}})@" \
+        -e 't patched' \
+        -e 'b' \
+        -e ':patched' \
+        -e 's@$@ # patched: integrity fallback@' \
+        -e '}}' \
+        "$TARGET"
+}}
 
 patch_snapshots_script() {{
     if [ ! -f "$TARGET" ]; then
@@ -712,29 +743,37 @@ patch_snapshots_script() {{
         return 0
     fi
 
-    # root_uuid: grub-probe -> blkid -> empty
-    sed -i 's@^root_uuid=\$(\${{grub_probe}} --device \${{root_device}} --target="fs_uuid" 2>/dev/null).*$@root_uuid=$(${{grub_probe}} --device ${{root_device}} --target="fs_uuid" 2>/dev/null || blkid -s UUID -o value "${{root_device}}" 2>/dev/null || true) # patched: integrity fallback@' "$TARGET"
-
-    # boot_uuid: same chain
-    sed -i 's@^boot_uuid=\$(\${{grub_probe}} --device \${{boot_device}} --target="fs_uuid" 2>/dev/null).*$@boot_uuid=$(${{grub_probe}} --device ${{boot_device}} --target="fs_uuid" 2>/dev/null || blkid -s UUID -o value "${{boot_device}}" 2>/dev/null || true) # patched: integrity fallback@' "$TARGET"
-
+    # root_uuid / boot_uuid: grub-probe -> blkid -> empty
+    patch_probe_line root_uuid ' || blkid -s UUID -o value "${{root_device}}" 2>/dev/null || true'
+    patch_probe_line boot_uuid ' || blkid -s UUID -o value "${{boot_device}}" 2>/dev/null || true'
     # boot_hs: hints_string has no good fallback; just absorb failure
-    sed -i 's@^boot_hs=\$(\${{grub_probe}} --device \${{boot_device}} --target="hints_string" 2>/dev/null).*$@boot_hs=$(${{grub_probe}} --device ${{boot_device}} --target="hints_string" 2>/dev/null || true) # patched: integrity fallback@' "$TARGET"
-
+    patch_probe_line boot_hs ' || true'
     # boot_fs: fall back to blkid TYPE
-    sed -i 's@^boot_fs=\$(\${{grub_probe}} --device \${{boot_device}} --target="fs" 2>/dev/null).*$@boot_fs=$(${{grub_probe}} --device ${{boot_device}} --target="fs" 2>/dev/null || blkid -s TYPE -o value "${{boot_device}}" 2>/dev/null || true) # patched: integrity fallback@' "$TARGET"
+    patch_probe_line boot_fs ' || blkid -s TYPE -o value "${{boot_device}}" 2>/dev/null || true'
 
-    # Insert marker right after the shebang so future invocations skip
-    sed -i "1a $MARKER" "$TARGET"
-
-    # Sanity check: all four patches landed
-    if ! grep -q "patched: integrity fallback" "$TARGET" \
-       || [ "$(grep -c 'patched: integrity fallback' "$TARGET")" -lt 4 ]; then
+    # Sanity check: no unguarded grub-probe assignment may remain. A line is
+    # fine when it was patched above or already carried a fallback upstream
+    # (newer grub-btrfs guards root_uuid/boot_uuid itself).
+    local var unsafe=0
+    for var in root_uuid boot_uuid boot_hs boot_fs; do
+        if grep -E "^${{var}}=.*grub_probe" "$TARGET" | grep -qv '||'; then
+            echo "ERROR: ${{var}} assignment in $TARGET still aborts on grub-probe failure" >&2
+            unsafe=1
+        fi
+    done
+    if [ "$unsafe" -ne 0 ]; then
         echo "ERROR: integrity patch did not apply cleanly to $TARGET" >&2
         exit 1
     fi
 
-    echo "Patched $TARGET for LUKS2/integrity (grub-probe -> blkid fallback)."
+    # Insert marker right after the shebang so future invocations skip
+    sed -i "1a $MARKER" "$TARGET"
+
+    if grep -q "patched: integrity fallback" "$TARGET"; then
+        echo "Patched $TARGET for LUKS2/integrity (grub-probe -> blkid fallback)."
+    else
+        echo "$TARGET already guards its grub-probe calls; nothing to patch."
+    fi
 }}
 
 # Applied once; the marker preserves any later manual edits by the user.
@@ -1197,6 +1236,238 @@ mod tests {
             );
         }
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- Applying the compat patch to the real upstream generator ----------
+    //
+    // The sed patterns are the whole fix; proving they match a hand-written
+    // approximation proves nothing. These tests run the generated script
+    // against verbatim upstream copies of 41_snapshots-btrfs (see
+    // tests/fixtures/grub-btrfs/README.md), rooted at a temp dir via the
+    // script's DEPLOYTIX_GRUB_BTRFS_ROOT override.
+
+    fn generator_fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/grub-btrfs")
+            .join(name)
+    }
+
+    fn bash_available() -> bool {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn run_patch_script(root: &str) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg(format!("{root}/usr/local/bin/patch-grub-btrfs-integrity"))
+            .env("DEPLOYTIX_GRUB_BTRFS_ROOT", root)
+            .output()
+            .unwrap()
+    }
+
+    /// Generate the compat patch for `cfg` into a temp root, drop the upstream
+    /// generator `fixture` (plus an optional grub-btrfs config) into it, and
+    /// run the patch script once. The caller inspects the root and removes it.
+    fn apply_compat_patch(
+        tag: &str,
+        cfg: &DeploymentConfig,
+        boot_luks_uuid: Option<&str>,
+        fixture: &str,
+        grub_btrfs_config: Option<&str>,
+    ) -> (String, std::process::Output) {
+        let root = temp_install_root(tag);
+        create_grub_btrfs_compat(&CommandRunner::new(false), cfg, boot_luks_uuid, &root).unwrap();
+        fs::create_dir_all(format!("{root}/etc/grub.d")).unwrap();
+        fs::copy(
+            generator_fixture(fixture),
+            format!("{root}/etc/grub.d/41_snapshots-btrfs"),
+        )
+        .unwrap();
+        if let Some(body) = grub_btrfs_config {
+            fs::create_dir_all(format!("{root}/etc/default/grub-btrfs")).unwrap();
+            fs::write(format!("{root}/etc/default/grub-btrfs/config"), body).unwrap();
+        }
+        let output = run_patch_script(&root);
+        (root, output)
+    }
+
+    fn patched_generator(root: &str) -> String {
+        fs::read_to_string(format!("{root}/etc/grub.d/41_snapshots-btrfs")).unwrap()
+    }
+
+    fn assert_bash_syntax(path: &str) {
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{path} fails bash -n after patching");
+    }
+
+    fn line_starting_with<'a>(text: &'a str, prefix: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starting with {prefix:?}"))
+    }
+
+    #[test]
+    fn compat_patch_guards_every_probe_in_grub_btrfs_4_13() {
+        if !bash_available() {
+            return;
+        }
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.boot_encryption = false;
+
+        let (root, out) =
+            apply_compat_patch("patch-4-13", &cfg, None, "41_snapshots-btrfs-4.13", None);
+        assert!(
+            out.status.success(),
+            "patch script failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The packaged release guards none of its four probes; every one must
+        // gain a fallback so a grub-probe failure no longer aborts the
+        // generator (and with it grub-mkconfig) under `set -e`.
+        let patched = patched_generator(&root);
+        assert!(patched.contains("# DEPLOYTIX-INTEGRITY-PATCH-V1"));
+        assert_eq!(patched.matches("# patched: integrity fallback").count(), 4);
+        for var in ["root_uuid", "boot_uuid", "boot_hs", "boot_fs"] {
+            let line = line_starting_with(&patched, &format!("{var}="));
+            assert!(
+                line.contains("|| true"),
+                "{var} still aborts on failure: {line}"
+            );
+        }
+        assert!(line_starting_with(&patched, "root_uuid=")
+            .contains(r#"|| blkid -s UUID -o value "${root_device}""#));
+        assert!(line_starting_with(&patched, "boot_fs=")
+            .contains(r#"|| blkid -s TYPE -o value "${boot_device}""#));
+        assert_bash_syntax(&format!("{root}/etc/grub.d/41_snapshots-btrfs"));
+
+        // The pacman hook re-runs the script on every grub-btrfs upgrade: a
+        // second run must recognise its marker and change nothing.
+        let again = run_patch_script(&root);
+        assert!(again.status.success());
+        assert!(String::from_utf8_lossy(&again.stdout).contains("already applied"));
+        assert_eq!(patched_generator(&root), patched);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compat_patch_leaves_upstream_fallbacks_alone_on_master() {
+        if !bash_available() {
+            return;
+        }
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.boot_encryption = false;
+
+        let (root, out) = apply_compat_patch(
+            "patch-master",
+            &cfg,
+            None,
+            "41_snapshots-btrfs-master",
+            None,
+        );
+        assert!(
+            out.status.success(),
+            "patch script must not fail when upstream already guards some probes:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Newer grub-btrfs guards root_uuid/boot_uuid itself (`|| true` plus a
+        // blkid fallback): those lines stay untouched. boot_hs/boot_fs are
+        // still bare there, so they — and only they — get patched.
+        let patched = patched_generator(&root);
+        assert!(patched.contains("# DEPLOYTIX-INTEGRITY-PATCH-V1"));
+        assert_eq!(patched.matches("# patched: integrity fallback").count(), 2);
+        let root_line = line_starting_with(&patched, "root_uuid=");
+        assert!(
+            !root_line.contains("patched"),
+            "upstream fallback rewritten: {root_line}"
+        );
+        assert!(root_line.contains("|| true"));
+        let hs = line_starting_with(&patched, "boot_hs=");
+        assert!(
+            hs.contains(r#"2>/dev/null || true)""#),
+            "quoted form mis-patched: {hs}"
+        );
+        assert!(hs.ends_with("# patched: integrity fallback"));
+        let bfs = line_starting_with(&patched, "boot_fs=");
+        assert!(bfs.contains(r#"|| blkid -s TYPE -o value "${boot_device}" 2>/dev/null || true)""#));
+        assert_bash_syntax(&format!("{root}/etc/grub.d/41_snapshots-btrfs"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compat_patch_pins_crypt_source_and_cryptodisk_flag() {
+        if !bash_available() {
+            return;
+        }
+        const BOOT_UUID: &str = "11111111-2222-3333-4444-555555555555";
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = true;
+        cfg.disk.boot_encryption = true;
+
+        // master carries the cryptdevice= extraction the fallback hangs off.
+        let (root, out) = apply_compat_patch(
+            "patch-cryptsource-master",
+            &cfg,
+            Some(BOOT_UUID),
+            "41_snapshots-btrfs-master",
+            Some("GRUB_BTRFS_ENABLE_CRYPTODISK=\"false\"\n"),
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let config = fs::read_to_string(format!("{root}/etc/default/grub-btrfs/config")).unwrap();
+        assert!(config.contains("GRUB_BTRFS_ENABLE_CRYPTODISK=\"true\" # DEPLOYTIX-CRYPTODISK-V1"));
+        assert!(!config.contains("GRUB_BTRFS_ENABLE_CRYPTODISK=\"false\""));
+
+        let patched = patched_generator(&root);
+        let lines: Vec<&str> = patched.lines().collect();
+        let grep_idx = lines
+            .iter()
+            .position(|l| l.contains("grep -o -P 'cryptdevice="))
+            .expect("master fixture extracts cryptdevice=");
+        assert_eq!(
+            lines[grep_idx + 1],
+            format!(
+                r#"crypt_source="${{crypt_source:-UUID={BOOT_UUID}}}" # DEPLOYTIX-CRYPTSOURCE-V1"#
+            ),
+            "fallback must directly follow the extraction so it defaults, not overrides"
+        );
+        assert_bash_syntax(&format!("{root}/etc/grub.d/41_snapshots-btrfs"));
+        let _ = fs::remove_dir_all(&root);
+
+        // 4.13 has no cryptodisk support at all: the fallback is skipped with
+        // a note, never treated as a failed patch.
+        let (root, out) = apply_compat_patch(
+            "patch-cryptsource-4-13",
+            &cfg,
+            Some(BOOT_UUID),
+            "41_snapshots-btrfs-4.13",
+            None,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!patched_generator(&root).contains("DEPLOYTIX-CRYPTSOURCE-V1"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("skipping crypt_source fallback"));
         let _ = fs::remove_dir_all(&root);
     }
 }

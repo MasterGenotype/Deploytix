@@ -14,15 +14,78 @@
 //! `grub-probe` works), points that root's `/etc/default/grub` at itself, and
 //! runs `grub-mkconfig` there — writing the shared `/boot/grub/grub.cfg`.
 
+use crate::configure::bootloader::REINSTALL_GRUB_PATH;
 use crate::immutable::snapshot::{self, ImmutableDevices};
+use crate::immutable::{detect_devices, PAIR_MARKER};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
+use std::path::Path;
 use tracing::info;
 
 /// Where grub.cfg lives / is regenerated.
 pub const GRUB_CFG: &str = "/boot/grub/grub.cfg";
 /// Scratch mountpoint for the grub-regeneration chroot.
 const GRUB_CHROOT: &str = "/run/deploytix-grub";
+
+/// How `deploytix regen-grub` regenerates grub.cfg on the running system.
+///
+/// grub-btrfs's snapshot entries only reach the menu through a regeneration,
+/// and the right way to regenerate depends on the layout: the immutable
+/// watcher (`deploytix-grub-btrfsd`) and users call `deploytix regen-grub`
+/// rather than having to know which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegenStrategy {
+    /// Immutable btrfs root: the live `/` is an overlayfs, so mount the
+    /// active snapshot set at a scratch chroot and run `grub-mkconfig` there
+    /// ([`activate_target`] with the current pointer).
+    ImmutableChroot,
+    /// Encrypted / standalone layouts: the reinstall-grub pipeline the pacman
+    /// hook uses (mkconfig, then grub-install or a standalone rebuild, then
+    /// SecureBoot re-signing) — a bare mkconfig would leave an embedded
+    /// standalone config stale.
+    ReinstallScript,
+    /// Plain `grub-mkconfig` against the live root.
+    Mkconfig,
+}
+
+impl RegenStrategy {
+    /// One-line description for logs.
+    pub fn describe(self) -> &'static str {
+        match self {
+            RegenStrategy::ImmutableChroot => {
+                "immutable root: grub-mkconfig in a chroot of the active snapshot set"
+            }
+            RegenStrategy::ReinstallScript => "reinstall-grub pipeline",
+            RegenStrategy::Mkconfig => "grub-mkconfig",
+        }
+    }
+}
+
+/// Pick the regeneration strategy from what is present on the running system:
+/// the live pairing marker signals an immutable btrfs root, the reinstall
+/// script an encrypted/standalone layout.
+pub fn detect_regen_strategy() -> RegenStrategy {
+    if Path::new(&format!("/{PAIR_MARKER}")).exists() {
+        RegenStrategy::ImmutableChroot
+    } else if Path::new(REINSTALL_GRUB_PATH).exists() {
+        RegenStrategy::ReinstallScript
+    } else {
+        RegenStrategy::Mkconfig
+    }
+}
+
+/// Regenerate grub.cfg with `strategy`, leaving the boot pointer where it is.
+pub fn regenerate_grub(cmd: &CommandRunner, strategy: RegenStrategy) -> Result<()> {
+    match strategy {
+        RegenStrategy::ImmutableChroot => {
+            let devices = detect_devices();
+            let pointer = current_boot_pointer(cmd)?;
+            activate_target(cmd, &devices, &pointer)
+        }
+        RegenStrategy::ReinstallScript => cmd.run(REINSTALL_GRUB_PATH, &[]).map(|_| ()),
+        RegenStrategy::Mkconfig => cmd.run("grub-mkconfig", &["-o", GRUB_CFG]).map(|_| ()),
+    }
+}
 
 /// The set id embedded in a boot pointer, if it points at a snapshot set.
 /// `@deploytix-sets/<id>/root` → `Some(<id>)`; `@` → `None`.
@@ -196,5 +259,21 @@ mod tests {
     fn activate_dry_run_is_safe() {
         let cmd = CommandRunner::new(true);
         activate_target(&cmd, &devices(), "@").unwrap();
+    }
+
+    #[test]
+    fn regenerate_dry_run_is_safe_for_every_strategy() {
+        // Each strategy must issue its commands through the dry-run runner
+        // without touching the host (the immutable one reads the pointer,
+        // which dry-run reports as `@`).
+        let cmd = CommandRunner::new(true);
+        for strategy in [
+            RegenStrategy::ImmutableChroot,
+            RegenStrategy::ReinstallScript,
+            RegenStrategy::Mkconfig,
+        ] {
+            regenerate_grub(&cmd, strategy).unwrap();
+            assert!(!strategy.describe().is_empty());
+        }
     }
 }

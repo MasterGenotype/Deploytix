@@ -128,7 +128,7 @@ struct Cli {
     verbose: bool,
 
     /// Preview actions without changing the system (dry-run). Applies to
-    /// `update` and `rollback`.
+    /// `update`, `rollback` and `regen-grub`.
     #[arg(short = 'n', long, global = true)]
     dry_run: bool,
 
@@ -264,6 +264,12 @@ enum Commands {
         reboot: bool,
     },
 
+    /// Regenerate the GRUB configuration the way this system needs it: in a
+    /// scratch chroot of the active snapshot set on an immutable btrfs root,
+    /// through the reinstall-grub pipeline on encrypted layouts, or with a
+    /// plain grub-mkconfig otherwise. Picks up new grub-btrfs snapshot entries.
+    RegenGrub,
+
     /// Generate desktop file for the GUI launcher
     GenerateDesktopFile {
         /// Desktop environment (kde, gnome, xfce, none)
@@ -365,6 +371,9 @@ fn main() -> Result<()> {
             reboot,
         }) => {
             cmd_rollback(target, list, reboot, cli.dry_run)?;
+        }
+        Some(Commands::RegenGrub) => {
+            cmd_regen_grub(cli.dry_run)?;
         }
         Some(Commands::GenerateDesktopFile { de, bindir, output }) => {
             cmd_generate_desktop_file(de, bindir, output)?;
@@ -523,6 +532,37 @@ fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool)
     }
     _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
     run_rollback(&cmd, target.as_deref(), reboot)?;
+    Ok(())
+}
+
+/// `deploytix regen-grub` — regenerate grub.cfg with the strategy this system
+/// needs. The immutable snapshot watcher (`deploytix-grub-btrfsd`) calls this
+/// whenever `/.snapshots` changes; it is also the right manual command after
+/// creating snapshots by hand.
+fn cmd_regen_grub(dry_run: bool) -> Result<()> {
+    use deploytix::immutable::boot::{detect_regen_strategy, regenerate_grub};
+    use deploytix::immutable::lvm_ab::detect as is_lvm_ab;
+    use deploytix::utils::command::CommandRunner;
+
+    if !dry_run && !nix::unistd::geteuid().is_root() {
+        return Err(DeploytixError::NotRoot.into());
+    }
+    // The A/B backend keeps its boot pointer with in-place edits of grub.cfg
+    // (no grub-mkconfig: grub-probe cannot canonicalize the dm-verity root),
+    // and grub-btrfs is not supported on LVM thin anyway.
+    if is_lvm_ab() {
+        return Err(DeploytixError::ConfigError(
+            "this is an LVM A/B immutable system: its boot pointer lives in in-place edits of \
+             grub.cfg, which a full grub-mkconfig would discard. Nothing to regenerate."
+                .to_string(),
+        )
+        .into());
+    }
+    let cmd = CommandRunner::new(dry_run);
+    let strategy = detect_regen_strategy();
+    info!("Regenerating GRUB configuration ({})", strategy.describe());
+    regenerate_grub(&cmd, strategy)?;
+    info!("GRUB configuration regenerated");
     Ok(())
 }
 

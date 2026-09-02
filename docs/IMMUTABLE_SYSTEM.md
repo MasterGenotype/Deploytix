@@ -143,6 +143,43 @@ grub-btrfs menu remains as a manual recovery path.
 
 ---
 
+## Snapshot entries in the GRUB menu
+
+grub-btrfs lists every snapshot on the root filesystem that contains a `/boot`
+directory — deploytix sets (`@deploytix-sets/<id>/root`) and snapper's
+`@snapshots/<n>/snapshot` alike — under an *"Artix Linux snapshots"* submenu.
+Selecting one boots it read-only with the ephemeral overlay; a set's
+`.deploytix-pair` marker pulls in its matching `/usr` and `/etc`.
+
+Two things keep that list current:
+
+- `deploytix update` / `rollback` regenerate grub.cfg (in the chroot, see
+  above), and grub-btrfs's generator runs as part of that.
+- For snapshots created outside deploytix (snapper timeline, `snapper create`),
+  the `grub-btrfsd` service is meant to regenerate on the fly. The **stock
+  daemon cannot do that here**: it runs the generator against the live `/`,
+  which is an overlayfs — the generator exits with *"Root filesystem isn't
+  btrfs"* and `grub-probe` fails outright. Immutable installs therefore run
+  `/usr/local/bin/deploytix-grub-btrfsd` instead (written by the grub-btrfs
+  phase, same service name and `/.snapshots` watch), which calls
+  `deploytix regen-grub` on every change. That command reads the current boot
+  pointer from grub.cfg and re-runs `activate_target` for it: mount the
+  pointed-at set at the scratch chroot, `grub-mkconfig` there, pointer
+  unchanged.
+
+```
+deploytix regen-grub             # regenerate grub.cfg for the current pointer
+deploytix -n regen-grub          # dry-run: show the strategy and commands
+```
+
+`regen-grub` is layout-aware, so it is also the right command on a mutable
+deploytix install (reinstall-grub pipeline on encrypted layouts, plain
+`grub-mkconfig` otherwise). On the LVM A/B backend it refuses: that backend
+keeps its slot pointer with in-place edits of grub.cfg that a `grub-mkconfig`
+would discard.
+
+---
+
 ## Direct-pacman prevention
 
 Enforcement is the **read-only `/usr` mount** itself: a direct `pacman -Syu` on
@@ -190,9 +227,10 @@ bypasses it.
 | Subvolume roles, marker, device detection, live marker | `src/immutable/mod.rs` |
 | `@etc` creation + mount | `src/immutable/etc.rs` |
 | Paired snapshot sets | `src/immutable/snapshot.rs` |
-| Boot pointer (grub) | `src/immutable/boot.rs` |
+| Boot pointer (grub), `deploytix regen-grub` strategy | `src/immutable/boot.rs` |
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
+| grub-btrfsd replacement (`deploytix-grub-btrfsd`) | `src/configure/grub_btrfs.rs` |
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |

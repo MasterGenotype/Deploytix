@@ -407,8 +407,10 @@ impl Installer {
         // Phase 5.45: grub-btrfs — snapshot boot menu entries + snapper root
         // config. Must run after the bootloader phase (the 91-patch hook is
         // then in place to patch the generator during this pacman
-        // transaction) and before finalize's `mkinitcpio -P` (which needs
-        // the package's grub-btrfs-overlayfs hook installed).
+        // transaction, and grub.cfg is regenerated at the end of this phase
+        // so the snapshot submenu stub is in the menu from first boot) and
+        // before finalize's `mkinitcpio -P` (which needs the package's
+        // grub-btrfs-overlayfs hook installed).
         if self.config.packages.install_grub_btrfs {
             self.report_progress(0.885, "Installing grub-btrfs (snapshot boot support)...");
             self.install_grub_btrfs()?;
@@ -1231,8 +1233,10 @@ impl Installer {
     }
 
     /// Install grub-btrfs: packages, snapper root config with a top-level
-    /// @snapshots subvolume, /etc/default/grub-btrfs/config, and an
-    /// init-specific grub-btrfsd service.
+    /// @snapshots subvolume, /etc/default/grub-btrfs/config, an
+    /// init-specific grub-btrfsd service, and a grub.cfg regeneration so the
+    /// snapshot submenu stub is in the boot menu from the first boot (the
+    /// bootloader phase generated grub.cfg before the package existed).
     fn install_grub_btrfs(&self) -> Result<()> {
         info!("[Phase 5.45] Installing grub-btrfs (snapshot boot menu entries)");
 
