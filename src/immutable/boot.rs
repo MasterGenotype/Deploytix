@@ -24,6 +24,9 @@ use tracing::info;
 
 /// Where grub.cfg lives / is regenerated.
 pub const GRUB_CFG: &str = "/boot/grub/grub.cfg";
+/// The running system's grub template — on an immutable system this is the
+/// *running* set's `@etc` copy, not the target's.
+pub const GRUB_DEFAULT: &str = "/etc/default/grub";
 /// Scratch mountpoint for the grub-regeneration chroot.
 const GRUB_CHROOT: &str = "/run/deploytix-grub";
 /// Kernel cmdline of the running system.
@@ -165,6 +168,27 @@ fn set_pointer_sed(file: &str, root_subvol: &str) -> String {
     format!("sed -i 's|rootflags=subvol=[^ \"]*|rootflags=subvol={root_subvol}|' {file}")
 }
 
+/// `sed` that points the **running** system's grub template at `root_subvol`.
+///
+/// grub.cfg is only ever a *derived* file: whatever next runs `grub-mkconfig`
+/// rebuilds it from the `/etc/default/grub` of whichever root that run sees. On
+/// an immutable system two things do so from the live root, behind our back:
+///
+/// - the `95-grub-reinstall.hook` pacman hook, on any kernel or grub update;
+/// - a **stock** `grub-btrfsd`, on every snapshot change. Its "is the submenu
+///   already there?" check greps a literal `{grub_directory}/grub.cfg` (an
+///   upstream typo in the packaged 4.13), which never exists — so it always
+///   takes the full-`grub-mkconfig` branch.
+///
+/// Either one regenerates grub.cfg from the running set's template and reverts
+/// the pointer to whatever *that* set names, silently undoing a staged update.
+/// Writing the pointer here as well makes such a regeneration reproduce the
+/// staged target instead of discarding it. `lvm_ab::activate_slot` has always
+/// done this for the A/B backend; the btrfs backend did not.
+pub(crate) fn sync_live_pointer_cmd(root_subvol: &str) -> String {
+    set_pointer_sed(GRUB_DEFAULT, root_subvol)
+}
+
 /// Shell that mounts the target subvolume set at [`GRUB_CHROOT`] as a real btrfs
 /// root (root/usr read-only, etc read-write for the sed), plus `/.snapshots`,
 /// `/boot` and `/var`, so `grub-mkconfig` can run there.
@@ -224,6 +248,14 @@ pub fn activate_target(
         Ok(())
     })();
     let _ = cmd.run("sh", &["-c", &unmount_grub_chroot_cmd()]);
+    // Keep the running system's template naming the same target, so a later
+    // grub-mkconfig from the live root reproduces this pointer rather than
+    // reverting it (see `sync_live_pointer_cmd`). Best-effort: the pointer in
+    // grub.cfg above is what actually boots, and a missing or read-only
+    // template must not fail an otherwise complete activation.
+    if result.is_ok() {
+        let _ = cmd.run("sh", &["-c", &sync_live_pointer_cmd(root_subvol)]);
+    }
     result
 }
 
@@ -312,6 +344,25 @@ mod tests {
     fn activate_dry_run_is_safe() {
         let cmd = CommandRunner::new(true);
         activate_target(&cmd, &devices(), "@").unwrap();
+    }
+
+    /// A staged pointer has to survive anything else regenerating grub.cfg from
+    /// the live root — the pacman grub hook, or a stock grub-btrfsd, both of
+    /// which rebuild it from the *running* system's template.
+    #[test]
+    fn the_pointer_is_written_to_the_running_template_too() {
+        let target = "@deploytix-sets/9/root";
+        let chroot_sed = set_pointer_sed(&format!("{GRUB_CHROOT}/etc/default/grub"), target);
+        let live_sed = sync_live_pointer_cmd(target);
+
+        // Two distinct files: the target set's template (reached through the
+        // regeneration chroot) and the running system's own.
+        assert!(chroot_sed.ends_with("/run/deploytix-grub/etc/default/grub"));
+        assert!(live_sed.ends_with(" /etc/default/grub"));
+        assert_ne!(chroot_sed, live_sed);
+        // Both name the same target.
+        assert!(live_sed.contains("rootflags=subvol=@deploytix-sets/9/root"));
+        assert_valid_shell(&live_sed);
     }
 
     #[test]
