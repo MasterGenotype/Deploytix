@@ -23,7 +23,26 @@ use std::path::Path;
 use tracing::info;
 
 /// Where grub.cfg lives / is regenerated.
+///
+/// On a **standalone** GRUB install (SecureBoot sbctl + encryption) this file is
+/// not what boots: it is only the source `grub-mkstandalone` embeds into the
+/// signed EFI binary's memdisk. See [`BOOT_POINTER_FILE`].
 pub const GRUB_CFG: &str = "/boot/grub/grub.cfg";
+
+/// Durable record of the boot target deploytix last activated.
+///
+/// The pointer cannot be read back reliably from the boot configuration itself.
+/// On a standalone install the configuration that boots lives inside the signed
+/// EFI binary, and extracting it from that memdisk is not practical; reading
+/// `/boot/grub/grub.cfg` instead reports whatever last wrote *that* file, which
+/// on such a system may never have reached the binary at all. Either way the
+/// answer would be a guess about someone else's write.
+///
+/// So the activation records its own decision, on the shared `/boot` where every
+/// set can see it — exactly as the LVM A/B backend records its active slot in
+/// `lvm_ab::STATE_FILE`. This file is the authority for "what did we point the
+/// next boot at"; grub.cfg is the fallback for installs predating it.
+pub const BOOT_POINTER_FILE: &str = "/boot/deploytix-boot.conf";
 /// The running system's grub template — on an immutable system this is the
 /// *running* set's `@etc` copy, not the target's.
 pub const GRUB_DEFAULT: &str = "/etc/default/grub";
@@ -196,7 +215,10 @@ fn unmount_grub_chroot_cmd() -> String {
 /// 3. Rebuild the boot configuration from inside the chroot with
 ///    [`regenerate_grub_cmd`], which handles a standalone (signed, embedded)
 ///    GRUB as well as an on-disk grub.cfg.
-/// 4. Point the *running* system's `/etc/default/grub` at the same target, so a
+/// 4. Record the target in [`BOOT_POINTER_FILE`], the authority for what was
+///    activated — a standalone install's real configuration is inside the
+///    signed binary and cannot be read back.
+/// 5. Point the *running* system's `/etc/default/grub` at the same target, so a
 ///    later regeneration by anything else reproduces this pointer instead of
 ///    reverting it (see [`sync_live_pointer_cmd`]).
 ///
@@ -230,23 +252,41 @@ pub fn activate_target(
         Ok(())
     })();
     let _ = cmd.run("sh", &["-c", &unmount_grub_chroot_cmd()]);
-    // Keep the running system's template naming the same target, so a later
-    // grub-mkconfig from the live root reproduces this pointer rather than
-    // reverting it (see `sync_live_pointer_cmd`). Best-effort: the pointer in
-    // grub.cfg above is what actually boots, and a missing or read-only
-    // template must not fail an otherwise complete activation.
     if result.is_ok() {
+        // Record the decision. Not best-effort: without it the pointer can only
+        // be guessed from a derived file, which on a standalone install is not
+        // the configuration that boots. A rollback reading a wrong "current"
+        // moves to the wrong set, so failing here is better than succeeding
+        // with an unreadable result.
+        write_boot_pointer_record(cmd, root_subvol)?;
+        // Keep the running system's template naming the same target, so a later
+        // grub-mkconfig from the live root reproduces this pointer rather than
+        // reverting it (see `sync_live_pointer_cmd`). Best-effort: the boot
+        // configuration written above is what actually boots, and a missing or
+        // read-only template must not fail an otherwise complete activation.
         let _ = cmd.run("sh", &["-c", &sync_live_pointer_cmd(root_subvol)]);
     }
     result
 }
 
-/// Read the current `rootflags=subvol=` pointer from the generated grub.cfg (the
-/// first menuentry's — i.e. the default). `@` when none is found.
+/// The boot target currently selected for the next boot.
+///
+/// Prefers [`BOOT_POINTER_FILE`], the record deploytix wrote when it last
+/// activated a target, and falls back to the first `rootflags=subvol=` in the
+/// generated grub.cfg for installs that predate the record. `@` when neither
+/// yields anything.
 pub fn current_boot_pointer(cmd: &CommandRunner) -> Result<String> {
     if cmd.is_dry_run() {
         return Ok("@".to_string());
     }
+    // The record deploytix wrote when it last activated a target. Authoritative
+    // on every layout, and the only correct source on a standalone install.
+    if let Some(pointer) = read_boot_pointer_record() {
+        return Ok(pointer);
+    }
+    // No record: an install predating it, or one never activated since. Fall
+    // back to the generated config, which is accurate on a non-standalone
+    // system and is the best available answer on a standalone one.
     let script = format!(
         "grep -o 'rootflags=subvol=[^ \"]*' {GRUB_CFG} | head -n1 | sed 's/rootflags=subvol=//'"
     );
@@ -255,6 +295,46 @@ pub fn current_boot_pointer(cmd: &CommandRunner) -> Result<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     Ok(if ptr.is_empty() { "@".to_string() } else { ptr })
+}
+
+/// The subvolume named by a [`BOOT_POINTER_FILE`] body (`subvol=<path>`).
+/// Blank lines and `#` comments are ignored, matching the A/B state file.
+pub fn parse_boot_pointer(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("subvol="))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Read [`BOOT_POINTER_FILE`], or `None` when it is absent or unparseable.
+fn read_boot_pointer_record() -> Option<String> {
+    std::fs::read_to_string(BOOT_POINTER_FILE)
+        .ok()
+        .and_then(|text| parse_boot_pointer(&text))
+}
+
+/// The body written to [`BOOT_POINTER_FILE`] for `root_subvol`.
+fn boot_pointer_record(root_subvol: &str) -> String {
+    format!(
+        "# Written by deploytix. The boot target activated for the next boot.\n\
+         # On a standalone GRUB install the booting config is embedded in the\n\
+         # signed EFI binary, so this record — not /boot/grub/grub.cfg — is what\n\
+         # deploytix trusts when reporting or moving the pointer.\n\
+         subvol={root_subvol}\n"
+    )
+}
+
+/// Record `root_subvol` as the activated boot target.
+fn write_boot_pointer_record(cmd: &CommandRunner, root_subvol: &str) -> Result<()> {
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would record boot target {root_subvol} in {BOOT_POINTER_FILE}");
+        return Ok(());
+    }
+    std::fs::write(BOOT_POINTER_FILE, boot_pointer_record(root_subvol))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -326,6 +406,40 @@ mod tests {
     fn activate_dry_run_is_safe() {
         let cmd = CommandRunner::new(true);
         activate_target(&cmd, &devices(), "@").unwrap();
+    }
+
+    /// The record is the only truthful source on a standalone install, where
+    /// the booting config lives inside the signed EFI binary and grub.cfg is
+    /// merely what it was built from.
+    #[test]
+    fn the_activated_target_round_trips_through_its_record() {
+        for target in ["@", "@deploytix-sets/1788322987/root"] {
+            let body = boot_pointer_record(target);
+            assert_eq!(parse_boot_pointer(&body).as_deref(), Some(target));
+        }
+    }
+
+    #[test]
+    fn a_record_that_says_nothing_useful_yields_nothing() {
+        // Comments and blank lines are skipped, so a record carrying only
+        // commentary must fall through to the grub.cfg fallback rather than
+        // returning an empty pointer.
+        assert_eq!(parse_boot_pointer("# just a comment\n\n"), None);
+        assert_eq!(parse_boot_pointer(""), None);
+        assert_eq!(parse_boot_pointer("subvol=\n"), None);
+        assert_eq!(parse_boot_pointer("slot=A\n"), None);
+        // Leading/trailing whitespace is tolerated.
+        assert_eq!(
+            parse_boot_pointer("  subvol=@deploytix-sets/9/root  \n").as_deref(),
+            Some("@deploytix-sets/9/root")
+        );
+    }
+
+    #[test]
+    fn recording_the_target_is_dry_run_safe() {
+        let cmd = CommandRunner::new(true);
+        write_boot_pointer_record(&cmd, "@deploytix-sets/9/root").unwrap();
+        assert!(!Path::new(BOOT_POINTER_FILE).exists());
     }
 
     /// A staged pointer has to survive anything else regenerating grub.cfg from
