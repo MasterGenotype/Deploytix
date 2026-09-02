@@ -106,6 +106,7 @@ deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
 deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
+deploytix regen-grub                               # Regenerate grub.cfg (chroot on immutable btrfs, reinstall-grub, or grub-mkconfig)
 ```
 
 Global flags: `-v`/`--verbose` (debug logging), `-n`/`--dry-run` (preview only)
@@ -122,8 +123,12 @@ read-only, `/etc` lives on a writable `@etc` subvolume, and `{@, @usr, @etc}` ar
 snapshotted as atomic sets that roll back together. Updates build a new writable
 snapshot set + `pacman` in a chroot, activated on reboot. Boot-pointer changes
 regenerate grub.cfg inside a scratch chroot of the target set — never against the
-live overlay `/`, where `grub-probe` would fail. `src/immutable/` (snapshot sets,
-boot pointer, update/rollback, lockdown). See `docs/IMMUTABLE_SYSTEM.md`.
+live overlay `/`, where `grub-probe` would fail. The same rule applies to
+grub-btrfs's snapshot menu: the `grub-btrfsd` service on these installs runs
+`/usr/local/bin/deploytix-grub-btrfsd`, a watcher that calls `deploytix regen-grub`
+(chroot regen of the current pointer) instead of the stock daemon.
+`src/immutable/` (snapshot sets, boot pointer, update/rollback, lockdown). See
+`docs/IMMUTABLE_SYSTEM.md`.
 
 **LVM A/B backend** (requires `use_lvm_thin`). A/B dual-slot with **dm-verity**
 read-only roots: two root LVs (`root_a`/`root_b`, each including `/usr`) alternate,
