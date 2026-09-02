@@ -153,7 +153,7 @@ What it does:
    **stack**: update 2 contains update 1's changes.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
-   `artix-chroot`, or plain `chroot` where `artools` is not installed.
+   `artix-chroot`, or plain `chroot` where `artools-base` is not installed.
 3. On success, points the default boot entry at the new set and regenerates
    grub.cfg. **Reboot to activate.**
 4. On failure, deletes the half-built set and leaves the running system
@@ -166,7 +166,7 @@ What it does:
 The running system is never modified, so an interrupted or failed update is a
 no-op.
 
-> **API filesystems in the update chroot.** `artools` (which provides
+> **API filesystems in the update chroot.** `artools-base` (which provides
 > `artix-chroot`) is a host/ISO dependency and is *not* installed into deployed
 > systems, so `deploytix update` and `rollback` normally chroot with plain
 > `chroot`. That mounts nothing, so deploytix mounts `/proc`, `/sys`, `/dev`

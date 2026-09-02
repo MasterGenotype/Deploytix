@@ -65,7 +65,7 @@ pub fn command_exists(program: &str) -> bool {
 /// Shell that mounts the API filesystems a chroot needs (`/proc`, `/sys`,
 /// `/dev`, `/run`, `/tmp`), mirroring what `artix-chroot` does internally.
 ///
-/// This is only used on the plain-`chroot` fallback path: `artools` is a
+/// This is only used on the plain-`chroot` fallback path: `artools-base` is a
 /// host/ISO dependency and is *not* installed into deployed systems, so
 /// `deploytix update` / `rollback` on an immutable install always lands here.
 /// Without `/proc`, `/etc/mtab` (a symlink to `../proc/self/mounts`) dangles and
