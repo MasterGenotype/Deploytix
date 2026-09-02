@@ -1,0 +1,67 @@
+name: CI
+
+# release.yml only fires on tags, release/vX.Y.Z branches and manual dispatch,
+# so until this existed nothing checked a pull request or a push to main — a
+# formatting slip, a clippy denial or a failing test first surfaced when a
+# release was cut. These are the same gates release.yml applies, run early.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Superseded runs are pointless: a new push to the same ref cancels the one
+# still in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Only the ALSA headers: clippy type-checks but never links, so the
+      # X11/Wayland/GL libraries the GUI binaries need at link time are not
+      # required here. Same set release.yml's lint job installs.
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo fmt -- --check
+      # --all-features so the GUI modules are linted too; they are only
+      # compiled behind the `gui` feature and would otherwise go unchecked.
+      - run: cargo clippy --all-features -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    # Deliberately not `needs: lint`. They are independent signals, and a
+    # formatting nit should not withhold the test result.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The full GUI set, because this job links the GUI binaries. Mirrors
+      # release.yml's build-gui job, which links the same targets.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl-dev
+      # This also compiles and links every binary target — deploytix,
+      # deploytix-gui and deploytix-update-gui — so a break in the GUI build
+      # is caught here rather than at release time. A separate build job would
+      # only repeat that work.
+      - run: cargo test --all-features
