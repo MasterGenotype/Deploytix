@@ -48,6 +48,47 @@ pub const PAIR_MARKER: &str = ".deploytix-pair";
 /// Mount points that deploytix mounts read-only under the immutable model.
 pub const READONLY_MOUNTPOINTS: &[&str] = &["/", "/usr"];
 
+/// Directories created on the writable `@var` to back the read-only root's
+/// writable paths, each paired with the mount point it is bind-mounted to.
+///
+/// `/` is mounted read-only and is deliberately *not* covered by an overlayfs —
+/// that keeps it a real btrfs mount, which is what `grub-probe`, grub-btrfs's
+/// generator and `findmnt -no FSROOT /` need in order to work against the
+/// running system. The directories that live inside `/` and still have to be
+/// written therefore get explicit homes on `@var`.
+///
+/// Bind mounts, not symlinks: the `filesystem` package owns all three as
+/// directories, and replacing them with symlinks makes every update of that
+/// package conflict.
+pub const WRITABLE_BIND_PATHS: &[(&str, &str)] = &[
+    ("/var/roothome", "/root"),
+    ("/var/opt", "/opt"),
+    ("/var/srv", "/srv"),
+];
+
+/// Create the `@var` directories that [`WRITABLE_BIND_PATHS`] binds from.
+///
+/// Called with the target's `/var` already mounted, before basestrap, so the
+/// bind sources exist the first time fstab is processed. `/root` is created
+/// 0700 like the directory it stands in for; the others take the default.
+pub fn create_writable_path_sources(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("[immutable] Creating writable-path sources on @var");
+    if cmd.is_dry_run() {
+        for (source, target) in WRITABLE_BIND_PATHS {
+            println!("  [dry-run] Would create {source} (bind source for {target})");
+        }
+        return Ok(());
+    }
+    for (source, _) in WRITABLE_BIND_PATHS {
+        let path = format!("{install_root}{source}");
+        std::fs::create_dir_all(&path)?;
+        if *source == "/var/roothome" {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether `mount_point` is mounted read-only under the immutable model.
 pub fn is_readonly_mount(mount_point: &str) -> bool {
     READONLY_MOUNTPOINTS.contains(&mount_point)
@@ -56,7 +97,9 @@ pub fn is_readonly_mount(mount_point: &str) -> bool {
 use crate::immutable::snapshot::ImmutableDevices;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use tracing::info;
 
 /// btrfs holding `@`, `@etc` and the snapshot sets on a deploytix system.
 pub const ROOT_FS_DEVICE: &str = "/dev/mapper/Crypt-Root";

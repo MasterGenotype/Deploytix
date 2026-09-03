@@ -954,6 +954,9 @@ impl Installer {
             let root_fs_device = partition_path(&self.config.disk.device, root_part.number);
             crate::immutable::etc::create_and_mount_etc(&self.cmd, &root_fs_device, INSTALL_ROOT)?;
             crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
+            // Bind sources for the read-only root's writable paths. /var is
+            // mounted by now, so these land on @var and persist across sets.
+            crate::immutable::create_writable_path_sources(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -1732,6 +1735,9 @@ impl Installer {
                 INSTALL_ROOT,
             )?;
             crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
+            // Bind sources for the read-only root's writable paths. /var is
+            // mounted by now, so these land on @var and persist across sets.
+            crate::immutable::create_writable_path_sources(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())

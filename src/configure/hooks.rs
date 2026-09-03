@@ -455,15 +455,23 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
                 ro_suffix = ro_suffix,
             ));
 
-            // Under the immutable model the live `@` boot is also read-only, so
-            // the overlay must be layered for it too (the rw-probe below detects
-            // the ro mount and layers the ephemeral overlay). Otherwise only
-            // non-default (snapshot) subvols get the overlay.
-            let overlay_guard = if immutable {
-                "true".to_string()
-            } else {
-                format!("[ \"$root_subvol\" != \"{}\" ]", root_svols[0].name)
-            };
+            // The overlay exists for read-only *snapper* snapshots, which
+            // cannot be booted any other way. It is deliberately NOT layered
+            // for the layout root or for a deploytix snapshot set: under the
+            // immutable model those are mounted read-only on purpose, and
+            // turning `/` into an overlayfs is what stops `grub-probe`,
+            // grub-btrfs's `41_snapshots-btrfs` generator and
+            // `findmnt -no FSROOT /` from working against the running system —
+            // i.e. it is what makes snapshot menu entries and the update/
+            // rollback boot pointer unreliable. A read-only root keeps `/` a
+            // real btrfs mount; the few paths inside it that must stay
+            // writable get explicit fstab entries instead (see
+            // `immutable_writable_paths` in `install/fstab.rs`).
+            let overlay_guard = format!(
+                "case \"$root_subvol\" in {root}|{sets}/*) false ;; *) true ;; esac",
+                root = root_svols[0].name,
+                sets = crate::immutable::snapshot::SETS_DIR,
+            );
             // Immutable model: once the overlay is active, resolve the paired
             // /usr and /etc subvolumes from the `.deploytix-pair` marker inside
             // the booted root and mount them — /usr read-only, /etc read-write.
@@ -1596,11 +1604,19 @@ mod tests {
                 .contains("=== Mounting /usr (subvol=@usr) ==="),
             "immutable /usr must not be double-mounted by the generic loop"
         );
-        // The overlay is layered unconditionally (the rw-probe of the ro root
-        // triggers it) rather than only for non-default subvols.
+        // The overlay must NOT be layered for the immutable root or for a
+        // snapshot set. Both are mounted read-only deliberately, and turning
+        // `/` into an overlayfs is what stops grub-probe, grub-btrfs's
+        // generator and `findmnt -no FSROOT /` from working against the
+        // running system. Only snapper's read-only snapshots get the overlay.
         assert!(
-            hook.hook_content.contains("if true; then"),
-            "immutable boot must always attempt the ephemeral overlay"
+            !hook.hook_content.contains("if true; then"),
+            "immutable boot must not layer the overlay unconditionally"
+        );
+        assert!(
+            hook.hook_content
+                .contains("case \"$root_subvol\" in @|@deploytix-sets/*) false ;; *) true ;; esac"),
+            "the overlay must be scoped to subvols that are neither @ nor a set"
         );
 
         // And it must still be valid shell.

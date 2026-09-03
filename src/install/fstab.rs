@@ -198,6 +198,39 @@ pub fn generate_fstab(
     Ok(())
 }
 
+/// fstab entries that give a read-only immutable root its writable paths.
+///
+/// `/` is mounted read-only and — deliberately — is *not* covered by an
+/// overlayfs, so that it stays a real btrfs mount that `grub-probe`,
+/// grub-btrfs and `findmnt` can work with. That leaves the handful of
+/// directories which live inside `/` and still have to be written:
+///
+/// - `/tmp` on tmpfs, ephemeral, as on any normal system;
+/// - `/root`, `/opt` and `/srv` bind-mounted out of the writable `@var`, so
+///   they persist across reboots *and* across snapshot sets.
+///
+/// Bind mounts rather than symlinks: the `filesystem` package owns these three
+/// as directories, and replacing them with symlinks makes every update of that
+/// package conflict. `/var` is already mounted by the `mountcrypt` hook before
+/// switch_root, so the bind sources exist by the time fstab is processed.
+///
+/// Not covered: `/mnt` and `/media` stay read-only. They are mount points, so
+/// mounting *onto* them still works; only creating new subdirectories under
+/// them at runtime fails, which is what `/run/media` is for.
+fn immutable_writable_paths() -> String {
+    let mut s = String::from(
+        "\n# Writable paths for the read-only root. `/` is a plain read-only\n\
+         # btrfs mount (no overlay), so these are given writable homes\n\
+         # explicitly. /tmp is ephemeral; the rest live on @var and persist.\n\
+         tmpfs  /tmp  tmpfs  rw,nosuid,nodev,mode=1777  0  0\n",
+    );
+    for (source, target) in crate::immutable::WRITABLE_BIND_PATHS {
+        s.push_str(&format!("{source}  {target}  none  bind  0  0\n"));
+    }
+    s.push('\n');
+    s
+}
+
 /// Generate fstab for layouts using btrfs subvolumes
 fn generate_fstab_with_subvolumes(
     cmd: &CommandRunner,
@@ -334,6 +367,11 @@ fn generate_fstab_with_subvolumes(
                 ));
             }
         }
+    }
+
+    // Last, so the bind sources under /var are already listed above them.
+    if immutable {
+        content.push_str(&immutable_writable_paths());
     }
 
     let fstab_path = format!("{}/etc/fstab", install_root);
@@ -510,6 +548,11 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
              UUID={}  /boot/efi  vfat  umask=0077,defaults  0  0\n",
             efi_uuid
         ));
+    }
+
+    // Last, so the bind sources under /var are already listed above them.
+    if params.immutable {
+        content.push_str(&immutable_writable_paths());
     }
 
     let fstab_path = format!("{}/etc/fstab", install_root);

@@ -13,7 +13,7 @@
 //! snapshot shows the snapshot's root with the live everything-else.
 
 use crate::config::{DeploymentConfig, InitSystem};
-use crate::configure::bootloader::uses_standalone_grub;
+use crate::configure::bootloader::{uses_standalone_grub, REINSTALL_GRUB_PATH};
 use crate::configure::packages::pacman_install_chroot_reviewed_status;
 use crate::disk::formatting::get_partition_uuid;
 use crate::utils::command::CommandRunner;
@@ -27,6 +27,20 @@ use tracing::{info, warn};
 /// dependency; snapper manages `/.snapshots` (it is also installable via
 /// `install_btrfs_tools`, hence `--needed` for idempotence).
 const GRUB_BTRFS_PACKAGES: &[&str] = &["grub-btrfs", "inotify-tools", "snapper"];
+
+/// Where `grub-btrfs.cfg` (the generated snapshot entries) lives on
+/// standalone-GRUB systems: the EFI System Partition, the one place GRUB can
+/// always read without a `cryptomount` and that is not baked into the signed
+/// binary. Sits next to `BOOTX64.EFI` (the `--removable` install path).
+pub const ESP_GBTRFS_DIR: &str = "/boot/efi/EFI/BOOT";
+
+/// GRUB variable that [`ESP_LOCATOR_REL`] points at the ESP so the submenu
+/// stub can `configfile` the snapshot list from there.
+pub const ESP_GRUB_VAR: &str = "deploytix_esp";
+
+/// grub.d generator (relative to a root) that sets [`ESP_GRUB_VAR`]. Named to
+/// sort after `40_custom` and before `41_snapshots-btrfs`, which consumes it.
+pub const ESP_LOCATOR_REL: &str = "etc/grub.d/40_deploytix-esp";
 
 /// Install and configure grub-btrfs on the target system.
 ///
@@ -61,9 +75,54 @@ pub fn install_grub_btrfs(
     create_overlay_subvolume(cmd, root_fs_device, install_root)?;
     write_grub_btrfs_config(cmd, config, install_root)?;
     write_grub_btrfsd_service(cmd, config, install_root)?;
+    regenerate_grub_cfg(cmd, config, install_root)?;
 
     info!("grub-btrfs installation complete");
     Ok(true)
+}
+
+/// Regenerate grub.cfg now that grub-btrfs is installed, so the snapshot
+/// submenu stub exists in the config that ships with the fresh install.
+///
+/// `41_snapshots-btrfs` emits a stub that `configfile`s the generated snapshot
+/// list; without a regeneration here the stub only appears after the first
+/// grub-btrfsd run, and what that daemon does when the stub is missing varies
+/// by version (4.13 always runs a full `grub-mkconfig`, newer daemons only
+/// re-run the generator in place once the marker exists). Regenerating here
+/// makes the first snapshot the daemon sees land in a config that is already
+/// wired for it, on every version.
+///
+/// Standalone-GRUB systems embed grub.cfg in the signed EFI binary, so they go
+/// through the reinstall-grub pipeline (mkconfig -> mkstandalone -> sign)
+/// rather than a bare `grub-mkconfig`.
+fn regenerate_grub_cfg(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    let standalone = uses_standalone_grub(config);
+    let reinstall_present = cmd.is_dry_run()
+        || std::path::Path::new(&format!("{install_root}{REINSTALL_GRUB_PATH}")).exists();
+    let command = if standalone && reinstall_present {
+        REINSTALL_GRUB_PATH
+    } else {
+        if standalone {
+            warn!(
+                "{} not found — regenerating grub.cfg with plain grub-mkconfig; the \
+                 embedded standalone config will not carry the snapshot submenu until \
+                 reinstall-grub runs",
+                REINSTALL_GRUB_PATH
+            );
+        }
+        "grub-mkconfig -o /boot/grub/grub.cfg"
+    };
+
+    info!(
+        "Regenerating grub.cfg with grub-btrfs installed (snapshot submenu stub): {}",
+        command
+    );
+    cmd.run_in_chroot(install_root, command)?;
+    Ok(())
 }
 
 /// Install grub-btrfs and its runtime dependencies via pacman in chroot.
@@ -237,7 +296,7 @@ fn write_grub_btrfs_config(
 ) -> Result<()> {
     let standalone = uses_standalone_grub(config);
     let mkconfig = if standalone {
-        "/usr/local/bin/reinstall-grub"
+        REINSTALL_GRUB_PATH
     } else {
         "/usr/bin/grub-mkconfig"
     };
@@ -258,11 +317,17 @@ fn write_grub_btrfs_config(
              (GRUB_BTRFS_MKCONFIG={}, GRUB_BTRFS_ENABLE_CRYPTODISK={})",
             mkconfig, cryptodisk
         );
+        if standalone {
+            println!(
+                "  [dry-run] Would keep grub-btrfs.cfg on the ESP ({}) and write /{}",
+                ESP_GBTRFS_DIR, ESP_LOCATOR_REL
+            );
+        }
         return Ok(());
     }
 
     if standalone {
-        let reinstall = format!("{}/usr/local/bin/reinstall-grub", install_root);
+        let reinstall = format!("{}{}", install_root, REINSTALL_GRUB_PATH);
         if !std::path::Path::new(&reinstall).exists() {
             warn!(
                 "reinstall-grub not found at {} — GRUB_BTRFS_MKCONFIG will reference a missing script",
@@ -270,6 +335,30 @@ fn write_grub_btrfs_config(
             );
         }
     }
+
+    // Standalone GRUB: the snapshot list lives on the ESP and the stub finds
+    // it via $deploytix_esp. The `\$` survives the bash `source` of this
+    // config as a literal `$`, which 41_snapshots-btrfs copies verbatim into
+    // grub.cfg, where GRUB expands it.
+    let standalone_block = if standalone {
+        format!(
+            r#"
+# This system boots a standalone GRUB image: grub.cfg is embedded in the
+# signed EFI binary's memdisk, so the upstream default location for the
+# snapshot list (${{prefix}}, i.e. the memdisk) can never contain a file
+# written at runtime. The list is kept on the EFI System Partition instead —
+# unencrypted, readable by GRUB with no cryptomount — and the submenu stub in
+# grub.cfg reaches it through ${var}, set by /{locator}.
+GRUB_BTRFS_GBTRFS_DIRNAME="{esp_dir}"
+GRUB_BTRFS_GBTRFS_SEARCH_DIRNAME="(\${var})/EFI/BOOT"
+"#,
+            var = ESP_GRUB_VAR,
+            locator = ESP_LOCATOR_REL,
+            esp_dir = ESP_GBTRFS_DIR,
+        )
+    } else {
+        String::new()
+    };
 
     // The DEPLOYTIX-CRYPTODISK-V1 marker makes patch-grub-btrfs-integrity's
     // ensure_cryptodisk_flag() treat the line as already managed, so the
@@ -296,9 +385,10 @@ GRUB_BTRFS_LIMIT="10"
 # the reinstall-grub pipeline (grub-mkconfig -> grub-mkstandalone -> sbctl
 # sign-all) so new entries reach the signed, embedded config.
 GRUB_BTRFS_MKCONFIG={mkconfig}
-"#,
+{standalone_block}"#,
         cryptodisk = cryptodisk,
         mkconfig = mkconfig,
+        standalone_block = standalone_block,
     );
 
     let dir = format!("{}/etc/default/grub-btrfs", install_root);
@@ -307,6 +397,67 @@ GRUB_BTRFS_MKCONFIG={mkconfig}
     fs::write(&path, content)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
 
+    if standalone {
+        write_esp_locator_script(install_root)?;
+    }
+
+    Ok(())
+}
+
+/// `/etc/grub.d/40_deploytix-esp`: publish the ESP's filesystem UUID as the
+/// GRUB variable [`ESP_GRUB_VAR`].
+///
+/// Emitted into grub.cfg ahead of the grub-btrfs stub (lexical order). The
+/// UUID is probed at generation time rather than baked in at install, so a
+/// reformatted ESP is picked up by the next regeneration.
+pub fn esp_locator_script() -> String {
+    format!(
+        r#"#!/bin/sh
+# Generated by Deploytix — locate the EFI System Partition for grub-btrfs.
+#
+# This system boots a standalone GRUB image (SecureBoot sbctl + encryption):
+# grub.cfg lives in the signed EFI binary's memdisk, so ${{prefix}} can never
+# hold a file written at runtime. grub-btrfs therefore writes its snapshot
+# list to the ESP (GRUB_BTRFS_GBTRFS_DIRNAME in /etc/default/grub-btrfs/config)
+# and the submenu stub reads it from (${var})/EFI/BOOT — this script sets
+# that variable. The ESP is unencrypted, so no cryptomount is needed before
+# the menu is shown.
+#
+# Runs before 41_snapshots-btrfs. Never fatal: without a UUID the variable
+# points at the memdisk, so the stub's existence test fails cleanly and the
+# submenu is simply absent.
+
+esp_dir="{esp_mount}"
+grub_probe="${{grub_probe:-grub-probe}}"
+
+esp_uuid="$("${{grub_probe}}" --target=fs_uuid "${{esp_dir}}" 2>/dev/null || true)"
+if [ -z "${{esp_uuid}}" ]; then
+    esp_uuid="$(findmnt -no UUID "${{esp_dir}}" 2>/dev/null || true)"
+fi
+
+if [ -z "${{esp_uuid}}" ]; then
+    echo "deploytix: cannot determine the ESP filesystem UUID; the snapshot submenu will be unavailable" >&2
+    printf 'set {var}=memdisk\n'
+    exit 0
+fi
+
+printf 'search --no-floppy --fs-uuid --set={var} %s\n' "${{esp_uuid}}"
+"#,
+        var = ESP_GRUB_VAR,
+        esp_mount = "/boot/efi",
+    )
+}
+
+/// Install [`esp_locator_script`] under `install_root` (executable, like
+/// every grub.d generator — grub-mkconfig skips non-executable files).
+fn write_esp_locator_script(install_root: &str) -> Result<()> {
+    let path = format!("{}/{}", install_root, ESP_LOCATOR_REL);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, esp_locator_script())?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    info!("  Written ESP locator generator: /{}", ESP_LOCATOR_REL);
     Ok(())
 }
 
@@ -660,6 +811,142 @@ mod tests {
         assert!(service.contains("type = process"));
         assert!(service.contains("command = /usr/bin/grub-btrfsd --syslog /.snapshots"));
         assert!(service.contains("restart = true"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn standalone_config() -> DeploymentConfig {
+        let mut config = base_config();
+        config.system.secureboot = true;
+        config.system.secureboot_method = SecureBootMethod::Sbctl;
+        config.disk.encryption = true;
+        assert!(uses_standalone_grub(&config));
+        config
+    }
+
+    /// Syntax-check a generated script with `shell -n`; skipped when the
+    /// shell is not installed.
+    fn assert_valid_script(shell: &str, path: &str) {
+        if let Ok(status) = std::process::Command::new(shell)
+            .arg("-n")
+            .arg(path)
+            .status()
+        {
+            assert!(status.success(), "{path} is not valid {shell}");
+        }
+    }
+
+    #[test]
+    fn config_standalone_keeps_snapshot_list_on_esp() {
+        let cmd = CommandRunner::new(false);
+        let config = standalone_config();
+        let root = temp_root("standalone_esp");
+
+        write_grub_btrfs_config(&cmd, &config, &root).unwrap();
+        let content = read_config(&root);
+        assert!(content.contains("GRUB_BTRFS_GBTRFS_DIRNAME=\"/boot/efi/EFI/BOOT\""));
+        assert!(
+            content.contains("GRUB_BTRFS_GBTRFS_SEARCH_DIRNAME=\"(\\$deploytix_esp)/EFI/BOOT\"")
+        );
+
+        // 41_snapshots-btrfs sources this file with bash and copies the search
+        // directory verbatim into grub.cfg, so after sourcing it must carry a
+        // literal `$deploytix_esp` for GRUB (not bash) to expand.
+        if let Ok(out) = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                ". {}/etc/default/grub-btrfs/config && printf %s \"$GRUB_BTRFS_GBTRFS_SEARCH_DIRNAME\"",
+                root
+            ))
+            .output()
+        {
+            assert!(out.status.success(), "config does not source cleanly");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                "($deploytix_esp)/EFI/BOOT"
+            );
+        }
+
+        // The generator that publishes the ESP location must be executable
+        // (grub-mkconfig skips non-executable grub.d files) and valid sh.
+        let locator = format!("{}/{}", root, ESP_LOCATOR_REL);
+        let script = fs::read_to_string(&locator).unwrap();
+        assert!(script.contains("search --no-floppy --fs-uuid --set=deploytix_esp"));
+        assert!(script.contains("set deploytix_esp=memdisk"));
+        let mode = fs::metadata(&locator).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "grub.d generators must be executable");
+        assert_valid_script("sh", &locator);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_standard_grub_has_no_esp_override() {
+        let cmd = CommandRunner::new(false);
+        let config = base_config();
+        let root = temp_root("std_no_esp");
+
+        write_grub_btrfs_config(&cmd, &config, &root).unwrap();
+        let content = read_config(&root);
+        // ${prefix} is the on-disk /boot/grub here, so upstream's default is right.
+        assert!(!content.contains("GRUB_BTRFS_GBTRFS_DIRNAME"));
+        assert!(!content.contains("GRUB_BTRFS_GBTRFS_SEARCH_DIRNAME"));
+        assert!(!std::path::Path::new(&format!("{}/{}", root, ESP_LOCATOR_REL)).exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The immutable root is a real btrfs mount now, so the snapshot menu is
+    /// driven by the stock daemon on every layout — no deploytix replacement.
+    #[test]
+    fn every_layout_runs_the_stock_grub_btrfsd() {
+        let cmd = CommandRunner::new(false);
+        let mut config = base_config();
+        config.packages.immutable_root = true;
+        assert!(config.immutable_btrfs());
+
+        for init in [
+            InitSystem::Runit,
+            InitSystem::OpenRC,
+            InitSystem::S6,
+            InitSystem::Dinit,
+        ] {
+            let root = temp_root(&format!("svc_stock_{:?}", init));
+            config.system.init = init.clone();
+            write_grub_btrfsd_service(&cmd, &config, &root).unwrap();
+
+            let unit = match init {
+                InitSystem::Runit => format!("{}/etc/runit/sv/grub-btrfsd/run", root),
+                InitSystem::OpenRC => format!("{}/etc/init.d/grub-btrfsd", root),
+                InitSystem::S6 => format!("{}/etc/s6/adminsv/grub-btrfsd/run", root),
+                InitSystem::Dinit => format!("{}/etc/dinit.d/grub-btrfsd", root),
+            };
+            let content = fs::read_to_string(&unit).unwrap();
+            assert!(
+                content.contains("/usr/bin/grub-btrfsd"),
+                "{init:?} must run the stock daemon"
+            );
+            assert!(
+                !content.contains("deploytix-grub-btrfsd"),
+                "{init:?} must not reference a deploytix watcher replacement"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn dry_run_install_is_safe_on_standalone_too() {
+        // Standalone adds steps (ESP locator, reinstall-grub regeneration)
+        // that must stay dry-run safe end to end.
+        let cmd = CommandRunner::new(true);
+        let config = standalone_config();
+        let root = temp_root("dryrun_standalone");
+
+        assert!(install_grub_btrfs(&cmd, &config, "/dev/mapper/Crypt-Root", &root).unwrap());
+        assert!(
+            !std::path::Path::new(&format!("{}/etc", root)).exists(),
+            "dry-run must not write under the install root"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

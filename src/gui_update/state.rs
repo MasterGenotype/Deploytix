@@ -408,11 +408,11 @@ fn collect_state(
             let devices = detect_devices();
             let pointer = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
                 .unwrap_or_else(|| "@".to_string());
-            let fsroot = cmd
-                .run("sh", &["-c", "findmnt -no FSROOT / 2>/dev/null || true"])?
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_default();
-            let running = model::running_set_from_fsroot(&fsroot);
+            // From the kernel cmdline, not `findmnt -no FSROOT /`: on an
+            // immutable system `/` is an overlayfs whose FSROOT is just "/",
+            // which resolved to "@" on every boot and made the GUI report a
+            // permanently staged update.
+            let running = boot::running_set_id();
 
             let mut targets = vec!["@".to_string()];
             targets.extend(snapshot::list_sets(cmd, &devices.root_fs)?);

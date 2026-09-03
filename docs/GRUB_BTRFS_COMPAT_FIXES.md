@@ -88,13 +88,25 @@ root_uuid=$(${grub_probe} … 2>/dev/null || blkid -s UUID -o value "${root_devi
 ```
 
 `blkid` reads the filesystem superblock through the mapper device and is
-indifferent to the device-mapper hierarchy above it. The patch is idempotent
-(marker `# DEPLOYTIX-INTEGRITY-PATCH-V1` after the shebang) and self-verifies
-that all four lines landed. The pacman hook re-applies it whenever the
-grub-btrfs package (re)writes `41_snapshots-btrfs`; it is numbered `91-` so it
-runs before `95-grub-reinstall.hook`, guaranteeing the patched generator is in
-place when `grub-mkconfig` fires. With grub-btrfs absent, both files are
-inert: the hook never triggers and the script exits 0.
+indifferent to the device-mapper hierarchy above it.
+
+The rewrite is anchored on `2>/dev/null)` inside the command substitution, so
+it matches both the 4.13 release (`var=$(...) # comment`) and current upstream
+(`var="$(...)"`); a line that already guards its probe with `||` — newer
+grub-btrfs guards `root_uuid`/`boot_uuid` itself — is left alone rather than
+double-patched. Afterwards the script **verifies** that no unguarded
+`grub_probe` assignment remains among the four, and exits non-zero if one does.
+The idempotence marker `# DEPLOYTIX-INTEGRITY-PATCH-V1` is written *after* that
+check passes, not before, so a partial application cannot mark itself done and
+be skipped on the next run. `DEPLOYTIX_GRUB_BTRFS_ROOT` prefixes every path,
+which is what lets the patch be exercised against a fixture tree in tests
+(`tests/fixtures/grub-btrfs/`, one fixture per upstream variant).
+
+The pacman hook re-applies the patch whenever the grub-btrfs package (re)writes
+`41_snapshots-btrfs`; it is numbered `91-` so it runs before
+`95-grub-reinstall.hook`, guaranteeing the patched generator is in place when
+`grub-mkconfig` fires. With grub-btrfs absent, both files are inert: the hook
+never triggers and the script exits 0.
 
 **Rollback.** Delete both files; `pacman -S --overwrite '*' grub-btrfs`
 restores the pristine generator.
@@ -158,8 +170,80 @@ marker absent means the next package upgrade re-applies it.
 
 ---
 
+## Fix 4 — grub.cfg is regenerated at install, so the submenu stub exists
+
+**Code:** `regenerate_grub_cfg()` in `src/configure/grub_btrfs.rs`, called at
+the end of installer Phase 5.45.
+
+**Problem.** `41_snapshots-btrfs` does not write snapshot entries into
+grub.cfg directly. It emits a small **stub** — a submenu that `configfile`s a
+separately generated `grub-btrfs.cfg` — and grub-btrfsd later refreshes only
+that generated list. A fresh install ran `grub-mkconfig` in the bootloader
+phase, *before* grub-btrfs was installed, so the shipped grub.cfg had no stub
+at all. What happened next depended on the daemon version: 4.13 always runs a
+full `grub-mkconfig` and so recovers, while newer daemons only re-run the
+generator in place once the stub's marker exists — and never produce a menu.
+
+**Fix.** Phase 5.45 regenerates grub.cfg as its last step, with grub-btrfs
+already installed and configured. The first snapshot the daemon ever sees then
+lands in a config that is already wired for it, on every daemon version.
+Standalone-GRUB systems run `reinstall-grub` (mkconfig → mkstandalone → sbctl
+sign) rather than a bare `grub-mkconfig`, since the config that boots is inside
+the signed EFI binary; if that script is somehow absent the step falls back to
+`grub-mkconfig` and warns.
+
+---
+
+## Fix 5 — standalone GRUB: the snapshot list lives on the ESP
+
+**Code:** `write_grub_btrfs_config()` and `esp_locator_script()` in
+`src/configure/grub_btrfs.rs`.
+
+**Problem.** On SecureBoot + encryption layouts Deploytix builds a *standalone*
+GRUB image: grub.cfg is baked into the signed `BOOTX64.EFI` as a memdisk, and
+`${prefix}` therefore resolves to that memdisk. grub-btrfs defaults to writing
+`grub-btrfs.cfg` under `${prefix}` and to having the stub read it from there —
+a path that can never contain a file written at runtime. The submenu appeared
+in the menu and did nothing when selected.
+
+**Fix.** The generated `/etc/default/grub-btrfs/config` redirects the list to
+the EFI System Partition, which GRUB can always read with no `cryptomount`:
+
+```bash
+GRUB_BTRFS_GBTRFS_DIRNAME="/boot/efi/EFI/BOOT"
+GRUB_BTRFS_GBTRFS_SEARCH_DIRNAME="(\$deploytix_esp)/EFI/BOOT"
+```
+
+The escaped `\$` survives bash's `source` of the config as a literal `$`, which
+`41_snapshots-btrfs` copies verbatim into grub.cfg for **GRUB** to expand. The
+variable is set by a generated grub.d script, `/etc/grub.d/40_deploytix-esp`
+(numbered to run before `41_snapshots-btrfs`), which probes the ESP's
+filesystem UUID at generation time — so a reformatted ESP is picked up by the
+next regeneration rather than being baked in at install:
+
+```
+search --no-floppy --fs-uuid --set=deploytix_esp <uuid>
+```
+
+It is never fatal: with no UUID it emits `set deploytix_esp=memdisk`, the
+stub's existence test fails cleanly, and the submenu is simply absent.
+
+**Rollback.** Remove the two `GRUB_BTRFS_GBTRFS_*` lines from
+`/etc/default/grub-btrfs/config` and delete `/etc/grub.d/40_deploytix-esp`.
+Standard-GRUB installs get neither: `${prefix}` is the on-disk `/boot/grub`
+there, so upstream's default is already right.
+
+---
+
 ## Remaining caveats
 
+- **Immutable roots need no overlay** — and must not have one. The
+  `mountcrypt` overlay described below is scoped to snapper snapshots: the
+  layout root `@` and every `@deploytix-sets/*` root boot as plain btrfs
+  mounts. An overlayfs `/` would make `41_snapshots-btrfs` exit early with
+  *"Root filesystem isn't btrfs"* and abort `grub-probe` outright, so on a
+  transactional immutable install the snapshot menu depends on that scoping.
+  See [IMMUTABLE_SYSTEM.md](IMMUTABLE_SYSTEM.md).
 - **Read-only snapshots** — *fixed when `install_grub_btrfs = true`.* snapper
   snapshots are RO by default. On unencrypted layouts the stock
   `grub-btrfs-overlayfs` latehook is added to `HOOKS` (the package is
@@ -182,8 +266,9 @@ marker absent means the next package upgrade re-applies it.
   `src/configure/grub_btrfs.rs`): package installation from the official
   repos, snapper root config with a top-level `@snapshots` subvolume,
   `/etc/default/grub-btrfs/config` generation (pointing
-  `GRUB_BTRFS_MKCONFIG` at `reinstall-grub` on standalone-GRUB systems), and
-  `grub-btrfsd` service definitions for runit/OpenRC/s6/dinit. See the
+  `GRUB_BTRFS_MKCONFIG` at `reinstall-grub` on standalone-GRUB systems),
+  `grub-btrfsd` service definitions for runit/OpenRC/s6/dinit, and a closing
+  grub.cfg regeneration (Fix 4). See the
   implementation order in
   [GRUB_BTRFS_FEASIBILITY.md](GRUB_BTRFS_FEASIBILITY.md).
 

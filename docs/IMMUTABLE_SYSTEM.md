@@ -13,7 +13,8 @@ style of openSUSE MicroOS / Aeon, adapted to Artix + pacman. When enabled:
   set, upgrades inside it, and activates it on the next reboot. Direct
   `pacman -Syu` on the live read-only system is refused.
 - Writable state — `/var`, `/home` — is persistent and shared across sets (not
-  rolled back). `/tmp`, `/root`, `/srv`, `/opt` land on an ephemeral overlay.
+  rolled back). `/tmp` is a tmpfs; `/root`, `/opt`, `/srv` are bind mounts out of
+  `@var`, so they are writable and persistent like the rest of `/var`.
 
 Enable it at install time with the wizard prompt *"Enable transactional immutable
 root?"* or `immutable_root = true` in the config's `[packages]` (requires
@@ -35,7 +36,7 @@ single-partition layouts):
 | `@var`, `@log` | `/var`, `/var/log` | read-write | ❌ (persistent) |
 | `@home` | `/home` | read-write | ❌ (persistent) |
 | `@snapshots` | `/.snapshots` | snapper | — |
-| `@overlay` | initramfs scratch | ephemeral | — |
+| `@overlay` | snapshot-boot scratch | ephemeral | — |
 | `@deploytix-sets/<id>/{root,usr,etc}` | — | snapshot sets | — |
 
 ### Snapshot sets
@@ -68,24 +69,44 @@ The live system's `@` carries `usr=@usr` / `etc=@etc`.
    for an activated set. This is stored in `GRUB_CMDLINE_LINUX_DEFAULT` in
    `/etc/default/grub`.
 2. The initramfs `mountcrypt` hook:
-   - mounts the pointer subvolume **read-only** as `/`;
-   - layers the ephemeral, disk-backed `@overlay` over it (so `/tmp`, `/root`,
-     `/srv`, `/opt`, and any stray writes to `/` work but do **not** persist);
+   - mounts the pointer subvolume **read-only** as `/` — a plain btrfs mount, no
+     overlay (see below);
    - reads `/.deploytix-pair` and mounts the paired `@usr` **read-only** at
      `/usr` and `@etc` **read-write** at `/etc`;
    - mounts `@var`, `@log`, `@home` read-write.
 
 Because the pointer + marker drive everything, switching systems is just a
-pointer move + `grub-mkconfig`.
+pointer move + a grub regeneration.
 
-> **Regenerating grub off an overlay root.** On a booted immutable system `/` is
-> an overlayfs, and `grub-probe` aborts with *"failed to get canonical path of
-> `overlay'"* if run against it — producing an empty grub.cfg. So `update` and
-> `rollback` never run `grub-mkconfig` against the live `/`. Instead they mount
-> the target `{root,usr,etc}` set at a scratch chroot (a **real** btrfs root
-> where `grub-probe` works), point that root's `/etc/default/grub` at itself, and
-> run `grub-mkconfig` from inside the chroot to write the shared
-> `/boot/grub/grub.cfg`. See `activate_target` in `src/immutable/boot.rs`.
+> **No overlay on the immutable root.** The `mountcrypt` hook layers an
+> ephemeral `@overlay` over `/` only when the booted subvolume is a *snapper*
+> snapshot — those are read-only by design and cannot be booted otherwise. The
+> layout root `@` and every `@deploytix-sets/*` root are excluded, so on a
+> normal immutable boot `/` is a real btrfs mount. That matters far beyond
+> tidiness: an overlayfs `/` makes `grub-probe` abort with *"failed to get
+> canonical path of `overlay'"*, makes grub-btrfs's `41_snapshots-btrfs` bail
+> with *"Root filesystem isn't btrfs"* (so no snapshot entries are ever
+> generated), and makes `findmnt -no FSROOT /` report `/` instead of the running
+> subvolume. Keeping `/` a real btrfs mount is what lets the stock `grub-btrfsd`
+> and `grub-mkconfig` work unaided.
+>
+> The writable paths the overlay used to provide are given directly instead: a
+> tmpfs `/tmp`, and `/root`, `/opt`, `/srv` as bind mounts of `/var/roothome`,
+> `/var/opt`, `/var/srv` (bind mounts rather than symlinks — the `filesystem`
+> package owns those three as directories and a symlink would conflict on
+> update). See `immutable_writable_paths()` in `src/install/fstab.rs`.
+
+> **Regenerating grub for a target set.** `update` and `rollback` still mount
+> the target `{root,usr,etc}` set at a scratch chroot and run the regeneration
+> from inside it, rather than against the live `/`. Not because the live root
+> cannot be probed any more — it can — but because grub's `10_linux` prepends
+> `rootflags=subvol=<subvol of />` for a btrfs root, so a live run would emit
+> both the running and the target subvolume on the kernel line and rely on
+> last-wins ordering. The chroot is unambiguous. On standalone-GRUB systems the
+> regeneration runs `reinstall-grub` (mkconfig → mkstandalone → sbctl sign)
+> rather than a bare `grub-mkconfig`, because the config that actually boots is
+> embedded in the signed EFI binary. See `activate_target` in
+> `src/immutable/boot.rs`.
 
 ---
 
@@ -170,6 +191,11 @@ bypasses it.
   rollback restores userspace (`@`/`@usr`/`@etc`) but boots with the most
   recently installed kernel. The `mountcrypt` hook is version-independent, so
   this is safe; only kernel *contents* are not rolled back.
+- **`/` is read-only, and writes to it fail.** There is no overlay catching
+  stray writes to paths outside `/tmp`, `/etc`, `/var`, `/home`, `/root`,
+  `/opt`, `/srv`. `/mnt` and `/media` in particular are read-only, so a runtime
+  `mkdir /mnt/usb` will not work — mount under `/run/media` (what udisks and
+  desktop automounters already use) instead.
 - **`/etc` is writable at runtime** (a subvolume, not an overlay). Runtime edits
   mutate `@etc` directly and are captured in the next set; a rollback restores
   the paired `@etc`. This is per-set, not per-boot isolation.
@@ -196,4 +222,6 @@ bypasses it.
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |
+| Writable-path bind sources (`/var/roothome`, `/var/opt`, `/var/srv`) | `src/immutable/mod.rs` |
+| grub-btrfs config, ESP snapshot list, install-time regeneration | `src/configure/grub_btrfs.rs` |
 | CLI subcommands | `src/main.rs` |
