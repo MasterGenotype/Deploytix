@@ -33,6 +33,11 @@ RESET_MODE=false
 #   clone  — fetch fresh from the upstream remote URLs (validates published state; needs SSH keys)
 BUILD_SOURCE="local"
 KEEP_PACKAGES=false   # -K: keep built .pkg.tar.zst files after ISO creation
+# -w: relocate the buildiso work directory (artools `chroots_dir`). Needed when
+# the default /var/lib/artools sits on a filesystem overlayfs refuses as an
+# upperdir — a live USB/ISO session, where / is itself an overlay, is the
+# common case.
+CHROOTS_DIR_OVERRIDE=""
 
 # ── Paths (resolved later) ──────────────────────────────────────────────────
 REPO_ROOT=""
@@ -46,6 +51,13 @@ ARTOOLS_CONF_DIR="${HOME}/.config/artools"
 PACMAN_CONF_DIR="${ARTOOLS_CONF_DIR}/pacman.conf.d"
 PACMAN_CONF_NAME="iso-x86_64.conf"
 SYSTEM_PACMAN_CONF="/usr/share/artools/pacman.conf.d/${PACMAN_CONF_NAME}"
+ARTOOLS_CONF="${ARTOOLS_CONF_DIR}/artools.conf"
+SYSTEM_ARTOOLS_CONF="/etc/artools/artools.conf"
+DEFAULT_CHROOTS_DIR="/var/lib/artools"
+CHROOTS_DIR=""          # resolved in resolve_chroots_dir()
+BUILDISO_WORK_DIR=""    # ${CHROOTS_DIR}/buildiso — what buildiso overlay-mounts
+# Rough floor for a full build: chroot trees + squashfs + ISO image.
+MIN_WORKDIR_GIB=20
 
 # ── Vendor package dirs and remote URLs ──────────────────────────────────────
 # Paths are resolved in resolve_paths() once REPO_ROOT is known.
@@ -77,6 +89,10 @@ Options:
   -C          Clone mode — fetch package sources from remote URLs instead of
               using the vendor/ submodule checkouts (requires network + SSH keys)
   -K          Keep built .pkg.tar.zst files after ISO creation (skip cleanup)
+  -w <dir>    Build work directory (artools chroots_dir)  [default: /var/lib/artools]
+              Use this when the default path is on a filesystem overlayfs cannot
+              use as an upperdir — most often a live USB/ISO session, where / is
+              itself an overlay. The directory must live on ext4/xfs/btrfs/f2fs.
   -r          Reset — remove installed profile, repo, and pacman.conf override
   -n          Dry run — show what would be done without executing
   -h          Show this help
@@ -95,6 +111,7 @@ Examples:
   $(basename "$0") -s -c              # Skip rebuild, clean previous build artifacts
   $(basename "$0") -C                 # Build with fresh source clones from remote
   $(basename "$0") -K                 # Build and keep .pkg.tar.zst after ISO
+  $(basename "$0") -w /mnt/build      # Live USB: build on a real disk, not the overlay
   $(basename "$0") -r                 # Remove all installed artifacts
 
 EOF
@@ -102,7 +119,8 @@ EOF
 }
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
-while getopts ":i:b:gscxrnhCK" opt; do
+ORIG_ARGS=("$@")
+while getopts ":i:b:w:gscxrnhCK" opt; do
     case "$opt" in
         i) INITSYS="$OPTARG" ;;
         g) INCLUDE_GUI=true ;;
@@ -114,11 +132,17 @@ while getopts ":i:b:gscxrnhCK" opt; do
         n) DRY_RUN=true ;;
         C) BUILD_SOURCE="clone" ;;
         K) KEEP_PACKAGES=true ;;
+        w) CHROOTS_DIR_OVERRIDE="$OPTARG" ;;
         h) usage ;;
         :) die "Option -${OPTARG} requires an argument" ;;
         *) die "Unknown option: -${OPTARG}. Use -h for help." ;;
     esac
 done
+
+# ── Validate work directory override ─────────────────────────────────────────
+if [[ -n "$CHROOTS_DIR_OVERRIDE" && "$CHROOTS_DIR_OVERRIDE" != /* ]]; then
+    die "-w requires an absolute path (got '${CHROOTS_DIR_OVERRIDE}')"
+fi
 
 # ── Validate init system ────────────────────────────────────────────────────
 case "$INITSYS" in
@@ -138,10 +162,297 @@ resolve_paths() {
 
     ISO_DIR="${REPO_ROOT}/iso"
     PKG_DIR="${REPO_ROOT}/pkg"
-    LOCAL_REPO_DIR="/var/lib/artools/repos/deploytix"
+    resolve_chroots_dir
+    # The repo lives beside the chroots so both sit on the same filesystem —
+    # with the default chroots_dir this is the historical /var/lib/artools path.
+    LOCAL_REPO_DIR="${CHROOTS_DIR}/repos/deploytix"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
     TKG_GUI_PKG_DIR="${REPO_ROOT}/vendor/tkg-gui/pkg"
     GAMESCOPE_PKG_DIR="${REPO_ROOT}/vendor/gamescope/pkg"
+}
+
+# ── Build work directory (artools chroots_dir) ───────────────────────────────
+#
+# buildiso assembles the live filesystem with an overlay mount whose upperdir is
+# ${chroots_dir}/buildiso/<profile>/<arch>/livefs. The kernel refuses an upperdir
+# on a filesystem that cannot carry trusted.overlay.* xattrs or that is itself an
+# overlay, and fails with:
+#
+#   fsconfig() overlay failed: filesystem on .../livefs not supported as upperdir
+#
+# That is exactly the situation in a live USB/ISO session: / is squashfs + a COW
+# overlay, so the default /var/lib/artools is on an overlay and nesting is
+# rejected. Same for tmpfs (a RAM-backed live session), FAT/exFAT/NTFS sticks and
+# network mounts. Catch it here, before an hour of package building is wasted.
+
+# Filesystems overlayfs accepts as an upperdir, in practice.
+WORKDIR_FS_OK="ext2 ext3 ext4 xfs btrfs f2fs"
+# Filesystems known to be rejected, with the reason worth printing.
+workdir_fs_reason() {
+    case "$1" in
+        overlay)          printf '%s\n' "it is itself an overlay (a live USB/ISO session, or a container)" ;;
+        tmpfs|ramfs)      printf '%s\n' "it is RAM-backed — older kernels reject it as an upperdir outright, and on newer ones the chroot trees and squashfs would be built in memory" ;;
+        vfat|msdos|exfat) printf '%s\n' "FAT-family filesystems have no xattrs or POSIX ownership" ;;
+        ntfs|ntfs3|fuseblk|fuse|fuse.*) printf '%s\n' "FUSE/NTFS mounts do not support the required xattrs" ;;
+        nfs|nfs4|cifs|smb3|9p|virtiofs) printf '%s\n' "network and shared filesystems cannot be an overlay upperdir" ;;
+        squashfs|erofs|iso9660) printf '%s\n' "it is read-only" ;;
+        *)                return 1 ;;
+    esac
+}
+
+# Read a key from an artools config file (shell-style `key=value`).
+conf_value() {
+    local key="$1" file="$2" v
+    [[ -f "$file" ]] || return 1
+    v="$(sed -n -E "s/^[[:space:]]*${key}=//p" "$file" | tail -n1)"
+    [[ -n "$v" ]] || return 1
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    printf '%s\n' "$v"
+}
+
+resolve_chroots_dir() {
+    local v
+    if [[ -n "$CHROOTS_DIR_OVERRIDE" ]]; then
+        CHROOTS_DIR="${CHROOTS_DIR_OVERRIDE%/}"
+    elif v="$(conf_value chroots_dir "$ARTOOLS_CONF")"; then
+        CHROOTS_DIR="${v%/}"
+    elif v="$(conf_value chroots_dir "$SYSTEM_ARTOOLS_CONF")"; then
+        CHROOTS_DIR="${v%/}"
+    else
+        CHROOTS_DIR="$DEFAULT_CHROOTS_DIR"
+    fi
+    BUILDISO_WORK_DIR="${CHROOTS_DIR}/buildiso"
+
+    # buildiso writes the finished ISO to ${workspace_dir}/iso, which defaults to
+    # ${HOME}/artools-workspace. On a live session that is the overlay (or RAM),
+    # so a multi-gigabyte ISO there fails just as surely as the chroot does —
+    # move the workspace next to the chroots whenever -w relocates the build.
+    if [[ -n "$CHROOTS_DIR_OVERRIDE" ]]; then
+        WORKSPACE_DIR="${CHROOTS_DIR}/workspace"
+    elif v="$(conf_value workspace_dir "$ARTOOLS_CONF")" \
+      || v="$(conf_value workspace_dir "$SYSTEM_ARTOOLS_CONF")"; then
+        # Honour an existing workspace_dir; the value may reference ${HOME}.
+        eval "WORKSPACE_DIR=\"${v}\""
+    fi
+    WORKSPACE_DIR="${WORKSPACE_DIR%/}"
+    WORKSPACE_PROFILES="${WORKSPACE_DIR}/iso-profiles"
+}
+
+# Walk up to the first component that exists, so a not-yet-created work dir can
+# still be classified by the filesystem it would land on.
+nearest_existing() {
+    local path="$1"
+    while [[ -n "$path" && ! -e "$path" ]]; do
+        path="$(dirname "$path")"
+        [[ "$path" == "/" ]] && break
+    done
+    printf '%s\n' "${path:-/}"
+}
+
+fstype_of() {
+    local fs
+    # findmnt -T can print several lines for stacked mounts (/dev/shm, bind
+    # mounts); the first is the one the path actually lands on. Without the
+    # head -n1 the value is multi-line and every fstype comparison misses.
+    fs="$(findmnt -no FSTYPE -T "$(nearest_existing "$1")" 2>/dev/null | head -n1)"
+    printf '%s\n' "${fs:-unknown}"
+}
+
+# Mounts that could host the work directory: right filesystem, writable, roomy.
+suggest_workdir_candidates() {
+    local target fstype avail_kib found=0
+    while read -r target fstype avail_kib; do
+        [[ " ${WORKDIR_FS_OK} " == *" ${fstype} "* ]] || continue
+        [[ -w "$target" ]] || [[ "$(id -u)" == 0 ]] || continue
+        (( avail_kib / 1048576 >= MIN_WORKDIR_GIB )) || continue
+        printf '    %-30s %-6s %s GiB free\n' "$target" "$fstype" "$(( avail_kib / 1048576 ))"
+        found=1
+    done < <(findmnt -rno TARGET,FSTYPE,AVAIL --bytes 2>/dev/null \
+             | awk '{ printf "%s %s %d\n", $1, $2, $3 / 1024 }' | sort -u)
+    (( found )) || printf '    (none found — attach a disk formatted ext4/xfs/btrfs)\n'
+}
+
+# Live probe: mount a throwaway overlay with the work dir as upperdir. The fstype
+# table above catches the known cases; this catches everything else (a kernel
+# without redirect_dir, a nodev/noexec mount, a read-only remount) for the same
+# reason buildiso would, but in one second instead of at the end of the build.
+probe_overlay_upperdir() {
+    local base="$1" probe rc=0
+    probe="$(sudo mktemp -d "${base}/.deploytix-overlay-probe.XXXXXX")" || return 2
+    sudo mkdir -p "${probe}/lower" "${probe}/upper" "${probe}/work" "${probe}/merged"
+    if sudo mount -t overlay deploytix-probe \
+            -o "lowerdir=${probe}/lower,upperdir=${probe}/upper,workdir=${probe}/work" \
+            "${probe}/merged" 2>/dev/null; then
+        sudo umount "${probe}/merged" || true
+    else
+        rc=1
+    fi
+    sudo rm -rf "$probe"
+    return "$rc"
+}
+
+check_workdir() {
+    msg "Checking build work directory..."
+    local fstype reason root_fstype avail_gib
+
+    fstype="$(fstype_of "$CHROOTS_DIR")"
+    root_fstype="$(findmnt -no FSTYPE / 2>/dev/null | head -n1)"
+    root_fstype="${root_fstype:-unknown}"
+
+    if reason="$(workdir_fs_reason "$fstype")"; then
+        err "The build work directory cannot live on a '${fstype}' filesystem."
+        printf '\n'
+        printf '  buildiso overlay-mounts %s\n' "${BUILDISO_WORK_DIR}/deploytix/artix/livefs"
+        printf '  as the upperdir, which cannot work here: %s.\n' "$reason"
+        printf '  That is what the "not supported as upperdir" failure means.\n\n'
+        if [[ "$root_fstype" == "overlay" || "$root_fstype" == "tmpfs" ]]; then
+            printf '  This looks like a live USB/ISO session (/ is %s), so no path under /\n' "$root_fstype"
+            printf '  will work — including /var/lib/artools, /tmp and your home directory.\n'
+            printf '  Build onto a real disk partition instead (ext4/xfs/btrfs), mounted\n'
+            printf '  from the live session:\n\n'
+            printf '      sudo mkdir -p /mnt/build\n'
+            printf '      sudo mount /dev/sdXY /mnt/build          # an ext4/xfs/btrfs partition\n'
+            printf '      %s -w /mnt/build %s\n\n' "$(basename "$0")" "${ORIG_ARGS[*]-}"
+            printf '  A %s GiB-plus filesystem is needed. The ext4 persistence partition written\n' "$MIN_WORKDIR_GIB"
+            printf '  by write-deploytix-usb.sh is already mounted directly (typically at\n'
+            printf '  /run/artix/cowspace) and works as long as it is that large — but the build\n'
+            printf '  then eats the live session%s writable space, so an external disk is safer.\n\n' "'s"
+        else
+            printf '  Point the build at a directory on ext4/xfs/btrfs with -w <dir>.\n\n'
+        fi
+        printf '  Candidate mounts on this system:\n'
+        suggest_workdir_candidates
+        printf '\n'
+        die "Unsuitable work directory: ${CHROOTS_DIR} (${fstype})"
+    fi
+
+    if [[ " ${WORKDIR_FS_OK} " != *" ${fstype} "* ]]; then
+        warn "Work directory ${CHROOTS_DIR} is on '${fstype}', which is untested as an overlay upperdir"
+    fi
+
+    local avail_bytes
+    # An empty df result would make the arithmetic below a syntax error, so
+    # default it before dividing.
+    avail_bytes="$(df -B1 --output=avail "$(nearest_existing "$CHROOTS_DIR")" 2>/dev/null \
+                   | tail -n1 | tr -dc '0-9')"
+    avail_gib=$(( ${avail_bytes:-0} / 1073741824 ))
+    if (( avail_gib < MIN_WORKDIR_GIB )); then
+        warn "Only ${avail_gib} GiB free on ${CHROOTS_DIR} — a full build needs roughly ${MIN_WORKDIR_GIB} GiB"
+    fi
+
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would probe overlay upperdir support under ${CHROOTS_DIR}"
+        msg2 "Work directory: ${CHROOTS_DIR} (${fstype}, ${avail_gib} GiB free)"
+        return 0
+    fi
+
+    sudo mkdir -p "$CHROOTS_DIR"
+    if ! probe_overlay_upperdir "$CHROOTS_DIR"; then
+        err "The kernel refused an overlay upperdir under ${CHROOTS_DIR} (filesystem: ${fstype})."
+        printf '\n  buildiso would fail the same way at the livefs mount. Pick another\n'
+        printf '  directory with -w <dir>. Candidate mounts on this system:\n'
+        suggest_workdir_candidates
+        printf '\n'
+        die "Overlay upperdir probe failed for ${CHROOTS_DIR}"
+    fi
+
+    msg2 "Work directory: ${CHROOTS_DIR} (${fstype}, ${avail_gib} GiB free) — overlay upperdir OK"
+}
+
+# ── Persist chroots_dir for buildiso ─────────────────────────────────────────
+# buildiso reads chroots_dir from artools.conf, so -w has to be written there.
+# Both the user and the system config are updated: buildiso re-execs itself under
+# sudo, and whether it then reads ~/.config or /etc depends on how sudo handles
+# HOME. Both are backed up and restored by -r.
+MARKER_COMMENT="# ── Deploytix build work dir (auto-generated by build-deploytix-iso.sh) ──"
+CREATED_MARKER="# deploytix-created: this file was created by build-deploytix-iso.sh"
+
+# Run a command as root only when the target path needs it.
+as_owner() {
+    local target="$1"; shift
+    if [[ -w "$(dirname "$target")" && ( ! -e "$target" || -w "$target" ) ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+write_chroots_dir_conf() {
+    local target="$1" tmp created=""
+
+    tmp="$(mktemp)"
+    if [[ -f "$target" ]]; then
+        # Back up only a config we have not already rewritten — otherwise a
+        # second run would snapshot our own override and -r would "restore" it.
+        if [[ ! -f "${target}.deploytix-bak" ]] && ! grep -qF "$MARKER_COMMENT" "$target"; then
+            as_owner "${target}.deploytix-bak" cp "$target" "${target}.deploytix-bak"
+            msg2 "Backed up ${target} → $(basename "$target").deploytix-bak"
+        fi
+        grep -vF -e "$MARKER_COMMENT" "$target" \
+            | grep -v -E '^[[:space:]]*(chroots_dir|workspace_dir)=' > "$tmp" || true
+    else
+        # A user config that only sets chroots_dir would drop every other
+        # artools default, so seed it from the system config when there is one.
+        created="yes"
+        if [[ -f "$SYSTEM_ARTOOLS_CONF" ]]; then
+            grep -vF -e "$MARKER_COMMENT" "$SYSTEM_ARTOOLS_CONF" \
+                | grep -v -E '^[[:space:]]*(chroots_dir|workspace_dir)=' > "$tmp" || true
+        fi
+        printf '%s\n' "$CREATED_MARKER" >> "$tmp"
+    fi
+    printf '%s\nchroots_dir=%s\nworkspace_dir=%s\n' \
+        "$MARKER_COMMENT" "$CHROOTS_DIR" "$WORKSPACE_DIR" >> "$tmp"
+
+    as_owner "$target" install -Dm644 "$tmp" "$target"
+    rm -f "$tmp"
+    msg2 "Set chroots_dir=${CHROOTS_DIR}, workspace_dir=${WORKSPACE_DIR} in ${target}${created:+ (created)}"
+}
+
+install_artools_conf() {
+    [[ -n "$CHROOTS_DIR_OVERRIDE" ]] || return 0
+
+    msg "Configuring artools work directory..."
+    if "$DRY_RUN"; then
+        msg2 "[dry-run] Would set chroots_dir=${CHROOTS_DIR} and workspace_dir=${WORKSPACE_DIR}"
+        msg2 "[dry-run]   in ${ARTOOLS_CONF} and ${SYSTEM_ARTOOLS_CONF}"
+        return 0
+    fi
+
+    mkdir -p "$ARTOOLS_CONF_DIR"
+    write_chroots_dir_conf "$ARTOOLS_CONF"
+    write_chroots_dir_conf "$SYSTEM_ARTOOLS_CONF"
+    prepare_workspace_dir
+}
+
+# The relocated work dir is created by root (check_workdir), so the workspace
+# under it has to be handed back to the invoking user — install_profile() writes
+# there without sudo.
+prepare_workspace_dir() {
+    [[ -n "$CHROOTS_DIR_OVERRIDE" ]] || return 0
+    sudo mkdir -p "$WORKSPACE_PROFILES" "${WORKSPACE_DIR}/iso"
+    sudo chown "$(id -u):$(id -g)" "$WORKSPACE_DIR" "$WORKSPACE_PROFILES"
+    msg2 "Workspace ready at ${WORKSPACE_DIR}"
+}
+
+restore_artools_conf() {
+    local target
+    for target in "$ARTOOLS_CONF" "$SYSTEM_ARTOOLS_CONF"; do
+        if [[ -f "${target}.deploytix-bak" ]]; then
+            as_owner "$target" mv "${target}.deploytix-bak" "$target"
+            msg2 "Restored ${target}"
+        elif [[ -f "$target" ]] && grep -qF "$CREATED_MARKER" "$target"; then
+            as_owner "$target" rm -f "$target"
+            msg2 "Removed ${target} (created by this script)"
+        elif [[ -f "$target" ]] && grep -qF "$MARKER_COMMENT" "$target"; then
+            local tmp
+            tmp="$(mktemp)"
+            grep -vF -e "$MARKER_COMMENT" "$target" \
+                | grep -v -E '^[[:space:]]*(chroots_dir|workspace_dir)=' > "$tmp" || true
+            as_owner "$target" install -Dm644 "$tmp" "$target"
+            rm -f "$tmp"
+            msg2 "Removed chroots_dir override from ${target}"
+        fi
+    done
 }
 
 # ── Submodule guard ───────────────────────────────────────────────────────────
@@ -184,6 +495,7 @@ check_prerequisites() {
     [[ -f "${SYSTEM_PACMAN_CONF}" ]] || die "System pacman.conf not found at ${SYSTEM_PACMAN_CONF}"
 
     ensure_submodules
+    check_workdir
 
     msg2 "All prerequisites satisfied"
     msg2 "Build source: ${BUILD_SOURCE}"
@@ -597,6 +909,8 @@ reset_artifacts() {
         msg2 "Removed staging dir: ${PKG_STAGE_DIR}"
     fi
 
+    restore_artools_conf
+
     msg "Reset complete"
 }
 
@@ -839,9 +1153,12 @@ main() {
     fi
     msg2 "Build source:  ${BUILD_SOURCE}"
     msg2 "Repo:          ${LOCAL_REPO_DIR}"
+    msg2 "Work dir:      ${CHROOTS_DIR}"
+    msg2 "Workspace:     ${WORKSPACE_DIR}"
     msg2 "Profile:       ${WORKSPACE_PROFILES}/deploytix"
     echo
 
+    install_artools_conf
     build_packages
     stage_packages
     create_local_repo

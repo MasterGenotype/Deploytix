@@ -44,7 +44,7 @@ From the repository root:
 ./iso/build-deploytix-iso.sh -g -b lxqt -i s6
 ```
 
-The ISO is written to `~/artools-workspace/iso/deploytix/`.
+The ISO is written to `~/artools-workspace/iso/deploytix/` (or `<dir>/workspace/iso/deploytix/` when the build is relocated with `-w`, see [Building from a live USB session](#building-from-a-live-usb-session)).
 
 ## Options
 
@@ -56,9 +56,52 @@ The ISO is written to `~/artools-workspace/iso/deploytix/`.
 | `-s` | Skip package rebuild (reuse existing `.pkg.tar.zst` in `pkg/`) | off |
 | `-c` | Clean buildiso work directory before building | off |
 | `-x` | Build chroot only (stop before ISO generation) | off |
+| `-w <dir>` | Build work directory (artools `chroots_dir`); the workspace and the finished ISO move under it too | `/var/lib/artools` |
 | `-r` | Reset — remove installed profile, repo, and pacman.conf override | off |
 | `-n` | Dry run — print actions without executing | off |
 | `-h` | Show help | — |
+
+## Building from a live USB session
+
+`buildiso` assembles the live filesystem with an overlay mount whose *upperdir*
+is `<chroots_dir>/buildiso/deploytix/artix/livefs`. The kernel refuses an
+upperdir that is itself on an overlay, so on a live USB or ISO session — where
+`/` is squashfs plus a COW overlay — the default `/var/lib/artools` cannot work
+and the build dies with:
+
+```
+mount: /var/lib/artools/buildiso/deploytix/artix/livefs
+fsconfig() overlay failed: filesystem on .../livefs not supported as upperdir
+```
+
+Nothing under `/` helps here: `/tmp`, `$HOME` and `/var/lib` are all the same
+overlay (or tmpfs, when the medium has no persistence partition). Build onto a
+real filesystem instead — ext4, xfs, btrfs or f2fs, on its own block device:
+
+```sh
+sudo mkdir -p /mnt/build
+sudo mount /dev/sdXY /mnt/build            # ext4/xfs/btrfs partition, ~20 GiB+
+./iso/build-deploytix-iso.sh -w /mnt/build -g -i runit
+```
+
+`-w` writes `chroots_dir` and `workspace_dir` into `~/.config/artools/artools.conf`
+and `/etc/artools/artools.conf` (both backed up, both restored by `-r`), so the
+chroots, the squashfs *and* the finished ISO all land on the real disk — the ISO
+is several gigabytes and would otherwise be written to `$HOME` in RAM. The ISO
+appears in `<dir>/workspace/iso/deploytix/`.
+
+The script checks this before building anything: it classifies the filesystem
+behind the work directory, then test-mounts a throwaway overlay with it as the
+upperdir. An unsuitable path fails in a second with a list of candidate mounts,
+rather than an hour later at the livefs mount.
+
+The ext4 `cow_persistence` partition written by `write-deploytix-usb.sh` is
+itself a valid target (it is mounted directly, typically at
+`/run/artix/cowspace`, not through the overlay) — but the build then consumes the
+live session's writable space, so a separate disk is the safer choice.
+
+The same failure appears when building inside a Docker/Podman container on an
+overlay graph driver; `-w` pointed at a volume on a real filesystem fixes it too.
 
 ## What the Script Does
 
