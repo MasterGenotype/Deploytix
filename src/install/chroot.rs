@@ -1,7 +1,7 @@
 //! Chroot and mount operations
 
 use crate::config::Filesystem;
-use crate::disk::detection::{partition_path, target_swap_devices};
+use crate::disk::detection::partition_path;
 use crate::disk::formatting::{
     create_btrfs_subvolumes, create_zfs_datasets, create_zfs_pool, mount_btrfs_subvolumes,
     mount_zfs_boot, mount_zfs_datasets,
@@ -319,20 +319,12 @@ pub fn mount_boot_btrfs_subvolume(
     Ok(())
 }
 
-/// Unmount all partitions.
-///
-/// `device` is the target disk, so the swap this installer enabled can be taken
-/// down without touching the host's. A blanket `swapoff -a` here would disable
-/// the live session's own zram (`iso/profile/deploytix/root-overlay`), and on an
-/// install driven from an installed Artix host, that host's swap too.
-pub fn unmount_all(cmd: &CommandRunner, install_root: &str, device: Option<&str>) -> Result<()> {
+/// Unmount all partitions
+pub fn unmount_all(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     info!("Unmounting all partitions from {}", install_root);
 
-    let swaps = std::fs::read_to_string("/proc/swaps").unwrap_or_default();
-    for dev in target_swap_devices(&swaps, install_root, device) {
-        info!("Disabling swap on {}", dev);
-        let _ = cmd.run("swapoff", &[&dev]);
-    }
+    // Disable swap
+    let _ = cmd.run("swapoff", &["-a"]);
 
     // Get list of mounted filesystems under install_root
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();

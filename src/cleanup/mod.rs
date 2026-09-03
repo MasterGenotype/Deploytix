@@ -1,6 +1,6 @@
 //! Cleanup and uninstall functionality (Undeploytix)
 
-use crate::disk::detection::{list_block_devices, target_swap_devices};
+use crate::disk::detection::list_block_devices;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::prompt::{prompt_confirm, prompt_select};
@@ -29,52 +29,40 @@ impl Cleaner {
             if wipe { ", wipe" } else { "" }
         );
 
-        // Resolve the wipe target up front. It has to happen before the unmount
-        // rather than inside the `if wipe` below, because unmount_all needs the
-        // disk to tell the install's swap apart from the host's.
-        let wipe_target: Option<String> = if wipe {
-            Some(match device {
-                Some(d) => d.to_string(),
-                None => self.prompt_for_device()?,
-            })
-        } else {
-            None
-        };
-
-        // A `--device` given without `--wipe` still scopes the swap sweep.
-        let swap_device = wipe_target.as_deref().or(device);
-
         // Unmount all filesystems
-        self.unmount_all(swap_device)?;
+        self.unmount_all()?;
 
         // Close any LUKS containers
         self.close_encrypted_volumes()?;
 
         // Wipe if requested
-        if let Some(target) = wipe_target.as_deref() {
-            self.wipe_device(target)?;
+        if wipe {
+            let device = if let Some(d) = device {
+                d.to_string()
+            } else {
+                self.prompt_for_device()?
+            };
+
+            self.wipe_device(&device)?;
         }
 
         info!("Cleanup complete (all resources released)");
         Ok(())
     }
 
-    /// Unmount all filesystems under install root.
-    ///
-    /// `device` is the target disk when known. Without it the swap sweep can
-    /// only match staged swapfiles and `Crypt-` mappers — which is why the
-    /// caller resolves the device first: the installer enables swap on a raw
-    /// partition (`/dev/sda3`), so a filter that looks only at those two would
-    /// leave the target's swap on and block the wipe that follows.
-    fn unmount_all(&self, device: Option<&str>) -> Result<()> {
+    /// Unmount all filesystems under install root
+    fn unmount_all(&self) -> Result<()> {
         info!("Unmounting all filesystems under {}", INSTALL_ROOT);
 
-        // Disable the install's swap devices — never `-a`, which would take the
-        // live session's zram and any host swap down with them.
-        let swaps = fs::read_to_string("/proc/swaps").unwrap_or_default();
-        for dev in target_swap_devices(&swaps, INSTALL_ROOT, device) {
-            info!("Disabling swap on {}", dev);
-            let _ = self.cmd.run("swapoff", &[&dev]);
+        // Disable swap devices that were set up for the installation
+        // (avoid disabling all host swap with -a)
+        let mounts = fs::read_to_string("/proc/swaps").unwrap_or_default();
+        for line in mounts.lines().skip(1) {
+            if let Some(device) = line.split_whitespace().next() {
+                if device.starts_with(INSTALL_ROOT) || device.contains("/dev/mapper/Crypt-") {
+                    let _ = self.cmd.run("swapoff", &[device]);
+                }
+            }
         }
 
         // Get mount points under install root

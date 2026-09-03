@@ -133,12 +133,14 @@ impl DiskWipeGuard {
             }
         }
 
-        // Disable swap devices associated with the install. The guard does not
-        // know the target disk here, so this is the conservative subset — a
-        // rehearsal's own wipe path passes the device explicitly elsewhere.
+        // Disable swap devices associated with the install
         let swaps = fs::read_to_string("/proc/swaps").unwrap_or_default();
-        for dev in crate::disk::detection::target_swap_devices(&swaps, INSTALL_ROOT, None) {
-            let _ = Self::run_quiet("swapoff", &[&dev]);
+        for line in swaps.lines().skip(1) {
+            if let Some(dev) = line.split_whitespace().next() {
+                if dev.starts_with(INSTALL_ROOT) || dev.contains("/dev/mapper/Crypt-") {
+                    let _ = Self::run_quiet("swapoff", &[dev]);
+                }
+            }
         }
     }
 
