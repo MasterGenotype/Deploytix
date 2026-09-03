@@ -72,6 +72,37 @@ The ISO is written to `~/artools-workspace/iso/deploytix/`.
 
 To remove all installed artifacts (profile, repo, pacman.conf override), run `./iso/build-deploytix-iso.sh -r`.
 
+## Live environment resources
+
+**Swap.** The live session runs zram — compressed swap in RAM — sized at 50% of
+`MemTotal` with a 512 MiB floor, enabled at boot as the `zram` service. The
+worker is `/usr/local/bin/deploytix-zram-swap` (`start`/`stop`); per-init service
+definitions for runit, OpenRC, s6 and dinit all ship in the profile's
+`root-overlay`, and the build fails if the one matching `-i` is missing.
+
+zram was chosen over a swap partition on the stick because it works on every
+boot mode and does not write to USB flash. Note what it does and does not buy
+you: compression (zstd, typically 2–3×) raises *effective* memory capacity. It
+does not create disk space, and it will not make a multi-gigabyte build fit.
+
+**The writable layer.** The live root is squashfs plus an `overlay=livefs` COW
+layer, and where that COW lives depends on how the medium was made:
+
+| How it was written | COW backing |
+|---|---|
+| `write-deploytix-usb.sh` | ext4 partition labeled `cow_persistence`, taking all free space on the stick |
+| plain `dd`, a VM, optical, or the "From CD/DVD/ISO" entry | **RAM** (tmpfs) |
+
+Only the first gets a `cow_label=` on the kernel cmdline. On the others, anything
+written during the session — including `/tmp` and `/var/tmp` — is held in memory.
+
+**Disk usage during an install.** Package downloads do *not* consume the live
+medium. `basestrap` and the in-chroot `pacman`/`yay` calls write to the target's
+`/var/cache/pacman/pkg`, and the custom deploytix packages come from the offline
+repo baked into the ISO at `/var/lib/deploytix-repo` — nothing is compiled on the
+live medium. See [`docs/DISK_SPACE_GUIDE.md`](../docs/DISK_SPACE_GUIDE.md) for
+sizing the *target* disk.
+
 ## Customisation
 
 ### Modifying the profile

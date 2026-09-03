@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+description="Compressed RAM swap for the live session"
+
+depend() {
+	before swap
+}
+
+start() {
+	ebegin "Starting zram swap"
+	/usr/local/bin/deploytix-zram-swap start
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping zram swap"
+	/usr/local/bin/deploytix-zram-swap stop
+	eend $?
+}

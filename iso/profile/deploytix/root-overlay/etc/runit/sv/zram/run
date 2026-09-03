@@ -1,0 +1,6 @@
+#!/bin/sh
+# runit: set up zram swap, then idle. All logic lives in the worker so the four
+# init variants stay one-liners.
+exec 2>&1
+/usr/local/bin/deploytix-zram-swap start
+exec pause

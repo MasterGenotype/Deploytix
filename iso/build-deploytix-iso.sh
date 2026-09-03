@@ -667,7 +667,38 @@ install_profile() {
         merge_overlay_tree "${PROFILE_SRC}/live-overlay" "$dest/live-overlay"
     fi
 
+    verify_zram_service "$dest"
+
     msg2 "Profile installed at ${dest}"
+}
+
+# ── zram service sanity check ────────────────────────────────────────────────
+#
+# The profile lists `zram` in live-session.services, so buildiso will try to
+# enable it. If the merge dropped the service definition for the init system we
+# are actually building, the ISO ships an enablement pointing at nothing and the
+# live session boots with no swap — silently, which is the whole failure mode
+# this is meant to catch. Fail the build instead.
+verify_zram_service() {
+    local dest="$1"
+    local overlay="${dest}/root-overlay"
+    local worker="${overlay}/usr/local/bin/deploytix-zram-swap"
+    local unit
+
+    case "$INITSYS" in
+        runit)  unit="${overlay}/etc/runit/sv/zram/run" ;;
+        openrc) unit="${overlay}/etc/init.d/zram" ;;
+        s6)     unit="${overlay}/etc/s6/adminsv/zram/up" ;;
+        dinit)  unit="${overlay}/etc/dinit.d/zram" ;;
+        *)      die "verify_zram_service: unhandled init '${INITSYS}'" ;;
+    esac
+
+    [[ -f "$unit" ]] \
+        || die "zram service for ${INITSYS} missing from the staged profile (${unit})"
+    [[ -x "$worker" ]] \
+        || die "zram worker missing or not executable (${worker})"
+
+    msg2 "zram swap service staged for ${INITSYS}"
 }
 
 # ── GUI profile generation ───────────────────────────────────────────────────
@@ -686,6 +717,12 @@ generate_gui_profile() {
     yq -i '.livefs.packages -= ["calamares-extensions"]' "$dest/profile.yaml"
     # Remove packages from the base DE profile that are unavailable in Artix repos
     yq -i '.rootfs.packages -= ["artix-breeze-sddm"]' "$dest/profile.yaml"
+    # zram swap. The cp above replaced deploytix's profile.yaml wholesale with the
+    # DE one, so the service enablement listed there is gone and has to be
+    # re-applied here — this is the path every default build takes.
+    # The key is quoted: unlike the unhyphenated paths above, a bare
+    # .live-session risks being read as a subtraction.
+    yq -i '."live-session".services += ["zram"]' "$dest/profile.yaml"
 
     msg2 "GUI profile generated (${BASE_DE_PROFILE} + deploytix)"
 }

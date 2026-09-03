@@ -1,0 +1,117 @@
+#!/bin/sh
+# deploytix-zram-swap — compressed RAM swap for the Deploytix live session.
+# Generated into the live image by iso/build-deploytix-iso.sh (root-overlay).
+#
+# The live root is squashfs plus an `overlay=livefs` COW layer. That COW is only
+# disk-backed when the stick was written by write-deploytix-usb.sh, which appends
+# an ext4 `cow_persistence` partition and patches `cow_label=` into the kernel
+# cmdline. A plain `dd`, a VM, or the "From CD/DVD/ISO" menu entry gets no
+# cow_label= and the COW falls back to tmpfs — i.e. RAM. With no swap at all, a
+# large pacman transaction has no backstop.
+#
+# zram is the right shape here: it works on every boot mode, and it writes to RAM
+# rather than to USB flash. It buys effective capacity through compression
+# (roughly 2-3x with zstd); it does not create disk space.
+#
+# Usage: deploytix-zram-swap start|stop
+
+set -u
+
+DEV=/dev/zram0
+SYS=/sys/block/zram0
+PRIORITY=100
+ALGORITHM=zstd
+
+# Never below this, so a small VM still gets a usable device.
+MIN_BYTES=$((512 * 1024 * 1024))
+
+log() { printf 'deploytix-zram-swap: %s\n' "$*"; }
+err() { printf 'deploytix-zram-swap: %s\n' "$*" >&2; }
+
+# Half of MemTotal. A fraction rather than the fixed 4 GiB the installer writes
+# for the *target* (src/configure/swap.rs): live hardware runs from 2 GB VMs to
+# 64 GB desktops, and zram pages are themselves RAM, so a fixed size is wrong at
+# both ends. Half leaves room for the compressed data to live in.
+zram_size_bytes() {
+    mem_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null)
+    case "${mem_kb:-}" in
+        '' | *[!0-9]*)
+            err "cannot read MemTotal; falling back to ${MIN_BYTES} bytes"
+            printf '%s\n' "$MIN_BYTES"
+            return
+            ;;
+    esac
+    size=$(( mem_kb * 1024 / 2 ))
+    [ "$size" -lt "$MIN_BYTES" ] && size="$MIN_BYTES"
+    printf '%s\n' "$size"
+}
+
+# zram may be a module, already loaded, or built into the kernel. Only the
+# absence of the sysfs node is fatal.
+ensure_device() {
+    [ -d "$SYS" ] && return 0
+    modprobe zram num_devices=1 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        [ -d "$SYS" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Best-effort: a kernel without zstd zram support must degrade to whatever the
+# default is, not fail the boot. Read the value back to see what we actually got
+# — comp_algorithm reports the selection in [brackets].
+set_algorithm() {
+    printf '%s\n' "$ALGORITHM" > "$SYS/comp_algorithm" 2>/dev/null || true
+    selected=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$SYS/comp_algorithm" 2>/dev/null)
+    if [ "${selected:-}" = "$ALGORITHM" ]; then
+        log "compression: ${ALGORITHM}"
+    else
+        log "compression: ${selected:-unknown} (${ALGORITHM} unavailable)"
+    fi
+}
+
+start() {
+    if grep -q "^${DEV} " /proc/swaps 2>/dev/null; then
+        log "${DEV} already active"
+        return 0
+    fi
+
+    if ! ensure_device; then
+        err "zram unavailable (no ${SYS}); continuing without swap"
+        return 0
+    fi
+
+    set_algorithm
+
+    size=$(zram_size_bytes)
+    if ! printf '%s\n' "$size" > "$SYS/disksize" 2>/dev/null; then
+        err "could not set disksize; continuing without swap"
+        return 0
+    fi
+
+    mkswap --label zram0 "$DEV" >/dev/null 2>&1 || {
+        err "mkswap failed on ${DEV}"
+        return 1
+    }
+    swapon --priority "$PRIORITY" "$DEV" || {
+        err "swapon failed on ${DEV}"
+        return 1
+    }
+
+    log "enabled ${DEV} ($(( size / 1024 / 1024 )) MiB, priority ${PRIORITY})"
+}
+
+stop() {
+    swapoff "$DEV" 2>/dev/null || true
+    # Frees the compressed pages back to the kernel; fails harmlessly if the
+    # device was never set up.
+    echo 1 > "$SYS/reset" 2>/dev/null || true
+    log "disabled ${DEV}"
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop)  stop ;;
+    *)     err "usage: ${0##*/} start|stop"; exit 2 ;;
+esac

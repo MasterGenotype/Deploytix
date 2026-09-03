@@ -12,6 +12,11 @@ live-session:
     - cupsd
     - syslog-ng
     - NetworkManager
+    # Compressed RAM swap. The live COW layer is tmpfs-backed on every boot mode
+    # except a stick written by write-deploytix-usb.sh, so without this the
+    # session has no memory backstop at all. Service files for all four inits
+    # live in root-overlay; the worker is /usr/local/bin/deploytix-zram-swap.
+    - zram
   user-services:
     - dbus
 rootfs:

@@ -1462,7 +1462,7 @@ impl Installer {
         }
 
         // Unmount all partitions
-        unmount_all(&self.cmd, INSTALL_ROOT)?;
+        unmount_all(&self.cmd, INSTALL_ROOT, Some(&self.config.disk.device))?;
 
         // Export ZFS pools if ZFS was used
         if self.config.disk.filesystem == crate::config::Filesystem::Zfs
