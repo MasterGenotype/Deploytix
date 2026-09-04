@@ -7,9 +7,8 @@ CLI_BIN      := target/release/deploytix
 GUI_BIN      := target/release/deploytix-gui
 UPDATE_GUI_BIN := target/release/deploytix-update-gui
 GCC_BIN      := target/x86_64-unknown-linux-gnu/release/deploytix
-PORTABLE_BIN := target/x86_64-unknown-linux-musl/release/deploytix
 
-.PHONY: all build gui gcc portable install install-cli install-gcc install-portable install-update-gui uninstall clean fmt lint test
+.PHONY: all build gui gcc install install-all install-cli install-gcc install-update-gui uninstall clean fmt lint test
 
 DESKTOP_FILE := deploytix-gui.desktop
 POLKIT_FILE  := com.deploytix.gui.policy
@@ -32,14 +31,6 @@ gcc:
 	cargo build --release --target x86_64-unknown-linux-gnu --bin deploytix
 	@echo "GCC binary: $(GCC_BIN)"
 	@file $(GCC_BIN)
-
-## Build portable static CLI binary (musl, zero dynamic deps)
-## Prerequisites: apt install musl-tools
-portable:
-	rustup target add x86_64-unknown-linux-musl
-	cargo build --release --target x86_64-unknown-linux-musl --bin deploytix
-	@echo "Portable binary: $(PORTABLE_BIN)"
-	@file $(PORTABLE_BIN)
 
 ## Install GUI binary to $(BINDIR)  [default: /usr/bin]
 install: build gui
@@ -80,12 +71,6 @@ install-gcc: gcc
 	sudo mkdir -p $(BINDIR)
 	sudo install -m 755 $(GCC_BIN) $(BINDIR)/deploytix
 	@echo "Installed gcc deploytix -> $(BINDIR)/deploytix"
-
-## Install portable (musl) CLI binary to $(BINDIR)
-install-portable: portable
-	sudo mkdir -p $(BINDIR)
-	sudo install -m 755 $(PORTABLE_BIN) $(BINDIR)/deploytix
-	@echo "Installed portable deploytix -> $(BINDIR)/deploytix"
 
 ## Install the transactional updater to $(BINDIR)
 ##

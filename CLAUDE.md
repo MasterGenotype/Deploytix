@@ -13,8 +13,7 @@ Deploytix is an automated Artix Linux deployment installer written in Rust. It p
 ```bash
 cargo build                              # Dev build
 cargo build --release                    # Release CLI binary
-cargo build --release --features gui     # Release CLI + GUI binary
-cargo portable                           # Static musl binary (zero runtime deps)
+cargo build --release --features gui     # Release CLI + both GUI binaries
 cargo clippy --all-features -- -D warnings  # Lint (warnings are errors)
 cargo fmt -- --check                     # Format check
 cargo test --all-features                # Run tests
@@ -22,14 +21,21 @@ cargo test --all-features                # Run tests
 
 **Makefile shortcuts:**
 - `make` / `make build` — release CLI
-- `make gui` — release GUI
-- `make portable` — static musl build
-- `make install` — build GUI + install to `~/.local/bin` (override with `PREFIX=`)
+- `make gui` — release build of all four binaries
+- `make install` — build CLI + GUI, install the GUI with its desktop entry and
+  polkit policy to `$(PREFIX)/bin` (default `PREFIX=/usr`); `install-all` adds
+  the CLI, `install-update-gui` adds the updater (immutable machines only)
 - `make lint` / `make fmt` / `make test`
 
-**Cargo aliases** (defined in `.cargo/config.toml`):
-- `cargo gcc-build` — build with glibc linker
-- `cargo portable` — build with musl (static)
+The Makefile install targets call `sudo` themselves — do not prefix them with it.
+
+**Cargo alias** (defined in `.cargo/config.toml`):
+- `cargo gcc-build` — build with an explicit glibc linker
+
+**No static musl build.** The CLI links `libasound` for theme audio (`rodio`) and
+there is no static ALSA to link against, so a self-contained binary is not
+achievable. `build.rs` also compiles `src/resources/alsa_noop.c`, so a C compiler
+and ALSA headers are build prerequisites. See `BUILD.md`.
 
 ## Architecture
 
@@ -43,7 +49,7 @@ cargo test --all-features                # Run tests
 5. **Configure** — in-chroot system configuration (bootloader, users, locale, network, services)
 6. **Finalize** — mkinitcpio, unmount, close LUKS
 
-The pipeline is feature-driven: each step checks flags (encryption, LVM thin, subvolumes, preserve_home) and no-ops when disabled, rather than branching on layout type.
+The pipeline is feature-driven: each step checks flags (encryption, LVM thin, subvolumes, immutable root, `disk.recovery.reuse_home`) and no-ops when disabled, rather than branching on layout type.
 
 ### Module Responsibilities
 

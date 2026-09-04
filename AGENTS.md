@@ -11,12 +11,11 @@ cargo build
 # Release build
 cargo build --release
 
-# Build with GUI (egui-based)
+# Build with GUI (egui-based); adds deploytix-gui and deploytix-update-gui
 cargo build --release --features gui
 
-# Static portable binary (musl) - single binary, no dependencies
-cargo portable
-# Equivalent to: cargo build --release --target x86_64-unknown-linux-musl
+# There is no static musl build: the CLI links libasound for theme audio
+# (rodio), so a self-contained binary is not achievable. Build for glibc.
 
 # Code quality
 cargo clippy -- -D warnings
@@ -25,12 +24,10 @@ cargo fmt -- --check
 
 ## Testing
 
-No test suite currently exists. When implementing tests:
-
 ```bash
-cargo test                    # Run all tests
-cargo test --lib              # Unit tests only
-cargo test --test integration # Integration tests
+cargo test --all-features           # Run all tests
+cargo test --lib                    # Unit tests only
+cargo test --test pkgdeps_integration  # The pkgdeps integration suite
 ```
 
 ## Architecture
