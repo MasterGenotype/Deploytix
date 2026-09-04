@@ -1,10 +1,19 @@
 # Deploytix
 
-A portable Rust CLI and GUI application for automated deployment of **Artix Linux** to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, LUKS2 encryption, LVM thin provisioning, and a gaming/handheld device stack.
+A Rust CLI and GUI application for automated deployment of **Artix Linux** to removable media and disks. Configuration-driven with TOML files, supporting multiple init systems, filesystems, desktop environments, LUKS2 encryption, LVM thin provisioning, a transactional immutable root, and a gaming/handheld device stack.
 
 Can also be built into a package and included in an ISO for installation via bootable media.
 
 > **Artix Linux Only** — Deploytix requires Artix-specific tools (`basestrap` and `artix-chroot`, from `artools-base`) that are not available on Arch or other distributions. The host system running the installer must be Artix Linux.
+
+## Binaries
+
+| Binary | Purpose | Feature flag |
+|---|---|---|
+| `deploytix` | CLI installer, wizard, and all subcommands | *(none — always built)* |
+| `deploytix-rehearsal` | Standalone rehearsal-install entry point | *(none — always built)* |
+| `deploytix-gui` | egui installation wizard | `gui` |
+| `deploytix-update-gui` | Graphical transactional updater (immutable installs) | `gui` |
 
 ## Installation
 
@@ -15,47 +24,42 @@ git clone https://github.com/MasterGenotype/Deploytix
 cd Deploytix
 cargo build --release
 
-# Binary: target/release/deploytix
+# Binaries: target/release/deploytix, target/release/deploytix-rehearsal
 ```
 
 ### With GUI Support
 
-The GUI is built as a separate binary using egui (glow backend with X11/Wayland support):
+The GUI binaries are built with egui (glow backend, X11/Wayland support):
 
 ```bash
 cargo build --release --features gui
 
-# Binaries: target/release/deploytix (CLI) and target/release/deploytix-gui (GUI)
+# Adds: target/release/deploytix-gui, target/release/deploytix-update-gui
 ```
 
 GUI build requires system libraries: `libxcb`, `libxkbcommon`, `libwayland`, `libGL`.
 
 Running the GUI on an X11 session additionally requires `libX11`, `libXcursor`, and `libxkbcommon-x11` at runtime (winit loads them dynamically). Artix/Arch: `pacman -S libx11 libxcursor libxkbcommon-x11`; Debian/Ubuntu: `apt install libx11-6 libxcursor1 libxkbcommon-x11-0`.
 
-### Static Binary (Portable)
+### Makefile targets
 
-Builds a fully statically-linked binary with musl — zero runtime dependencies, runs on any x86_64 Linux:
-
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-# Or shorthand: cargo portable
-
-# Binary: target/x86_64-unknown-linux-musl/release/deploytix
-```
-
-> The GUI binary cannot be built with musl due to X11/Wayland library dependencies. The portable build produces the CLI binary only.
-
-### make install
+Installs go to `$(PREFIX)/bin` (default `PREFIX=/usr`; override with `make PREFIX=$HOME/.local install`).
 
 ```bash
-make install            # Build CLI + GUI, install to /usr/bin with .desktop and polkit policy
+make                    # Build CLI (release)
+make gui                # Build CLI + GUI binaries
+make gcc                # CLI built with the explicit glibc/GCC linker
+make install            # Build + install GUI with .desktop entry and polkit policy
 make install-cli        # CLI only
 make install-all        # CLI + GUI + desktop entry + polkit
-make install-portable   # Static musl binary
-make install-gcc        # GCC/glibc linked binary
+make install-gcc        # Install the GCC/glibc-linked CLI
+make install-update-gui # Install deploytix-update-gui (immutable machines only)
 make uninstall          # Remove all installed files
+make fmt / lint / test  # cargo fmt / clippy -D warnings / test --all-features
+make clean              # cargo clean
 ```
+
+`make install-update-gui` is deliberately excluded from `install`/`install-all`: the updater only works on an immutable root, and deployed systems receive it from the separate `deploytix-update-gui-git` package, which the installer withholds unless `immutable_root` is set.
 
 ## Usage
 
@@ -95,6 +99,7 @@ sudo deploytix install -c my-config.toml
 ```bash
 deploytix install [-c config.toml] [-d /dev/sdX]   # Install (wizard or config-driven)
 deploytix list-disks [--all]                        # List available target disks
+deploytix inspect /dev/sdX [--home-keyfile path]    # Inspect an existing partition table
 deploytix validate <config.toml>                    # Validate a config file
 deploytix generate-config [-o path.toml]            # Generate a sample config
 deploytix rehearse [-c config.toml] [-l log.log]    # Full rehearsal install (writes + wipes disk)
@@ -111,9 +116,17 @@ deploytix -v ...       # Verbose output
 deploytix -n ...       # Dry-run (preview; applies to update/rollback)
 ```
 
+**`install` flags:**
+
+- `--interactive` / `--no-interactive` — review every `pacman`/`basestrap`/`yay` invocation before it runs (edit the package list, skip it, or abort) and prompt for extra packages at the end. Defaults **on** for wizard installs and **off** when `-c` is supplied, so automated runs stay silent.
+- `--reuse-home` — recovery install: keep the existing `/home` volume instead of recreating it. Everything else on the disk is still erased.
+- `--home-keyfile <path>` — keyfile **on the installer host** that unlocks the existing HOME LUKS container. Implies `--reuse-home`.
+
+`deploytix inspect` shows what a home-preserving recovery install would keep versus destroy, and can verify a keyfile unlocks the existing HOME container without opening it. See [docs/HOME_RECOVERY_INSTALL.md](docs/HOME_RECOVERY_INSTALL.md).
+
 ## Installation Pipeline
 
-The installer executes a **feature-driven pipeline** where each step checks its own feature flags and is a no-op when disabled. If any phase fails, a signal-safe emergency cleanup handler unmounts filesystems, deactivates LVM, kills orphaned `cryptsetup` processes, and closes LUKS containers.
+The installer executes a **feature-driven pipeline** where each step checks its own feature flags and is a no-op when disabled. If any phase fails, a signal-safe emergency cleanup handler unmounts filesystems, deactivates LVM, kills orphaned `cryptsetup` processes, and closes LUKS containers. The whole run holds an idle inhibitor (console blanking, X screensaver/DPMS, and elogind/systemd sleep and lid-switch locks) so the host doesn't blank mid-`basestrap` and get power-cycled.
 
 **Phase 1 — Prepare.** Validates configuration, detects the target disk, computes the partition layout, checks host dependencies (offering to install missing ones via `pacman`), and presents a confirmation prompt.
 
@@ -121,17 +134,18 @@ The installer executes a **feature-driven pipeline** where each step checks its 
 - **Plain:** Format each partition with the chosen filesystem and mount.
 - **Multi-volume LUKS:** Create separate LUKS2 containers on each data partition (Root, Usr, Var, Home), format mapped devices, and mount.
 - **LVM Thin:** Create a single LUKS2 container on the LVM PV partition, set up a volume group with a thin pool, create thin volumes, format, and mount.
+- **Immutable A/B:** On an LVM thin layout with `immutable_root`, create the `root_a`/`root_b` slot volumes plus their dm-verity hash volumes, and install into slot A.
 - **Btrfs subvolumes:** When btrfs is selected, subvolumes (`@`, `@home`, `@var`, `@log`, `@snapshots`) are created automatically and mounted individually.
 - **ZFS:** Create ZFS pools and datasets alongside non-ZFS partitions (EFI, swap).
-- **Preserve Home:** When reinstalling, the existing `/home` partition/subvolume/LUKS container is left untouched.
+- **Recovery (reuse home):** With `--reuse-home` / `[disk.recovery] reuse_home`, the existing `/home` partition keeps its extent, its LUKS container is opened rather than reformatted, and its filesystem is left untouched.
 
-**Phase 3 — Base System.** Installs the base Artix system via `basestrap` with a dynamically-assembled package list. Generates `/etc/fstab` from UUIDs. For encrypted layouts, generates `/etc/crypttab` and deploys keyfiles into the initramfs.
+**Phase 3 — Base System.** Installs the base Artix system via `basestrap` with a dynamically-assembled package list — including deploytix itself (`deploytix-git`, `deploytix-gui-git`) and `tkg-gui-git`, so the target stays able to re-deploy and build kernels after first boot. Generates `/etc/fstab` from UUIDs. For encrypted layouts, generates `/etc/crypttab` and deploys keyfiles into the initramfs. Configures swap (ZRAM or swap file).
 
-**Phase 4 — System Configuration.** Enters the target via `artix-chroot` and configures locale, timezone, keymap, hostname, user account, mkinitcpio hooks, GRUB bootloader, network backend, init system services, Secure Boot (if enabled), GPU drivers, and swap (ZRAM/file).
+**Phase 4 — System Configuration.** Enters the target via `artix-chroot` and configures locale, timezone, keymap, hostname, user account, mkinitcpio hooks (including the `verity-ab` hook for immutable A/B), GRUB bootloader, network backend, init system services, Secure Boot (if enabled), and GPU drivers.
 
-**Phase 5 — Desktop & Packages.** Installs the selected desktop environment with display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), session switching scripts, yay AUR helper, AUR packages, btrfs tools, sysctl tweaks, handheld controller quirks, Handheld Daemon, Decky Loader, and evdevhook2.
+**Phase 5 — Desktop & Packages.** Installs the selected desktop environment and display manager. Then conditionally installs Wine, gaming packages (Steam, gamescope), the gamescope update utility, session switching scripts, the yay AUR helper, AUR packages, the iwd GUI frontend, btrfs tools, grub-btrfs, the immutable-root update nudge, user autostart entries, sysctl tweaks, handheld controller quirks, Handheld Daemon, Decky Loader, evdevhook2, and finally any user-supplied extra packages.
 
-**Phase 6 — Finalize.** Regenerates the initramfs, unmounts all filesystems in reverse order, exports ZFS pools if applicable, and closes all LUKS containers.
+**Phase 6 — Finalize.** Regenerates the initramfs, seals the immutable A/B slots with dm-verity if applicable, unmounts all filesystems in reverse order, exports ZFS pools, and closes all LUKS containers.
 
 ## Living with a Deployed System
 
@@ -178,7 +192,7 @@ The description above is the **btrfs** backend. If you enable `immutable_root` o
 - `/etc` is a writable overlay; `/var` and `/home` are shared and persistent.
 - Recovery: no auto boot-count fallback — edit `deploytix.slot`/`deploytix.roothash` at the GRUB prompt, or boot the good slot and `deploytix rollback`.
 
-See **[docs/IMMUTABLE_LVM_AB.md](docs/IMMUTABLE_LVM_AB.md)** for the full A/B model.
+The two backends are mutually exclusive and chosen by the disk layout; `immutable_root` requires either `install_grub_btrfs = true` or `use_lvm_thin = true`. See **[docs/IMMUTABLE_LVM_AB.md](docs/IMMUTABLE_LVM_AB.md)** for the full A/B model.
 
 ## Configuration
 
@@ -193,13 +207,17 @@ encryption = true
 encryption_password = "passphrase"
 luks_mapper_name = "Crypt-Root"
 boot_encryption = false
+luks_boot_mapper_name = "Crypt-Boot"
 integrity = false              # dm-integrity (HMAC-SHA256) on encrypted volumes
 keyfile_enabled = true
 use_subvolumes = true          # auto-set to true when filesystem = btrfs
 use_lvm_thin = false
+lvm_vg_name = "vg0"
+lvm_thin_pool_name = "thinpool"
+lvm_thin_pool_percent = 95
 swap_type = "zramonly"         # partition, filezram, zramonly
+swap_file_size_mib = 0
 zram_algorithm = "zstd"
-preserve_home = false
 
 # User-defined data partitions (EFI + Boot + Swap are auto-prepended)
 [[disk.partitions]]
@@ -217,6 +235,12 @@ size_mib = 40960
 [[disk.partitions]]
 mount_point = "/home"
 size_mib = 0                   # 0 = use remaining disk space
+
+# Optional — recovery install that adopts the existing /home volume
+[disk.recovery]
+reuse_home = false
+# home_keyfile = "/root/home.key"    # keyfile on the INSTALLER HOST
+allow_passphrase_fallback = true
 
 [system]
 init = "runit"                 # runit, openrc, s6, dinit
@@ -236,7 +260,8 @@ groups = ["wheel", "video", "audio", "input", "render", "network", "log", "seat"
 sudoer = true
 
 [network]
-backend = "networkmanager"     # iwd, networkmanager
+backend = "networkmanager"     # iwd, networkmanager, networkmanager-wpa
+iwd_frontend = "iwgtk"         # iwgtk, iwdgui, iwqt (AUR; used when backend = iwd)
 
 [desktop]
 environment = "kde"            # kde, gnome, xfce, none
@@ -249,6 +274,7 @@ install_gaming = true          # Steam, gamescope (Bazzite fork)
 install_session_switching = true  # gamescope ↔ desktop via greetd
 install_btrfs_tools = true     # snapper, btrfs-assistant (via yay)
 install_grub_btrfs = true      # snapshot boot menu + snapper root config (btrfs only)
+immutable_root = false         # transactional read-only root (needs grub_btrfs or lvm_thin)
 sysctl_gaming_tweaks = true    # vm.max_map_count, swappiness, etc.
 sysctl_network_performance = true  # BBR, fq, larger buffers
 install_hhd = true             # Handheld Daemon (gamepad remapping, TDP)
@@ -256,6 +282,11 @@ install_decky_loader = true    # Steam plugin framework
 install_evdevhook2 = true      # Cemuhook UDP motion server
 # handheld_controller_quirks   # omit = auto-detect Legion Go family; true/false to force
 gpu_drivers = ["amd"]          # nvidia, amd, intel
+
+# Optional — installed non-interactively at the end of phase 5
+[packages.extra_packages]
+pacman = []
+aur = []                       # requires install_yay = true
 ```
 
 ### Partition Configuration
@@ -267,7 +298,7 @@ EFI (512 MiB), Boot (2 GiB), and Swap (when `swap_type = "partition"`) are alway
 - `label` (optional) — partition label. Derived from mount point if omitted (`/home` → `HOME`).
 - `encryption` (optional) — per-partition encryption override. Inherits from `disk.encryption` when omitted.
 
-Default partitions when none are specified: `/` (20 GiB), `/usr` (30 GiB), `/var` (10 GiB), `/home` (remainder).
+Default partitions when none are specified: `/` (20 GiB), `/usr` (30 GiB), `/var` (10 GiB), `/home` (remainder). See [docs/CUSTOM_PARTITION_LAYOUT.md](docs/CUSTOM_PARTITION_LAYOUT.md).
 
 > **Not sure how big your target disk should be?** See
 > [docs/DISK_SPACE_GUIDE.md](docs/DISK_SPACE_GUIDE.md) — a tutorial on sizing
@@ -279,7 +310,7 @@ Default partitions when none are specified: `/` (20 GiB), `/usr` (30 GiB), `/var
 
 **Rehearsal** (`deploytix rehearse`) is the true dry-run: it executes the full installation pipeline on the real target disk with every command recorded, then wipes the disk to restore pristine state. The result is a detailed report showing exactly what happened and where it failed. This is destructive to the target device — it writes for real, then cleans up.
 
-Also available from the GUI Review step.
+Also available from the GUI Review step, and as the standalone `deploytix-rehearsal` binary.
 
 ## Package Dependency Tracking
 
@@ -309,7 +340,7 @@ The `[packages]` section provides a full gaming/handheld device stack:
 - **Handheld Daemon (HHD)** — Gamepad remapping, TDP control, per-game profiles (AUR: `hhd-git`). Writes init-specific service files.
 - **Decky Loader** — Steam plugin framework (AUR: `decky-loader-bin`). Writes init-specific service files.
 - **evdevhook2** — Cemuhook UDP motion server for DualShock/DualSense/Joy-Con controllers (AUR: `evdevhook2-git`). Installs udev rules and service files.
-- **Handheld Controller Quirks** — Stops the controllers on Lenovo Legion Go family handhelds (Legion Go, Legion Go 2, Legion Go S) repeatedly disconnecting and reconnecting: pins USB runtime power management off for the pads, binds them to `xpad` on kernels that predate their IDs, and opens their hidraw nodes to the session user. Applied automatically when the installing host's DMI identifies one of those machines; `handheld_controller_quirks = true`/`false` forces the decision. See `docs/HANDHELD_CONTROLLER_QUIRKS.md`.
+- **Handheld Controller Quirks** — Stops the controllers on Lenovo Legion Go family handhelds (Legion Go, Legion Go 2, Legion Go S) repeatedly disconnecting and reconnecting: pins USB runtime power management off for the pads, binds them to `xpad` on kernels that predate their IDs, and opens their hidraw nodes to the session user. Applied automatically when the installing host's DMI identifies one of those machines; `handheld_controller_quirks = true`/`false` forces the decision. See [docs/HANDHELD_CONTROLLER_QUIRKS.md](docs/HANDHELD_CONTROLLER_QUIRKS.md).
 - **Wine** — Wine compatibility layer packages.
 - **GPU Drivers** — NVIDIA, AMD, and/or Intel driver stacks.
 - **Sysctl Tweaks** — Gaming performance (`vm.max_map_count`, swappiness) and network performance (BBR, fq, larger socket buffers, ECN).
@@ -319,18 +350,24 @@ The `[packages]` section provides a full gaming/handheld device stack:
 ```
 src/
 ├── main.rs                # CLI entry point (clap subcommands)
-├── gui_main.rs            # GUI entry point (egui, --features gui)
+├── gui_main.rs            # Installer GUI entry point (egui, --features gui)
+├── update_gui_main.rs     # Transactional updater GUI entry point (--features gui)
 ├── lib.rs                 # Library root (re-exports all modules)
 ├── config/                # TOML config parsing (DeploymentConfig), interactive wizard, validation
-├── disk/                  # Block device detection, partition layout computation, sfdisk scripting,
-│                          #   filesystem formatting, btrfs subvolumes, ZFS pools, LVM thin provisioning
+├── disk/                  # Block device detection, existing-layout inspection, partition layout
+│                          #   computation, sfdisk scripting, filesystem formatting, btrfs
+│                          #   subvolumes, ZFS pools, LVM thin provisioning
 ├── install/               # Installer orchestrator (feature-driven pipeline), basestrap execution,
 │                          #   chroot mounting, fstab/crypttab generation
-├── configure/             # In-chroot system configuration: bootloader (GRUB), encryption (LUKS2/LUKS1),
-│                          #   users, locale, mkinitcpio hooks, network services, swap (ZRAM/file),
-│                          #   keyfiles, Secure Boot, GPU drivers, packages (Wine/gaming/AUR),
-│                          #   session switching scripts, services, greetd
-├── desktop/               # Desktop environment package lists and post-install (KDE Plasma, GNOME, XFCE)
+├── configure/             # In-chroot system configuration: bootloader (GRUB), encryption (LUKS2),
+│                          #   dm-verity, users, locale, mkinitcpio hooks, network, display manager,
+│                          #   greetd, swap (ZRAM/file), keyfiles, Secure Boot, GPU drivers,
+│                          #   packages (Wine/gaming/AUR), grub-btrfs, gamescope updates,
+│                          #   session switching scripts, handheld quirks, services
+├── immutable/             # Transactional immutable root: snapshot sets, boot pointer, /etc
+│                          #   handling, update/rollback, package-diff history, lockdown,
+│                          #   and the LVM A/B + dm-verity backend (lvm_ab.rs)
+├── desktop/               # Desktop environment package lists and post-install (KDE, GNOME, XFCE, none)
 ├── cleanup/               # Unmount and optional disk wipe
 ├── rehearsal/             # Full rehearsal installation (write → record → wipe → report)
 ├── pkgdeps/               # Package dependency tracking (pacman/libalpm backend)
@@ -340,28 +377,36 @@ src/
 │   ├── resolver.rs        # Recursive closure, virtual provider resolution, reverse-dep walking
 │   ├── graph.rs           # Graphviz DOT serializer
 │   └── cli.rs             # Subcommand handlers and formatters
-├── gui/                   # egui wizard panels and app state
+├── gui/                   # Installer GUI: egui wizard panels and app state
 │   ├── app.rs             # Main DeploytixGui application
 │   ├── state.rs           # WizardStep, DiskState, SystemState, UserState, PackagesState, InstallState
+│   ├── interactive.rs     # GUI InteractivePolicy (pacman-confirm modals from the worker thread)
 │   ├── theme.rs           # Custom egui theme
 │   ├── widgets.rs         # Shared UI widgets
 │   └── panels/            # configure, disk_config, disk_selection, handheld_gaming,
 │                          #   network_desktop, progress, summary, system_config, user_config
+├── gui_update/            # Transactional updater GUI (app, state, model)
+│   └── panels/            # system, update, snapshots, progress
 ├── resources/             # Embedded resources compiled into the binary
 │   ├── audio.rs           # Theme music playback (rodio, WAV)
 │   ├── alsa_noop.c        # ABI-correct C shim for ALSA error suppression
 │   ├── autostart/         # User autostart scripts
+│   ├── custom_pkgbuilds/  # PKGBUILDs built on the target (tkg-gui)
+│   ├── gamescope_update/  # deploytix-update-gamescope script, PKGBUILD, pacman guard hook
 │   └── session_switching/ # greetd session manager, gamescope launcher, PAM configs, IPC scripts
-└── utils/                 # CommandRunner (dry-run aware, recording support), DeploytixError (thiserror),
-                           #   dependency checker, signal handlers, interactive prompts
+└── utils/                 # CommandRunner (dry-run aware, recording support), DeploytixError
+                           #   (thiserror), dependency checker, idle inhibition, signal handlers,
+                           #   interactive package-review policy, prompts
 
 src-rehearsal/
 └── main.rs                # Standalone rehearsal binary entry point
 
 iso/                       # ISO build scripts and profile for bootable Deploytix media
 vendor/                    # Vendored submodules: tkg-gui, gamescope
+pkg/PKGBUILD               # deploytix-git, deploytix-gui-git, deploytix-update-gui-git
 ref/                       # Original bash installer and mkinitcpio hook reference scripts
-docs/                      # Detailed specs: crypto+btrfs integration, crypttab hooks, session switching, etc.
+docs/                      # Detailed specs: crypto+btrfs integration, crypttab hooks, immutable
+                           #   root models, session switching, SecureBoot, disk sizing, etc.
 tests/                     # Integration tests: pkgdeps_integration
 ```
 
@@ -369,9 +414,15 @@ tests/                     # Integration tests: pkgdeps_integration
 
 **CommandRunner** — All system commands go through `CommandRunner` which supports dry-run mode and optional recording (used by rehearsal to capture every command executed). Use `cmd.run()` for host commands and `cmd.run_in_chroot()` for chroot execution.
 
-**Feature-driven pipeline** — The installer doesn't branch on layout types. `run_phases()` checks feature flags (encryption, LVM thin, subvolumes, preserve_home, gaming, etc.) and each step is a no-op when its feature is disabled.
+**Feature-driven pipeline** — The installer doesn't branch on layout types. `run_phases()` checks feature flags (encryption, LVM thin, subvolumes, recovery, immutability, gaming, etc.) and each step is a no-op when its feature is disabled.
+
+**Interactive policy** — Package-install review is abstracted behind `InteractivePolicy`, implemented once for the terminal (`utils/cli_policy.rs`) and once for the GUI (`gui/interactive.rs`), so the installer core prompts identically in both front-ends.
 
 **Pacman signature recovery** — All chroot `pacman -S` calls go through `pacman_install_chroot()`, which automatically retries with keyring refresh and falls back to relaxed SigLevel on persistent signature failures.
+
+**Init system abstraction** — `InitSystem` provides `base_package()`, `service_dir()`, and `enabled_dir()` for runit, OpenRC, s6, and dinit; Artix service packages follow the `{package}-{init}` convention.
+
+**Idle inhibition** — `utils::idle::keep_awake()` returns an RAII guard holding every inhibitor the host supports (kernel VT blanking, `xset` screensaver/DPMS, an `elogind-inhibit`/`systemd-inhibit` lock). Every layer is best-effort and releases on drop.
 
 **Signal-safe cleanup** — SIGINT/SIGTERM are caught and trigger emergency cleanup: unmounting filesystems, deactivating LVM, killing orphaned `cryptsetup` processes, and closing LUKS containers.
 
@@ -381,10 +432,10 @@ tests/                     # Integration tests: pkgdeps_integration
 
 - `basestrap` and `artix-chroot` (from `artools-base`; deploytix installs `artools-base`, `artools-pkg` and `artools-iso` together, since the former single `artools` package no longer exists)
 - `pacman` — package manager
-- `sfdisk` — partition table creation (from `util-linux`)
-- `mkfs.vfat` (`dosfstools`), `mkfs.ext4` (`e2fsprogs`), and filesystem-specific tools (`btrfs-progs`, `xfsprogs`, `f2fs-tools`)
-- `grub-install` / `grub-mkconfig`
-- `cryptsetup` (if using encryption)
+- `sfdisk`, `mkswap`, `blkid` — partitioning (from `util-linux`)
+- `mkfs.vfat` (`dosfstools`) plus the tools for your chosen filesystems: `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `f2fs-tools`, `zfs-utils`
+- `grub-install` / `grub-mkconfig` (`grub`)
+- `cryptsetup` (encryption; also provides `veritysetup` for the immutable A/B backend)
 - `pvcreate` / `vgcreate` / `lvcreate` from `lvm2` (if using LVM Thin)
 - Root privileges
 
@@ -396,8 +447,7 @@ Deploytix checks for missing dependencies at startup and offers to install them 
 cargo build                           # Development build
 cargo build --release                 # Release build
 cargo build --release --features gui  # GUI build
-cargo portable                        # Static musl binary
-cargo clippy -- -D warnings           # Lint
+cargo clippy --all-features -- -D warnings   # Lint
 cargo fmt -- --check                  # Format check
 cargo test --all-features             # Run tests
 ```
