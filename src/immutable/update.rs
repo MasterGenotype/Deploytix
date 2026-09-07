@@ -11,7 +11,9 @@
 //!    the kernel cmdline (see [`crate::immutable::boot::running_subvols`]),
 //!    which is what the initramfs itself mounted.
 //! 2. Mount that set (root + paired usr/etc, with `/var`, `/home`, `/boot`
-//!    bind-mounted so state and the kernel/initramfs are shared).
+//!    bind-mounted so state and the kernel/initramfs are shared, and the
+//!    `WRITABLE_BIND_PATHS` reproduced so `/opt` & co. land where the booted
+//!    system will look for them).
 //! 3. Run `pacman -Syu` (or install the requested packages) and regenerate the
 //!    initramfs *inside the set* via `artix-chroot`.
 //! 4. On success, point the default boot entry at the new set and regenerate
@@ -29,7 +31,7 @@
 //! back. This is documented in `docs/IMMUTABLE_SYSTEM.md`.
 
 use crate::immutable::snapshot::{self, ImmutableDevices};
-use crate::immutable::{boot, detect_devices, history};
+use crate::immutable::{boot, detect_devices, etc, history};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use tracing::{info, warn};
@@ -53,28 +55,48 @@ impl Default for UpdateOptions {
 }
 
 /// Directory under `/run` where a set is assembled for the chroot.
-fn target_dir(id: &str) -> String {
+pub(crate) fn target_dir(id: &str) -> String {
     format!("/run/deploytix-update/{id}")
 }
 
 /// Shell that mounts a set (root + paired usr/etc + bind var/home/boot) at its
 /// target so `artix-chroot` can operate on it. Snapshots were created writable,
 /// so pacman can write to `/` and `/usr`.
+///
+/// The chroot must reproduce the booted system's mount topology, not just its
+/// filesystems: [`crate::immutable::WRITABLE_BIND_PATHS`] gives `/root`, `/opt`
+/// and `/srv` homes on the writable `@var`, so a package installing into `/opt`
+/// inside a chroot without those binds writes into the snapshot's own `/opt`
+/// directory — which the bind mount then hides on the next boot.
 pub fn mount_set_cmd(devices: &ImmutableDevices, id: &str) -> String {
     let target = target_dir(id);
+    // Sourced from "$t/var/..." rather than "/var/...": the same directory
+    // either way (var is rbound just above), but it keeps the whole chroot
+    // described in terms of its own tree.
+    let writable_binds: String = crate::immutable::WRITABLE_BIND_PATHS
+        .iter()
+        .map(|(source, mount_point)| {
+            format!(
+                "mkdir -p \"$t{source}\" \"$t{mount_point}\"; \
+                 mount --bind \"$t{source}\" \"$t{mount_point}\"; "
+            )
+        })
+        .collect();
     format!(
         "set -e; t={target}; mkdir -p \"$t\"; \
          mount -t btrfs -o subvol={root},rw,noatime,compress=zstd {root_fs} \"$t\"; \
          mkdir -p \"$t/usr\" \"$t/etc\"; \
          mount -t btrfs -o subvol={usr},rw,noatime,compress=zstd {usr_fs} \"$t/usr\"; \
          mount -t btrfs -o subvol={etc},rw,noatime,compress=zstd {root_fs} \"$t/etc\"; \
-         for d in var home boot; do mkdir -p \"$t/$d\"; mount --rbind \"/$d\" \"$t/$d\"; done",
+         for d in var home boot; do mkdir -p \"$t/$d\"; mount --rbind \"/$d\" \"$t/$d\"; done; \
+         {writable_binds}true",
         target = target,
         root = snapshot::set_root_subvol(id),
         etc = snapshot::set_etc_subvol(id),
         usr = snapshot::set_usr_subvol(id),
         root_fs = devices.root_fs,
         usr_fs = devices.usr_fs,
+        writable_binds = writable_binds,
     )
 }
 
@@ -161,7 +183,7 @@ pub(crate) fn stage_local_pkgs(cmd: &CommandRunner, files: &[String]) -> Result<
 }
 
 /// Confirm we are on an immutable deploytix system before updating.
-fn ensure_immutable(cmd: &CommandRunner) -> Result<()> {
+pub(crate) fn ensure_immutable(cmd: &CommandRunner) -> Result<()> {
     if cmd.is_dry_run() {
         return Ok(());
     }
@@ -201,7 +223,7 @@ pub(crate) fn sets_to_prune(
 }
 
 /// Delete sets older than the newest `keep`, never touching `running` or `keep_id`.
-fn prune_sets(
+pub(crate) fn prune_sets(
     cmd: &CommandRunner,
     devices: &ImmutableDevices,
     keep: usize,
@@ -217,52 +239,63 @@ fn prune_sets(
     Ok(())
 }
 
-/// Perform a transactional update.
-pub fn run_update(
+/// Run one transaction against a fresh snapshot set, and activate it if it
+/// succeeds.
+///
+/// This is the part every transactional operation shares. `update` and `remove`
+/// differ only in what they run inside the chroot:
+///
+/// 1. repair the live fstab, then snapshot the **running** trio into a new
+///    writable set (so operations stack rather than each rebasing onto `@`);
+/// 2. mount it with `/var`, `/home`, `/boot` rbound and the writable binds
+///    reproduced, so the chroot has the booted system's topology;
+/// 3. run `body`, which does the actual work and reports what it changed;
+/// 4. on success point the boot pointer at the new set, regenerate grub.cfg in
+///    a scratch chroot, and prune old sets; on failure delete the half-built
+///    set so the running system is untouched.
+///
+/// `body` is given the mounted chroot target and the set id, and returns what
+/// it changed for the history record. Returning `Err` throws the set away.
+pub(crate) fn run_in_new_set<F>(
     cmd: &CommandRunner,
-    extra_packages: &[String],
     opts: &UpdateOptions,
-) -> Result<()> {
+    request: history::Request,
+    body: F,
+) -> Result<()>
+where
+    F: FnOnce(&CommandRunner, &str, &str) -> Result<history::PackageChanges>,
+{
     ensure_immutable(cmd)?;
     let devices = detect_devices();
 
-    // What the system is running *now*, read from the kernel cmdline before
-    // anything moves the boot pointer. Two things depend on it: the new set is
-    // snapshotted from it (so updates stack instead of each one rebasing onto
-    // the install-time `@`), and pruning must never delete it.
+    // Repair the live fstab *before* snapshotting, so the new set inherits the
+    // fixed copy and the base `@` boot is corrected too. Installs predating the
+    // fix list `/`, `/usr` and `/etc` there naming the base subvolumes, which
+    // `mount -a` then mounts over the set the initramfs just booted.
+    etc::repair_fstab(cmd, "");
+
+    // What the system is running now, read from the kernel cmdline before
+    // anything moves the boot pointer. The new set is snapshotted from it, and
+    // pruning must never delete it.
     let running = boot::running_set_id();
     let source = boot::running_subvols();
 
     info!(
-        "[immutable] Building transactional update set from the running system ({})",
+        "[immutable] Building transactional set from the running system ({})",
         source.root
     );
     let id = snapshot::create_set(cmd, &devices, &source, /* readonly = */ false)?;
 
-    let (local_files, repo_names) = classify_args(extra_packages);
-
-    // Everything from here is unwound on failure so a bad update leaves nothing.
     let started_at = history::now_secs();
     let start = std::time::Instant::now();
 
     let result = (|| -> Result<history::PackageChanges> {
         cmd.run("sh", &["-c", &mount_set_cmd(&devices, &id)])?;
         let target = target_dir(&id);
-        // Local .pkg.tar.zst files are copied into the shared /var so the chroot
-        // can reach them by absolute path and install them with `pacman -U`.
-        let staged = stage_local_pkgs(cmd, &local_files)?;
-        // Bracket the transaction with two `pacman -Q` reads. The pacman DB is
-        // on the shared /var (rbound into the chroot), so it is not snapshotted
-        // and these two reads are the only way to know what this set changed.
-        let before = history::query_packages(cmd, &target);
-        info!("[immutable] Running pacman in set {}", id);
-        for pac in pacman_cmds(&staged, &repo_names) {
-            cmd.run_in_chroot(&target, &pac)?;
-        }
-        let after = history::query_packages(cmd, &target);
-        // Regenerate the (shared) initramfs from within the updated set.
-        cmd.run_in_chroot(&target, "mkinitcpio -P")?;
-        Ok(history::diff(&before, &after))
+        // Belt and braces: a set staged before the live repair (or one whose
+        // repair failed) must not be activated with a shadowing fstab.
+        etc::repair_fstab(cmd, &target);
+        body(cmd, &target, &id)
     })();
 
     // Always release the chroot mounts and clear the package staging dir.
@@ -271,15 +304,15 @@ pub fn run_update(
         let _ = std::fs::remove_dir_all(PKG_STAGE_DIR);
     }
 
-    // Best-effort history entry, written for failures too — a failed update is
-    // exactly what a user wants to look at afterwards.
+    // Best-effort history entry, written for failures too — a failed
+    // transaction is exactly what a user wants to look at afterwards.
     if !cmd.is_dry_run() {
         history::write_record(&history::UpdateRecord {
             started_at,
             duration_secs: start.elapsed().as_secs(),
             backend: history::Backend::Btrfs,
             target: id.clone(),
-            request: history::Request::classify(&repo_names, &local_files),
+            request,
             outcome: match &result {
                 Ok(_) => history::Outcome::Succeeded,
                 Err(e) => history::Outcome::Failed(e.to_string()),
@@ -290,16 +323,15 @@ pub fn run_update(
 
     match result {
         Ok(_) => {
-            // Point the next boot at the set just built. `id` is the newest set
-            // by construction (ids are epoch seconds), so this is always a step
-            // forward, never back onto an older one.
+            // `id` is the newest set by construction (ids are epoch seconds),
+            // so this is always a step forward, never back onto an older one.
             boot::activate_target(cmd, &devices, &snapshot::set_root_subvol(&id))?;
             // `running` was captured before the activation above: reading the
             // boot pointer here would return the set we just staged, leaving
             // the actually-booted set unprotected and eligible for deletion.
             prune_sets(cmd, &devices, opts.keep_sets, &running, &id)?;
             info!(
-                "[immutable] Update ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
+                "[immutable] Ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
                 id
             );
             if opts.reboot {
@@ -308,11 +340,50 @@ pub fn run_update(
             Ok(())
         }
         Err(e) => {
-            warn!("[immutable] Update failed; discarding set {}", id);
+            warn!("[immutable] Transaction failed; discarding set {}", id);
             let _ = snapshot::delete_set(cmd, &devices, &id);
             Err(e)
         }
     }
+}
+
+/// Perform a transactional update.
+pub fn run_update(
+    cmd: &CommandRunner,
+    extra_packages: &[String],
+    opts: &UpdateOptions,
+) -> Result<()> {
+    let (local_files, repo_names) = classify_args(extra_packages);
+    let request = history::Request::classify(&repo_names, &local_files);
+    let requested: Vec<String> = extra_packages.to_vec();
+
+    run_in_new_set(cmd, opts, request, move |cmd, target, _id| {
+        // Local .pkg.tar.zst files are copied into the shared /var so the
+        // chroot can reach them by absolute path and install with `pacman -U`.
+        let staged = stage_local_pkgs(cmd, &local_files)?;
+        // Bracket the transaction with two `pacman -Q` reads. The pacman DB is
+        // on the shared /var (rbound into the chroot), so it is not snapshotted
+        // and these two reads are the only way to know what this set changed.
+        let before = history::query_packages(cmd, target);
+        info!("[immutable] Running pacman in {}", target);
+        for pac in pacman_cmds(&staged, &repo_names) {
+            cmd.run_in_chroot(target, &pac)?;
+        }
+        let after = history::query_packages(cmd, target);
+        // Regenerate the (shared) initramfs from within the updated set.
+        cmd.run_in_chroot(target, "mkinitcpio -P")?;
+        let changes = history::diff(&before, &after);
+        // pacman exits 0 on a transaction that changed nothing, so an update
+        // that quietly installed none of the requested packages would otherwise
+        // look identical to a successful one — right up until the reboot.
+        if !cmd.is_dry_run() && !requested.is_empty() && changes.is_empty() {
+            warn!(
+                "[immutable] pacman succeeded but the set gained no packages; requested: {}",
+                requested.join(" ")
+            );
+        }
+        Ok(changes)
+    })
 }
 
 #[cfg(test)]
@@ -346,6 +417,21 @@ mod tests {
         assert!(s.contains("/dev/mapper/Crypt-Usr"));
         // /var, /home and /boot are shared via rbind.
         assert!(s.contains("mount --rbind \"/$d\""));
+        assert_valid_shell(&s);
+    }
+
+    /// Without these binds a package installing into /opt or /srv writes into
+    /// the snapshot's own directory, which the boot-time bind mount from @var
+    /// then hides — the files are installed but unreachable.
+    #[test]
+    fn mount_cmd_reproduces_the_writable_bind_paths() {
+        let s = mount_set_cmd(&devices(), "42");
+        for (source, mount_point) in crate::immutable::WRITABLE_BIND_PATHS {
+            assert!(
+                s.contains(&format!("mount --bind \"$t{source}\" \"$t{mount_point}\"")),
+                "missing writable bind {source} -> {mount_point} in:\n{s}"
+            );
+        }
         assert_valid_shell(&s);
     }
 

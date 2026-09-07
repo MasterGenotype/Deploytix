@@ -113,7 +113,13 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
         hooks.push("crypttab-unlock".to_string());
         hooks.push("mountcrypt".to_string());
         // Note: filesystems hook is NOT needed when using mountcrypt
-        // as mountcrypt handles all mounting
+        // as mountcrypt handles all mounting.
+        //
+        // No `resume` hook either, and deliberately: the stock hook is placed
+        // relative to `filesystems`, which is absent here, so it would be
+        // appended after mountcrypt had already mounted root — the one place a
+        // resume must never happen. mountcrypt runs the attempt itself from its
+        // own run_hook instead (see `resume_shell_fn` in configure::hooks).
     } else if config.immutable_lvm_ab() {
         // LVM immutable A/B: LUKS unlock (if encrypted), LVM activates, then the
         // custom verity-ab hook opens the active slot's dm-verity device, mounts
@@ -126,6 +132,9 @@ pub fn construct_hooks(config: &DeploymentConfig) -> Vec<String> {
             hooks.push("crypttab-unlock".to_string());
         }
         hooks.push("verity-ab".to_string());
+        // As with mountcrypt above: verity-ab replaces `filesystems`, so the
+        // stock `resume` hook has nothing to anchor to and would run too late.
+        // verity-ab performs the resume attempt in its own run_hook.
     } else if uses_lvm_thin {
         // LVM Thin: LUKS unlock (single container), then LVM activates, then filesystems
         if uses_encryption {

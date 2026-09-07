@@ -79,6 +79,31 @@ pub(crate) fn show_sections(ui: &mut Ui, packages: &mut PackagesState) {
 
         ui.add_space(theme::SPACING_XS);
 
+        // ── Steam client prefetch (requires gaming packages / Steam) ─────
+        ui.add_enabled_ui(packages.install_gaming, |ui| {
+            ui.checkbox(
+                &mut packages.steam_prefetch_client,
+                "Download the Steam client during install",
+            );
+        });
+        if !packages.install_gaming {
+            packages.steam_prefetch_client = false;
+            widgets::info_text(
+                ui,
+                "Requires: Gaming packages (Steam) \u{2014} enable above.",
+            );
+        } else if packages.steam_prefetch_client {
+            widgets::info_text(
+                ui,
+                "Adds a few hundred MB and several minutes to the install, and the \
+                 deployed system boots straight into Game Mode. Without it the target \
+                 downloads the client on its first boot \u{2014} the boot least likely to \
+                 have a network \u{2014} and Game Mode has no UI until that finishes.",
+            );
+        }
+
+        ui.add_space(theme::SPACING_XS);
+
         // ── Decky Loader (requires gaming packages / Steam + yay / AUR) ──
         let decky_available = packages.install_gaming && packages.install_yay;
         ui.add_enabled_ui(decky_available, |ui| {

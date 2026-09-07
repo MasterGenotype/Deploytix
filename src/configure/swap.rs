@@ -6,14 +6,57 @@
 
 use crate::config::{DeploymentConfig, InitSystem, SwapType};
 use crate::disk::detection::get_ram_mib;
+use crate::disk::detection::partition_path;
+use crate::disk::layouts::ComputedLayout;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use tracing::info;
+use tracing::{info, warn};
 
-/// Default swap file path
+/// Default swap file path, for a writable root.
 pub const SWAP_FILE_PATH: &str = "/swap/swapfile";
+
+/// Swap file path on an immutable root.
+///
+/// `/swap` lives inside `@` (btrfs) or inside the dm-verity slot (LVM A/B).
+/// Both are mounted read-only at boot, so `swapon` on a file there fails
+/// outright; and on btrfs `@` is snapshotted, so the file's physical extents --
+/// which is exactly what `resume_offset=` names -- stop meaning anything the
+/// first time a set is taken. `/var` is writable and shared across sets on both
+/// backends, so a swap file there survives an update and keeps its offset.
+pub const IMMUTABLE_SWAP_FILE_PATH: &str = "/var/swap/swapfile";
+
+/// Where the swap file lives for this config.
+pub fn swap_file_path(config: &DeploymentConfig) -> &'static str {
+    if config.packages.immutable_root {
+        IMMUTABLE_SWAP_FILE_PATH
+    } else {
+        SWAP_FILE_PATH
+    }
+}
+
+/// What the kernel needs in order to resume from hibernation.
+///
+/// `device` is a `resume=` value: a `UUID=…` spec where the backing device has
+/// one, else a device path. `offset` is set only for a swap *file*, where the
+/// kernel needs the image's physical offset within that device as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeParams {
+    pub device: String,
+    pub offset: Option<u64>,
+}
+
+impl ResumeParams {
+    /// The cmdline fragments, in the order the kernel documents them.
+    pub fn cmdline_parts(&self) -> Vec<String> {
+        let mut parts = vec![format!("resume={}", self.device)];
+        if let Some(offset) = self.offset {
+            parts.push(format!("resume_offset={}", offset));
+        }
+        parts
+    }
+}
 
 /// Fixed ZRAM size: 4 GiB in bytes.
 const ZRAM_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -304,8 +347,11 @@ pub fn create_swap_file(
         std::cmp::min(ram_mib * 2, 16384)
     };
 
-    let swap_dir = format!("{}/swap", install_root);
-    let swap_file = format!("{}/swapfile", swap_dir);
+    let swap_file = format!("{}{}", install_root, swap_file_path(config));
+    let swap_dir = swap_file
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| format!("{}/swap", install_root));
 
     info!("Creating {} MiB swap file at {}", size_mib, swap_file);
 
@@ -486,6 +532,118 @@ pub fn get_swap_file_offset(swap_file: &str) -> Result<u64> {
     })
 }
 
+/// The block device backing whatever filesystem holds `path`, as a `resume=`
+/// spec.
+///
+/// Asked of the kernel rather than derived from the layout: `findmnt --target`
+/// answers for every backend the installer supports -- a plain partition, a
+/// LUKS mapper, an LVM LV -- and stays right when a layout gains a case nobody
+/// updated this function for. The `[/@subvol]` suffix btrfs sources carry is
+/// stripped; a UUID is preferred over the path because device names are not
+/// stable across boots, and the initramfs resolves `UUID=` either way.
+fn backing_device_spec(path: &str) -> Result<String> {
+    let out = std::process::Command::new("findmnt")
+        .args(["-no", "SOURCE", "--target", path])
+        .output()
+        .map_err(|e| DeploytixError::CommandFailed {
+            command: "findmnt".to_string(),
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        return Err(DeploytixError::CommandFailed {
+            command: "findmnt".to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        });
+    }
+    let source = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // btrfs reports `/dev/mapper/Crypt-Var[/@var]`; the device is the head.
+    let device = source
+        .split('[')
+        .next()
+        .unwrap_or(&source)
+        .trim()
+        .to_string();
+    if device.is_empty() {
+        return Err(DeploytixError::CommandFailed {
+            command: "findmnt".to_string(),
+            stderr: format!("no source device for {path}"),
+        });
+    }
+
+    match crate::disk::formatting::get_partition_uuid(&device) {
+        Ok(uuid) => Ok(format!("UUID={uuid}")),
+        // No UUID (or blkid could not read it): the path still resolves, and
+        // the initramfs waits on it the same way.
+        Err(e) => {
+            info!("No UUID for {device} ({e}); using the device path for resume=");
+            Ok(device)
+        }
+    }
+}
+
+/// Resolve `resume=` / `resume_offset=` for this config, or `None` when
+/// hibernation is off.
+///
+/// Called with the target still mounted at `install_root`, because the swap
+/// file's offset can only be read from the real file and the backing device
+/// only from the live mount table.
+///
+/// Both immutable backends keep swap off the read-only root -- a swap
+/// partition is never brought into LUKS or LVM (`mark_data_partitions_as_luks`
+/// and `apply_lvm_thin_to_layout` both exclude `is_swap`), and a swap file goes
+/// to `/var` -- so the device named here is always one the initramfs can reach
+/// by the time the resume attempt runs.
+pub fn resume_params(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    layout: &ComputedLayout,
+    device: &str,
+    install_root: &str,
+) -> Result<Option<ResumeParams>> {
+    if !config.system.hibernation {
+        return Ok(None);
+    }
+
+    if cmd.is_dry_run() {
+        return Ok(Some(ResumeParams {
+            device: "UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string(),
+            offset: match config.disk.swap_type {
+                SwapType::FileZram => Some(0),
+                _ => None,
+            },
+        }));
+    }
+
+    match config.disk.swap_type {
+        SwapType::Partition => {
+            let Some(swap) = layout.partitions.iter().find(|p| p.is_swap) else {
+                warn!("hibernation is on but the layout has no swap partition; no resume=");
+                return Ok(None);
+            };
+            let swap_device = partition_path(device, swap.number);
+            let uuid = crate::disk::formatting::get_partition_uuid(&swap_device)?;
+            info!("Hibernation resumes from swap partition {swap_device}");
+            Ok(Some(ResumeParams {
+                device: format!("UUID={uuid}"),
+                offset: None,
+            }))
+        }
+        SwapType::FileZram => {
+            let swap_file = format!("{}{}", install_root, swap_file_path(config));
+            let spec = backing_device_spec(&swap_file)?;
+            let offset = get_swap_file_offset(&swap_file)?;
+            info!("Hibernation resumes from swap file {swap_file} (offset {offset} on {spec})");
+            Ok(Some(ResumeParams {
+                device: spec,
+                offset: Some(offset),
+            }))
+        }
+        // Rejected by validation -- there is no persistent device to write the
+        // image to, so there is nothing to name here either.
+        SwapType::ZramOnly => Ok(None),
+    }
+}
+
 /// Configure swap based on SwapType
 pub fn configure_swap(
     cmd: &CommandRunner,
@@ -503,23 +661,17 @@ pub fn configure_swap(
             setup_zram(cmd, config, install_root)?;
             create_swap_file(cmd, config, install_root)?;
 
-            // If hibernation is enabled, get the swap file offset for resume
+            // The offset itself is read (and written into the cmdline) by
+            // `resume_params` during the bootloader phase, once the file is in
+            // its final place. Reported here only so the log shows it early.
             if config.system.hibernation {
-                let swap_file = format!("{}{}", install_root, SWAP_FILE_PATH);
+                let swap_file = format!("{}{}", install_root, swap_file_path(config));
                 match get_swap_file_offset(&swap_file) {
-                    Ok(offset) => {
-                        info!("Swap file offset for hibernation: {}", offset);
-                        info!(
-                            "Add 'resume_offset={}' to kernel parameters for hibernation",
-                            offset
-                        );
-                    }
-                    Err(e) => {
-                        info!(
-                            "Could not determine swap file offset: {} (hibernation may not work)",
-                            e
-                        );
-                    }
+                    Ok(offset) => info!("Swap file offset for hibernation: {}", offset),
+                    Err(e) => warn!(
+                        "Could not determine swap file offset: {} (hibernation may not work)",
+                        e
+                    ),
                 }
             }
             Ok(())
@@ -533,19 +685,34 @@ pub fn configure_swap(
 }
 
 /// Generate fstab entry for swap file
-pub fn swap_file_fstab_entry() -> String {
-    format!("{}    none    swap    defaults    0    0\n", SWAP_FILE_PATH)
+pub fn swap_file_fstab_entry(config: &DeploymentConfig) -> String {
+    format!(
+        "{}    none    swap    defaults    0    0\n",
+        swap_file_path(config)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn mutable() -> DeploymentConfig {
+        let mut c = DeploymentConfig::sample();
+        c.packages.immutable_root = false;
+        c
+    }
+
+    fn immutable() -> DeploymentConfig {
+        let mut c = DeploymentConfig::sample();
+        c.packages.immutable_root = true;
+        c
+    }
+
     // ── swap_file_fstab_entry ────────────────────────────────────────────────
 
     #[test]
     fn swap_file_fstab_entry_uses_correct_swap_file_path() {
-        let entry = swap_file_fstab_entry();
+        let entry = swap_file_fstab_entry(&mutable());
         assert!(
             entry.contains(SWAP_FILE_PATH),
             "fstab entry must reference SWAP_FILE_PATH, got: {}",
@@ -555,7 +722,7 @@ mod tests {
 
     #[test]
     fn swap_file_fstab_entry_has_swap_type_and_defaults() {
-        let entry = swap_file_fstab_entry();
+        let entry = swap_file_fstab_entry(&mutable());
         assert!(entry.contains("swap"), "fstab entry must specify type=swap");
         assert!(
             entry.contains("none"),
@@ -569,7 +736,78 @@ mod tests {
 
     #[test]
     fn swap_file_fstab_entry_ends_with_newline() {
-        let entry = swap_file_fstab_entry();
+        let entry = swap_file_fstab_entry(&mutable());
         assert!(entry.ends_with('\n'), "fstab entry must end with newline");
+    }
+
+    // ── swap file placement ──────────────────────────────────────────────────
+
+    /// The whole reason the path is config-dependent: `/swap` is inside the
+    /// root, which an immutable install mounts read-only and (on btrfs)
+    /// snapshots. A swap file there cannot be swapped on, and its
+    /// `resume_offset` stops being true the first time a set is taken.
+    #[test]
+    fn the_immutable_swap_file_lives_on_var() {
+        assert_eq!(swap_file_path(&immutable()), IMMUTABLE_SWAP_FILE_PATH);
+        assert!(
+            swap_file_path(&immutable()).starts_with("/var/"),
+            "an immutable root's swap file must be on the writable, \
+             non-snapshotted /var"
+        );
+        assert_eq!(swap_file_path(&mutable()), SWAP_FILE_PATH);
+    }
+
+    #[test]
+    fn the_immutable_fstab_entry_follows_the_swap_file() {
+        let entry = swap_file_fstab_entry(&immutable());
+        assert!(
+            entry.contains(IMMUTABLE_SWAP_FILE_PATH),
+            "fstab must point at the /var swap file, got: {entry}"
+        );
+    }
+
+    // ── ResumeParams ─────────────────────────────────────────────────────────
+
+    /// A swap partition resumes from the device alone. Emitting a bare
+    /// `resume_offset=0` would be wrong, not merely redundant: the kernel would
+    /// read the image from the start of the partition's *filesystem* rather
+    /// than treat the partition as the swap device.
+    #[test]
+    fn a_swap_partition_gets_no_offset() {
+        let p = ResumeParams {
+            device: "UUID=dead-beef".to_string(),
+            offset: None,
+        };
+        assert_eq!(p.cmdline_parts(), vec!["resume=UUID=dead-beef"]);
+    }
+
+    /// A swap file cannot resume without one.
+    #[test]
+    fn a_swap_file_carries_its_offset_after_the_device() {
+        let p = ResumeParams {
+            device: "UUID=dead-beef".to_string(),
+            offset: Some(272384),
+        };
+        assert_eq!(
+            p.cmdline_parts(),
+            vec!["resume=UUID=dead-beef", "resume_offset=272384"]
+        );
+    }
+
+    #[test]
+    fn hibernation_off_means_no_resume_params() {
+        let cmd = CommandRunner::new(true);
+        let mut config = mutable();
+        config.system.hibernation = false;
+        let layout = ComputedLayout {
+            partitions: Vec::new(),
+            total_mib: 0,
+            subvolumes: None,
+            planned_thin_volumes: None,
+        };
+        assert_eq!(
+            resume_params(&cmd, &config, &layout, "/dev/null", "/mnt").unwrap(),
+            None
+        );
     }
 }

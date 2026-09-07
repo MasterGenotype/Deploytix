@@ -1,0 +1,80 @@
+diff --git a/src/hhd/controller/physical/evdev.py b/src/hhd/controller/physical/evdev.py
+index c26a706..6458b09 100644
+--- a/src/hhd/controller/physical/evdev.py
++++ b/src/hhd/controller/physical/evdev.py
+@@ -292,9 +292,24 @@ class GenericGamepadEvdev(Producer, Consumer):
+                         dev_caps = dev_cap[cap_id]
+                     else:
+                         dev_caps = [c[0] for c in dev_cap[cap_id]]  # type: ignore
+-                    for cap in caps:
+-                        if cap not in dev_caps:
+-                            matches = False
++                    # Any one of the listed codes identifies the node.
++                    #
++                    # This used to `break` unconditionally after the first
++                    # iteration, so only caps[0] was ever tested. Any-of is the
++                    # closest well-defined reading of that: a device that
++                    # matched before still matches (it has caps[0]), so this
++                    # can only ever be more permissive, never less. That
++                    # matters for the multi-code lists already in the tree
++                    # (e.g. [KEY_VOLUMEUP, KEY_VOLUMEDOWN]), which were only
++                    # ever matching on their first entry.
++                    #
++                    # Alternation is what lets one definition cover a device
++                    # whose kernel driver changed how it presents a node —
++                    # see the Legion Go touchpad, which reports BTN_MOUSE
++                    # under the old presentation and BTN_TOUCH under
++                    # hid-lenovo-go.
++                    if not any(cap in dev_caps for cap in caps):
++                        matches = False
+                         break
+                 if not matches:
+                     continue
+diff --git a/src/hhd/device/legion_go/tablet/base.py b/src/hhd/device/legion_go/tablet/base.py
+index c922042..1308396 100644
+--- a/src/hhd/device/legion_go/tablet/base.py
++++ b/src/hhd/device/legion_go/tablet/base.py
+@@ -270,11 +270,21 @@ def controller_loop_xinput(
+         vid=[0x17EF],
+         pid=[0x6182, 0x61EB],
+         name=[re.compile(".+Touchpad")],  # "  Legion Controller for Windows  Touchpad"
+-        capabilities={EC("EV_KEY"): [EC("BTN_MOUSE")]},
++        # Either presentation. The original Legion Go exposes its touchpad as a
++        # mouse (BTN_MOUSE); the Legion Go 2 under the in-kernel hid-lenovo-go
++        # driver exposes a real touchpad reporting BTN_TOUCH, and puts
++        # BTN_MOUSE on a separate "... Mouse" node that the name pattern above
++        # excludes. Requiring BTN_MOUSE therefore matched nothing on a Go 2.
++        capabilities={EC("EV_KEY"): [EC("BTN_MOUSE"), EC("BTN_TOUCH")]},
+         btn_map=LGO_TOUCHPAD_BUTTON_MAP,
+         axis_map=LGO_TOUCHPAD_AXIS_MAP,
+         aspect_ratio=1,
+-        required=True,
++        # Not required: losing the touchpad costs DualSense touchpad
++        # passthrough, but a miss used to raise RuntimeError and restart the
++        # controller every 3s forever ("Assuming controllers disconnected"),
++        # taking sticks, buttons and gyro down with it. Degrading is strictly
++        # better than crash-looping the whole controller.
++        required=False,
+     )
+     d_raw = SelectivePassthrough(
+         LegionHidraw(
+diff --git a/src/hhd/device/legion_go/tablet/const.py b/src/hhd/device/legion_go/tablet/const.py
+index c6d6841..f7238b1 100644
+--- a/src/hhd/device/legion_go/tablet/const.py
++++ b/src/hhd/device/legion_go/tablet/const.py
+@@ -4,7 +4,14 @@ from hhd.controller.physical.hidraw import AM, BM, CM
+ 
+ LGO_TOUCHPAD_BUTTON_MAP: dict[int, Button] = to_map(
+     {
+-        "touchpad_touch": [B("BTN_TOOL_FINGER")],  # also BTN_TOUCH
++        # BTN_TOUCH as well as BTN_TOOL_FINGER: the in-kernel hid-lenovo-go
++        # driver presents the Legion Go 2 touchpad as a real touchpad that
++        # reports only BTN_TOUCH, with no BTN_TOOL_FINGER at all, so without
++        # this the node matches but never reports a touch. Devices that report
++        # both send a duplicate touchpad_touch, which is harmless: consumers
++        # treat it as a level, and Multiplexer's tap detection is guarded on
++        # touchpad_down, which the first release already cleared.
++        "touchpad_touch": [B("BTN_TOOL_FINGER"), B("BTN_TOUCH")],
+         "touchpad_right": [B("BTN_TOOL_DOUBLETAP")],
+     }
+ )

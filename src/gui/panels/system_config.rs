@@ -1,11 +1,15 @@
 //! System configuration panel
 
-use crate::config::{InitSystem, SecureBootMethod};
+use crate::config::{InitSystem, SecureBootMethod, SwapType};
 use crate::gui::{state::SystemState, theme, widgets};
 use egui::{RichText, Ui};
 
 /// Render system configuration sections. Returns `true` when valid.
-pub(crate) fn show_sections(ui: &mut Ui, system: &mut SystemState) -> bool {
+///
+/// `swap_type` is read-only, and comes from the disk panel: hibernation needs
+/// somewhere to put the image, so the choice made there decides whether this
+/// panel can offer it at all.
+pub(crate) fn show_sections(ui: &mut Ui, system: &mut SystemState, swap_type: &SwapType) -> bool {
     widgets::section(ui, "Init & Bootloader", |ui| {
         ui.horizontal(|ui| {
             ui.label("Init System:");
@@ -24,6 +28,35 @@ pub(crate) fn show_sections(ui: &mut Ui, system: &mut SystemState) -> bool {
             ui.label("Bootloader:");
             ui.label(RichText::new(format!("{}", system.bootloader)).color(theme::TEXT_SECONDARY));
         });
+    });
+
+    widgets::section(ui, "Power", |ui| {
+        // ZRAM is RAM-backed: nothing survives the power-off, so there is no
+        // image to resume from. Forced off rather than merely hidden, so a
+        // config loaded with both set cannot reach validation and fail there.
+        if *swap_type == SwapType::ZramOnly {
+            system.hibernation = false;
+            ui.add_enabled_ui(false, |ui| {
+                ui.checkbox(&mut system.hibernation, "Hibernation (suspend to disk)");
+            });
+            widgets::info_text(
+                ui,
+                "Unavailable with ZRAM-only swap: ZRAM lives in RAM, so there is \
+                 no hibernation image left after power-off. Choose a swap \
+                 partition or a swap file.",
+            );
+        } else {
+            ui.checkbox(&mut system.hibernation, "Hibernation (suspend to disk)");
+            if system.hibernation {
+                widgets::info_text(
+                    ui,
+                    "Adds the resume hook and resume=/resume_offset= to the kernel \
+                     cmdline. Works on an immutable root: swap stays outside LUKS \
+                     and LVM, and a swap file is placed on /var so it survives \
+                     snapshot sets.",
+                );
+            }
+        }
     });
 
     widgets::section(ui, "SecureBoot", |ui| {

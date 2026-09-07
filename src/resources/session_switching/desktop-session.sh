@@ -3,15 +3,14 @@
 # Desktop Session Wrapper — GENERATED
 #
 # This file is a template. deploytix renders it at install time from the
-# deployment's chosen desktop environment (see
-# configure::session_switching::render_desktop_session) and writes the
-# result to /usr/local/bin/desktop-session. Placeholders:
+# deployment's chosen desktop environment and writes the result to
+# /usr/local/bin/desktop-session.
 #
-#   @DEPLOYTIX_DESKTOP_CMD@    primary session command for the chosen DE
-#   @DEPLOYTIX_DESKTOP_NAME@   XDG_CURRENT_DESKTOP / XDG_SESSION_DESKTOP value
-#   @DEPLOYTIX_SESSION_TYPE@   XDG_SESSION_TYPE (wayland, or empty for X11 DEs)
-#   @DEPLOYTIX_DESKTOP_FALLBACKS@  newline-separated alternates, tried in order
-#   @DEPLOYTIX_DE_PROCS@       newline-separated "<x|f>:<pattern>" teardown list
+# The placeholder names are documented on `DesktopSpec` in
+# configure::session_switching, deliberately NOT here: substitution is a plain
+# string replace over the whole file, so naming a placeholder in a comment
+# expands it there too. The teardown list is multi-line, which turned this
+# header into nine bare words that the shell then tried to run as commands.
 #
 # Rendering is pure: the same DeploymentConfig always produces the same
 # bytes, so re-running the installer over an existing system converges
@@ -20,6 +19,14 @@
 # Purpose: wrap the desktop environment with background + wait so signal
 # traps fire immediately, ensuring the greetd user session always exits
 # cleanly on logout.
+#
+# This deliberately exports NO XDG_* session variables. startplasma-wayland is
+# what creates the Wayland session, so declaring XDG_SESSION_TYPE=wayland ahead
+# of it tells Qt and KDE components that a session already exists and they
+# reach for a WAYLAND_DISPLAY that kwin_wayland has not created yet. The
+# version of this script that ran on working hardware for four months set none
+# of them and let the desktop establish its own environment; setting them is
+# what broke "Return to Desktop".
 #
 # Without this wrapper, `dbus-run-session startplasma-wayland` runs as
 # the session leader; if any subprocess hangs on logout (kwin, kded6,
@@ -56,16 +63,7 @@ if [ "$desktop_cmd" != "@DEPLOYTIX_DESKTOP_CMD@" ]; then
     echo "[desktop-session] Configured command @DEPLOYTIX_DESKTOP_CMD@ is absent; using $desktop_cmd"
 fi
 
-# --------- 2. Session environment ---------
-XDG_CURRENT_DESKTOP="@DEPLOYTIX_DESKTOP_NAME@"
-XDG_SESSION_DESKTOP="@DEPLOYTIX_DESKTOP_NAME@"
-export XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
-if [ -n "@DEPLOYTIX_SESSION_TYPE@" ]; then
-    XDG_SESSION_TYPE="@DEPLOYTIX_SESSION_TYPE@"
-    export XDG_SESSION_TYPE
-fi
-
-# --------- 3. Cleanup handler (runs on exit or signal) ---------
+# --------- 2. Cleanup handler (runs on exit or signal) ---------
 # Teardown targets are DE-specific: killing KDE processes on a GNOME
 # install is pointless, and leaving GNOME's alive on a GNOME install is
 # what wedges the logout. Each entry is "<match>:<pattern>", where match
@@ -112,7 +110,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP TERM
 
-# --------- 4. Launch desktop session ---------
+# --------- 3. Launch desktop session ---------
 # Run in background + wait so that signal traps fire immediately.
 # dbus-run-session provides the D-Bus session bus that desktop
 # environments need (kwin_wayland, kded6, gnome-shell, etc. fail

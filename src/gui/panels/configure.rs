@@ -54,25 +54,39 @@ pub fn show(
     let mut system_valid = false;
     let mut user_valid = false;
 
-    ui.columns(3, |cols| {
-        // ═══ Column 1: Disk ═══════════════════════════════════════════
-        column_heading(&mut cols[0], "Disk");
-        disk_selected = disk_selection::show_sections(&mut cols[0], disk);
-        cols[0].add_space(theme::SPACING_SM);
-        disk_valid = disk_config::show_sections(&mut cols[0], disk);
+    // The three columns can outgrow the display: which options appear depends
+    // on the configuration (yay unlocks several, btrfs unlocks more), so there
+    // is no layout that is guaranteed to fit. Scrolling makes overflow
+    // reachable instead of cut off, whatever the panel size and whatever the
+    // user has zoomed to.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.columns(3, |cols| {
+                // ═══ Column 1: Disk ═══════════════════════════════════════════
+                column_heading(&mut cols[0], "Disk");
+                disk_selected = disk_selection::show_sections(&mut cols[0], disk);
+                cols[0].add_space(theme::SPACING_SM);
+                disk_valid = disk_config::show_sections(&mut cols[0], disk);
 
-        // ═══ Column 2: System & User ══════════════════════════════════
-        column_heading(&mut cols[1], "System");
-        system_valid = system_config::show_sections(&mut cols[1], system);
-        sub_heading(&mut cols[1], "User Account");
-        user_valid = user_config::show_sections(&mut cols[1], user);
+                // ═══ Column 2: System & User ══════════════════════════════════
+                column_heading(&mut cols[1], "System");
+                system_valid = system_config::show_sections(&mut cols[1], system, &disk.swap_type);
+                sub_heading(&mut cols[1], "User Account");
+                user_valid = user_config::show_sections(&mut cols[1], user);
 
-        // ═══ Column 3: Packages & Gaming ══════════════════════════════
-        column_heading(&mut cols[2], "Packages");
-        network_desktop::show_sections(&mut cols[2], packages, &disk.filesystem, disk.use_lvm_thin);
-        sub_heading(&mut cols[2], "Gaming");
-        handheld_gaming::show_sections(&mut cols[2], packages);
-    });
+                // ═══ Column 3: Packages & Gaming ══════════════════════════════
+                column_heading(&mut cols[2], "Packages");
+                network_desktop::show_sections(
+                    &mut cols[2],
+                    packages,
+                    &disk.filesystem,
+                    disk.use_lvm_thin,
+                );
+                sub_heading(&mut cols[2], "Gaming");
+                handheld_gaming::show_sections(&mut cols[2], packages);
+            });
+        });
 
     disk_selected && disk_valid && system_valid && user_valid
 }

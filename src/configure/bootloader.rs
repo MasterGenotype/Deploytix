@@ -69,23 +69,20 @@ pub fn install_bootloader_with_layout(
     }
 }
 
-/// Get the swap partition UUID from the layout, if a swap partition exists.
-fn get_swap_uuid_from_layout(
+/// Resolve `resume=` / `resume_offset=` for the cmdline, if hibernation is on.
+///
+/// Delegates to [`crate::configure::swap::resume_params`], which covers a swap
+/// partition and a swap file alike -- the old helper here only knew about a
+/// swap partition, so `swap_type = "file_zram"` silently produced no `resume=`
+/// at all.
+fn resume_for_cmdline(
     cmd: &CommandRunner,
+    config: &DeploymentConfig,
     device: &str,
     layout: &ComputedLayout,
-) -> Result<Option<String>> {
-    if let Some(swap_part) = layout.partitions.iter().find(|p| p.is_swap) {
-        let swap_device = partition_path(device, swap_part.number);
-        let uuid = if cmd.is_dry_run() {
-            "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".to_string()
-        } else {
-            get_partition_uuid(&swap_device)?
-        };
-        Ok(Some(uuid))
-    } else {
-        Ok(None)
-    }
+    install_root: &str,
+) -> Result<Option<crate::configure::swap::ResumeParams>> {
+    crate::configure::swap::resume_params(cmd, config, layout, device, install_root)
 }
 
 /// Install GRUB bootloader (non-encrypted, uses layout detection)
@@ -125,7 +122,7 @@ fn install_grub(
 
     // Configure GRUB defaults
     let uses_subvolumes = config.disk.use_subvolumes;
-    let swap_uuid = get_swap_uuid_from_layout(cmd, device, layout)?;
+    let resume = resume_for_cmdline(cmd, config, device, layout, install_root)?;
     configure_grub_defaults(
         cmd,
         config,
@@ -134,7 +131,7 @@ fn install_grub(
         uses_subvolumes,
         false,
         install_root,
-        swap_uuid.as_deref(),
+        resume.as_ref(),
     )?;
 
     run_grub_install(cmd, device, install_root)?;
@@ -159,8 +156,8 @@ fn install_grub_with_layout(
     // Find LUKS partition from layout
     let luks_part = layout.partitions.iter().find(|p| p.is_luks);
 
-    // Get swap UUID for hibernation resume parameter
-    let swap_uuid = get_swap_uuid_from_layout(cmd, device, layout)?;
+    // Resolve resume=/resume_offset= for hibernation
+    let resume = resume_for_cmdline(cmd, config, device, layout, install_root)?;
 
     if config.immutable_lvm_ab() {
         // LVM immutable A/B: the verity-ab hook mounts the active slot; GRUB only
@@ -183,7 +180,7 @@ fn install_grub_with_layout(
             config,
             luks_uuid.as_deref(),
             install_root,
-            swap_uuid.as_deref(),
+            resume.as_ref(),
         )?;
     } else if config.disk.use_lvm_thin && config.disk.encryption {
         // LVM thin + encryption: encrypt hook needs cryptdevice= parameter,
@@ -199,13 +196,7 @@ fn install_grub_with_layout(
         } else {
             get_luks_uuid(&luks_device)?
         };
-        configure_grub_defaults_lvm_thin(
-            cmd,
-            config,
-            &luks_uuid,
-            install_root,
-            swap_uuid.as_deref(),
-        )?;
+        configure_grub_defaults_lvm_thin(cmd, config, &luks_uuid, install_root, resume.as_ref())?;
     } else if config.disk.use_lvm_thin {
         // LVM thin without encryption: root is on an LVM LV
         let vg_name = &config.disk.lvm_vg_name;
@@ -223,7 +214,7 @@ fn install_grub_with_layout(
             layout.uses_subvolumes(),
             false,
             install_root,
-            swap_uuid.as_deref(),
+            resume.as_ref(),
         )?;
     } else if let Some(luks) = luks_part {
         // Multi-LUKS: configure with mapper name for root
@@ -241,7 +232,7 @@ fn install_grub_with_layout(
             layout.uses_subvolumes(),
             config.disk.boot_encryption,
             install_root,
-            swap_uuid.as_deref(),
+            resume.as_ref(),
         )?;
     } else {
         // No LUKS, no LVM thin — should not reach here from install_bootloader_with_layout
@@ -879,7 +870,7 @@ fn configure_grub_defaults(
     uses_subvolumes: bool,
     boot_encryption: bool,
     install_root: &str,
-    swap_uuid: Option<&str>,
+    resume: Option<&crate::configure::swap::ResumeParams>,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
 
@@ -926,10 +917,8 @@ fn configure_grub_defaults(
     }
 
     // Add resume for hibernation
-    if config.system.hibernation {
-        if let Some(uuid) = swap_uuid {
-            cmdline_parts.push(format!("resume=UUID={}", uuid));
-        }
+    if let Some(resume) = resume {
+        cmdline_parts.extend(resume.cmdline_parts());
     }
 
     let cmdline = cmdline_parts.join(" ");
@@ -971,7 +960,7 @@ fn configure_grub_defaults_lvm_thin(
     config: &DeploymentConfig,
     luks_uuid: &str,
     install_root: &str,
-    swap_uuid: Option<&str>,
+    resume: Option<&crate::configure::swap::ResumeParams>,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
     let vg_name = &config.disk.lvm_vg_name;
@@ -1007,10 +996,8 @@ fn configure_grub_defaults_lvm_thin(
     cmdline_parts.push("rw".to_string());
 
     // Add resume for hibernation
-    if config.system.hibernation {
-        if let Some(uuid) = swap_uuid {
-            cmdline_parts.push(format!("resume=UUID={}", uuid));
-        }
+    if let Some(resume) = resume {
+        cmdline_parts.extend(resume.cmdline_parts());
     }
 
     let cmdline = cmdline_parts.join(" ");
@@ -1055,7 +1042,7 @@ fn configure_grub_defaults_lvm_ab(
     config: &DeploymentConfig,
     luks_uuid: Option<&str>,
     install_root: &str,
-    swap_uuid: Option<&str>,
+    resume: Option<&crate::configure::swap::ResumeParams>,
 ) -> Result<()> {
     let grub_default_path = format!("{}/etc/default/grub", install_root);
     let verity_mapper = crate::configure::verity::VERITY_MAPPER_NAME;
@@ -1083,10 +1070,8 @@ fn configure_grub_defaults_lvm_ab(
     cmdline_parts.push(format!("deploytix.roothash={}", AB_ROOTHASH_PLACEHOLDER));
     // Immutable root.
     cmdline_parts.push("ro".to_string());
-    if config.system.hibernation {
-        if let Some(uuid) = swap_uuid {
-            cmdline_parts.push(format!("resume=UUID={}", uuid));
-        }
+    if let Some(resume) = resume {
+        cmdline_parts.extend(resume.cmdline_parts());
     }
 
     let cmdline = cmdline_parts.join(" ");

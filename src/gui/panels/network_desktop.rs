@@ -1,6 +1,8 @@
 //! Network and desktop configuration panel
 
-use crate::config::{DesktopEnvironment, DisplayManager, Filesystem, IwdFrontend, NetworkBackend};
+use crate::config::{
+    DesktopEnvironment, DisplayManager, Filesystem, IwdFrontend, NetworkBackend, TkgScheduler,
+};
 use crate::gui::{state::PackagesState, theme, widgets};
 use egui::Ui;
 
@@ -234,11 +236,77 @@ pub(crate) fn show_sections(
         );
     });
 
+    widgets::section(ui, "Kernel", |ui| {
+        ui.checkbox(
+            &mut packages.install_tkg_kernel,
+            "linux-tkg (prebuilt, replaces linux-zen)",
+        );
+        if packages.install_tkg_kernel {
+            ui.add_space(theme::SPACING_XS);
+            ui.horizontal(|ui| {
+                ui.label("CPU scheduler");
+                egui::ComboBox::from_id_salt("tkg_scheduler")
+                    .selected_text(format!("{}", packages.tkg_scheduler))
+                    .show_ui(ui, |ui| {
+                        for sched in TkgScheduler::all() {
+                            ui.selectable_value(
+                                &mut packages.tkg_scheduler,
+                                *sched,
+                                format!("{sched}"),
+                            );
+                        }
+                    });
+            });
+            widgets::info_text(
+                ui,
+                "Frogging-Family publish prebuilt Arch packages for each release, so nothing \
+                 is compiled here: the newest kernel and headers are downloaded from GitHub \
+                 and installed with pacman -U.",
+            );
+            // Not a footnote.  This is the only kernel the target gets, so a
+            // kernel that will not boot on this hardware has no menu entry to
+            // fall back to, and the install aborts rather than continuing if
+            // the download fails.
+            widgets::validation_warning(
+                ui,
+                "This replaces linux-zen entirely — there is no fallback kernel in the boot \
+                 menu. The install will stop if the download fails.",
+            );
+            if *filesystem == Filesystem::Zfs {
+                widgets::validation_error(
+                    ui,
+                    "ZFS needs a matching kernel module and there is no zfs-linux-tkg. Pick \
+                     another filesystem or untick linux-tkg.",
+                );
+            }
+            if packages.gpu_nvidia {
+                widgets::info_text(
+                    ui,
+                    "NVIDIA will be installed as nvidia-dkms: the prebuilt nvidia module is \
+                     tied to a stock kernel and will not load on linux-tkg.",
+                );
+            }
+        }
+    });
+
     widgets::section(ui, "Optional Packages", |ui| {
         ui.checkbox(
             &mut packages.install_wine,
             "Wine compatibility (wine, vkd3d, winetricks, wine-mono, wine-gecko)",
         );
+        ui.add_space(theme::SPACING_XS);
+
+        ui.checkbox(
+            &mut packages.install_warp_terminal,
+            "Warp Terminal: The Agentic Terminal",
+        );
+        if packages.install_warp_terminal {
+            widgets::info_text(
+                ui,
+                "Warp is in no repository and has no AUR package, so its Arch build is \
+                 downloaded from warp.dev and installed with pacman -U.",
+            );
+        }
         ui.add_space(theme::SPACING_XS);
 
         ui.checkbox(
@@ -252,6 +320,18 @@ pub(crate) fn show_sections(
             );
         }
         ui.add_space(theme::SPACING_XS);
+
+        // AUR package: only offered when there is a helper to build it, and
+        // forced off otherwise so a stale config cannot ask for the impossible.
+        if packages.install_yay {
+            ui.checkbox(
+                &mut packages.install_zen_browser,
+                "Zen Browser (AUR: zen-browser-bin)",
+            );
+            ui.add_space(theme::SPACING_XS);
+        } else {
+            packages.install_zen_browser = false;
+        }
 
         if packages.install_yay && *filesystem == Filesystem::Btrfs {
             ui.checkbox(
@@ -324,6 +404,42 @@ pub(crate) fn show_sections(
         } else if *filesystem != Filesystem::Btrfs {
             // Neither backend applies.
             packages.immutable_root = false;
+        }
+    });
+
+    widgets::section(ui, "Extra Packages", |ui| {
+        widgets::info_text(
+            ui,
+            "Anything else to install, separated by spaces, commas or newlines. \
+             These are installed at the end of the run, after the base system.",
+        );
+        ui.add_space(theme::SPACING_XS);
+
+        ui.label("Repository packages (pacman -S)");
+        ui.add(
+            egui::TextEdit::multiline(&mut packages.extra_pacman)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("neovim htop ripgrep"),
+        );
+        ui.add_space(theme::SPACING_XS);
+
+        ui.label("AUR packages (yay -S)");
+        ui.add(
+            egui::TextEdit::multiline(&mut packages.extra_aur)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("visual-studio-code-bin"),
+        );
+        // Validation rejects AUR extras without yay, so say so here rather
+        // than letting the install fail at the summary step.
+        if !crate::gui::state::split_package_list(&packages.extra_aur).is_empty()
+            && !packages.install_yay
+        {
+            widgets::validation_error(
+                ui,
+                "AUR packages need the yay AUR helper. Tick it under Optional Packages.",
+            );
         }
     });
 }

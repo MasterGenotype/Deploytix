@@ -35,12 +35,15 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
         packages.push("iwd-s6".to_string());
     }
 
-    // Kernel and firmware
-    packages.extend([
-        "linux-firmware".to_string(),
-        "linux-zen".to_string(),
-        "linux-zen-headers".to_string(),
-    ]);
+    // Kernel and firmware.  linux-tkg replaces linux-zen rather than joining
+    // it, so basestrap installs no kernel at all in that case — the prebuilt
+    // packages come down over HTTP and go in with `pacman -U` immediately
+    // after this phase, before mkinitcpio and grub-mkconfig run.  That step
+    // is fatal on failure precisely because nothing here is a fallback.
+    packages.push("linux-firmware".to_string());
+    if !config.packages.install_tkg_kernel {
+        packages.extend(["linux-zen".to_string(), "linux-zen-headers".to_string()]);
+    }
 
     // Filesystem tools — always include btrfs-progs as it is commonly needed
     packages.push("btrfs-progs".to_string());
@@ -1163,6 +1166,37 @@ pub fn run_basestrap_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// linux-tkg replaces the stock kernel rather than joining it, so
+    /// basestrap must not also pull linux-zen in: two kernels is not the
+    /// configured outcome, and on the ZFS path `zfs-linux-zen` would quietly
+    /// drag the zen kernel back as a dependency.
+    #[test]
+    fn the_tkg_kernel_replaces_linux_zen_in_the_package_list() {
+        let mut config = DeploymentConfig::sample();
+
+        let stock = build_package_list(&config);
+        assert!(stock.contains(&"linux-zen".to_string()));
+        assert!(stock.contains(&"linux-zen-headers".to_string()));
+
+        config.packages.install_tkg_kernel = true;
+        let tkg = build_package_list(&config);
+        assert!(!tkg.contains(&"linux-zen".to_string()), "{tkg:?}");
+        assert!(!tkg.contains(&"linux-zen-headers".to_string()), "{tkg:?}");
+
+        // Firmware is kernel-independent and must survive the swap; without it
+        // the target boots without microcode or device firmware.
+        assert!(tkg.contains(&"linux-firmware".to_string()), "{tkg:?}");
+
+        // basestrap installs no kernel at all here — the tkg packages arrive
+        // over HTTP in the phase immediately after, before mkinitcpio and
+        // grub-mkconfig run.
+        assert!(
+            !tkg.iter()
+                .any(|p| p.starts_with("linux") && p.contains("-tkg")),
+            "the tkg kernel is not a repository package: {tkg:?}"
+        );
+    }
 
     #[test]
     fn embedded_pkgbuilds_cover_the_submodule_packages() {

@@ -4,7 +4,6 @@ use crate::config::DeploymentConfig;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use tracing::info;
 
@@ -55,6 +54,70 @@ fn set_timezone(cmd: &CommandRunner, timezone: &str, install_root: &str) -> Resu
     Ok(())
 }
 
+/// Charset field for a locale.gen entry.
+///
+/// `en_US.UTF-8` → `UTF-8`; bare names without a dot default to UTF-8.
+fn locale_charset(locale: &str) -> &str {
+    locale
+        .rsplit_once('.')
+        .map(|(_, cs)| cs)
+        .filter(|cs| !cs.is_empty())
+        .unwrap_or("UTF-8")
+}
+
+/// True when an uncommented locale.gen body selects `locale`.
+///
+/// Bodies look like `en_US.UTF-8 UTF-8` (optional trailing whitespace already
+/// stripped by the caller). Match on the locale name only so a commented
+/// `#en_US.UTF-8 UTF-8` is treated as the line to enable, not as "already on".
+fn locale_gen_line_matches(uncommented_body: &str, locale: &str) -> bool {
+    uncommented_body
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name == locale)
+}
+
+/// Enable `locale` inside a locale.gen file's text.
+///
+/// The Artix/Arch stock file ships every locale commented (`#en_US.UTF-8 UTF-8`).
+/// A naive `contains("en_US.UTF-8 UTF-8")` matches that commented line and skips
+/// enabling it, so `locale-gen` writes nothing under `/usr/lib/locale`. On an
+/// immutable root that archive cannot be rebuilt later (`/usr` is RO), so the
+/// enable step must uncomment (or append) at install time, then run locale-gen
+/// while the tree is still writable.
+fn enable_locale_in_gen(content: &str, locale: &str) -> String {
+    let charset = locale_charset(locale);
+    let entry = format!("{} {}", locale, charset);
+    let mut found = false;
+
+    let mut lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            let body = match trimmed.strip_prefix('#') {
+                Some(rest) => rest.trim(),
+                None => trimmed,
+            };
+            if locale_gen_line_matches(body, locale) {
+                found = true;
+                entry.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    if !found {
+        lines.push(entry);
+    }
+
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Configure locale
 fn set_locale(cmd: &CommandRunner, locale: &str, install_root: &str) -> Result<()> {
     info!("Setting locale to {}", locale);
@@ -64,32 +127,130 @@ fn set_locale(cmd: &CommandRunner, locale: &str, install_root: &str) -> Result<(
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would configure locale {} in {}",
-            locale, install_root
+            "  [dry-run] Would uncomment {} in locale.gen, write locale.conf, run locale-gen",
+            locale
         );
         return Ok(());
     }
 
-    // Enable locale in locale.gen
-    let locale_entry = format!("{} UTF-8", locale);
-    let locale_gen_content = fs::read_to_string(&locale_gen_path).unwrap_or_default();
-
-    if !locale_gen_content.contains(&locale_entry) {
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&locale_gen_path)?;
-        writeln!(file, "{}", locale_entry)?;
+    // 1. Uncomment (or append) the chosen locale in locale.gen
+    let existing = fs::read_to_string(&locale_gen_path).unwrap_or_default();
+    let updated = enable_locale_in_gen(&existing, locale);
+    if let Some(parent) = std::path::Path::new(&locale_gen_path).parent() {
+        fs::create_dir_all(parent)?;
     }
+    fs::write(&locale_gen_path, updated)?;
 
-    // Create locale.conf
+    // 2. Create locale.conf (LANG is enough; glibc picks up the rest)
     let locale_conf_content = format!("LANG={}\n", locale);
     fs::write(&locale_conf_path, locale_conf_content)?;
 
-    // Generate locales
-    cmd.run_in_chroot(install_root, "locale-gen")?;
+    // 3. Generate locales into /usr/lib/locale while the install root is RW
+    //    (immutable installs mount /usr read-only after first boot).
+    cmd.run_in_chroot(install_root, "/bin/locale-gen")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charset_from_locale_name() {
+        assert_eq!(locale_charset("en_US.UTF-8"), "UTF-8");
+        assert_eq!(locale_charset("C.UTF-8"), "UTF-8");
+        assert_eq!(locale_charset("en_US"), "UTF-8");
+    }
+
+    #[test]
+    fn uncomment_stock_commented_en_us() {
+        // Stock glibc locale.gen ships the line commented, often with trailing
+        // spaces. contains("en_US.UTF-8 UTF-8") would wrongly treat this as on.
+        let stock = "\
+#aa_DJ.UTF-8 UTF-8  \n\
+#en_US.UTF-8 UTF-8  \n\
+#en_US ISO-8859-1  \n\
+#fr_FR.UTF-8 UTF-8  \n";
+        let out = enable_locale_in_gen(stock, "en_US.UTF-8");
+        assert!(
+            out.lines().any(|l| l.trim() == "en_US.UTF-8 UTF-8"),
+            "en_US.UTF-8 must be uncommented:\n{out}"
+        );
+        assert!(
+            !out.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with('#') && t.contains("en_US.UTF-8")
+            }),
+            "commented en_US.UTF-8 must not remain:\n{out}"
+        );
+        // Other locales stay commented; the ISO-8859-1 en_US variant is a
+        // different locale name and must stay alone.
+        assert!(out.contains("#fr_FR.UTF-8 UTF-8"));
+        assert!(out.contains("#en_US ISO-8859-1"));
+        // No duplicate append
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.split_whitespace().next() == Some("en_US.UTF-8"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn already_enabled_is_idempotent() {
+        let on = "en_US.UTF-8 UTF-8\n#fr_FR.UTF-8 UTF-8\n";
+        let out = enable_locale_in_gen(on, "en_US.UTF-8");
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.split_whitespace().next() == Some("en_US.UTF-8"))
+                .count(),
+            1
+        );
+        assert!(out.contains("en_US.UTF-8 UTF-8"));
+    }
+
+    #[test]
+    fn missing_locale_is_appended() {
+        let sparse = "#fr_FR.UTF-8 UTF-8\n";
+        let out = enable_locale_in_gen(sparse, "en_US.UTF-8");
+        assert!(out.contains("#fr_FR.UTF-8 UTF-8"));
+        assert!(
+            out.lines().any(|l| l.trim() == "en_US.UTF-8 UTF-8"),
+            "missing locale must be appended:\n{out}"
+        );
+    }
+
+    #[test]
+    fn empty_file_gets_entry() {
+        let out = enable_locale_in_gen("", "en_US.UTF-8");
+        assert_eq!(out, "en_US.UTF-8 UTF-8\n");
+    }
+
+    #[test]
+    fn set_locale_writes_gen_and_conf_before_locale_gen() {
+        // Exercise the file side without requiring a real chroot locale-gen:
+        // dry-run skips I/O, so drive enable + conf write the same way set_locale does.
+        let mut root = std::env::temp_dir();
+        root.push(format!("deploytix_locale_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("etc")).unwrap();
+
+        let gen_path = root.join("etc/locale.gen");
+        fs::write(&gen_path, "#en_US.UTF-8 UTF-8  \n#de_DE.UTF-8 UTF-8\n").unwrap();
+
+        let updated = enable_locale_in_gen(&fs::read_to_string(&gen_path).unwrap(), "en_US.UTF-8");
+        fs::write(&gen_path, updated).unwrap();
+        fs::write(root.join("etc/locale.conf"), "LANG=en_US.UTF-8\n").unwrap();
+
+        let gen = fs::read_to_string(&gen_path).unwrap();
+        assert!(gen.lines().any(|l| l.trim() == "en_US.UTF-8 UTF-8"));
+        assert!(!gen.contains("#en_US.UTF-8"));
+        let conf = fs::read_to_string(root.join("etc/locale.conf")).unwrap();
+        assert_eq!(conf, "LANG=en_US.UTF-8\n");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 /// Set keyboard layout

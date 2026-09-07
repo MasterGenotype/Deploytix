@@ -58,8 +58,15 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
     match config.network.backend {
         NetworkBackend::Iwd => services.push("iwd".to_string()),
         NetworkBackend::NetworkManager => {
-            services.push("NetworkManager".to_string());
+            // iwd first: NetworkManager fronts it via `wifi.backend=iwd`, and an
+            // NM that comes up before iwd owns its D-Bus name leaves the Wi-Fi
+            // device unmanaged for the rest of the boot. Enable order is not a
+            // hard guarantee under runit's parallel start, which is why the
+            // credentials are also seeded into iwd's own store
+            // (configure::network::preseed_wifi) — but there is no reason to
+            // enable them in the order that loses the race.
             services.push("iwd".to_string());
+            services.push("NetworkManager".to_string());
         }
         NetworkBackend::NetworkManagerWpa => {
             services.push("NetworkManager".to_string());
@@ -388,6 +395,28 @@ mod tests {
         // sample(): KDE desktop, greetd display manager (default), runit,
         // iwd network backend
         DeploymentConfig::sample()
+    }
+
+    /// NetworkManager fronts iwd via `wifi.backend=iwd`; an NM that comes up
+    /// before iwd owns its D-Bus name leaves the Wi-Fi device unmanaged for the
+    /// rest of the boot. Enable order is not a hard guarantee under runit's
+    /// parallel start, but there is no reason to enable them in the order that
+    /// loses the race.
+    #[test]
+    fn nm_iwd_backend_enables_iwd_before_networkmanager() {
+        let mut cfg = config();
+        cfg.network.backend = crate::config::NetworkBackend::NetworkManager;
+        let services = build_service_list(&cfg);
+
+        let iwd = services
+            .iter()
+            .position(|s| s == "iwd")
+            .expect("iwd enabled");
+        let nm = services
+            .iter()
+            .position(|s| s == "NetworkManager")
+            .expect("NetworkManager enabled");
+        assert!(iwd < nm, "iwd must be enabled before NetworkManager");
     }
 
     #[test]

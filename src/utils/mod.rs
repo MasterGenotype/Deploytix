@@ -8,4 +8,5 @@ pub mod idle;
 pub mod interactive;
 pub mod prompt;
 pub mod signal;
+pub mod single_instance;
 pub mod user;

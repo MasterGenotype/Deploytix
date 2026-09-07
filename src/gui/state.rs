@@ -2,7 +2,7 @@
 
 use crate::config::{
     Bootloader, CustomPartitionEntry, DesktopEnvironment, DisplayManager, Filesystem, InitSystem,
-    IwdFrontend, NetworkBackend, SecureBootMethod, SwapType,
+    IwdFrontend, NetworkBackend, SecureBootMethod, SwapType, TkgScheduler,
 };
 use crate::disk::detection::BlockDevice;
 use std::sync::mpsc::Receiver;
@@ -155,6 +155,9 @@ pub struct SystemState {
     pub locale: String,
     pub keymap: String,
     pub hostname: String,
+    /// Suspend to disk. Needs swap that outlives a power-off, so the panel
+    /// forces it off for `SwapType::ZramOnly`.
+    pub hibernation: bool,
     pub secureboot: bool,
     pub secureboot_method: SecureBootMethod,
 }
@@ -168,6 +171,7 @@ impl Default for SystemState {
             locale: "en_US.UTF-8".to_string(),
             keymap: "us".to_string(),
             hostname: "artix".to_string(),
+            hibernation: false,
             secureboot: false,
             secureboot_method: SecureBootMethod::Sbctl,
         }
@@ -205,6 +209,12 @@ pub struct PackagesState {
     pub display_manager: DisplayManager,
     pub install_yay: bool,
     pub install_wine: bool,
+    pub install_warp_terminal: bool,
+    /// Install the prebuilt linux-tkg kernel in place of linux-zen.
+    pub install_tkg_kernel: bool,
+    /// CPU scheduler variant of that kernel; inert unless the above is set.
+    pub tkg_scheduler: TkgScheduler,
+    pub install_zen_browser: bool,
     pub install_gaming: bool,
     pub install_session_switching: bool,
     pub install_btrfs_tools: bool,
@@ -213,6 +223,8 @@ pub struct PackagesState {
     pub sysctl_gaming_tweaks: bool,
     pub sysctl_network_performance: bool,
     pub install_hhd: bool,
+    /// Download the Steam client during install rather than on first boot.
+    pub steam_prefetch_client: bool,
     pub install_decky_loader: bool,
     pub install_evdevhook2: bool,
     /// Seeded from the host's DMI, so a Legion Go family machine arrives at
@@ -221,6 +233,27 @@ pub struct PackagesState {
     pub gpu_nvidia: bool,
     pub gpu_amd: bool,
     pub gpu_intel: bool,
+    /// Extra repository packages, as typed: free text, split by
+    /// [`split_package_list`].
+    ///
+    /// Held as a string rather than a `Vec<String>` because a text box is the
+    /// only sane widget for "type the packages you want", and round-tripping a
+    /// vector through one destroys whatever is halfway typed.
+    pub extra_pacman: String,
+    /// Extra AUR packages, same format. Needs `install_yay`.
+    pub extra_aur: String,
+}
+
+/// Split a free-text package list into names.
+///
+/// Takes whichever separator was reached for -- spaces, newlines, commas --
+/// because a list pasted out of a wiki uses all three.
+pub fn split_package_list(raw: &str) -> Vec<String> {
+    raw.split([' ', '\t', '\n', '\r', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 impl Default for PackagesState {
@@ -233,6 +266,10 @@ impl Default for PackagesState {
             desktop_env: DesktopEnvironment::None,
             display_manager: DisplayManager::default(),
             install_yay: false,
+            install_warp_terminal: false,
+            install_tkg_kernel: false,
+            tkg_scheduler: TkgScheduler::default(),
+            install_zen_browser: false,
             install_wine: false,
             install_gaming: false,
             install_session_switching: false,
@@ -242,6 +279,7 @@ impl Default for PackagesState {
             sysctl_gaming_tweaks: false,
             sysctl_network_performance: false,
             install_hhd: false,
+            steam_prefetch_client: false,
             install_decky_loader: false,
             install_evdevhook2: false,
             handheld_controller_quirks: crate::configure::handheld_quirks::detect_host_model()
@@ -249,6 +287,8 @@ impl Default for PackagesState {
             gpu_nvidia: false,
             gpu_amd: false,
             gpu_intel: false,
+            extra_pacman: String::new(),
+            extra_aur: String::new(),
         }
     }
 }
@@ -327,5 +367,43 @@ impl Default for InstallState {
             #[cfg(feature = "gui")]
             active_prompt: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The GUI used to hand the installer an empty extras list no matter what,
+    /// so this is the whole path from "user typed some package names" to
+    /// "pacman is asked for them". Separators are whatever came out of a wiki
+    /// page or a copy-paste.
+    #[test]
+    fn a_typed_package_list_is_split_on_any_separator() {
+        assert_eq!(
+            split_package_list("neovim htop,ripgrep\n  fd\t"),
+            vec!["neovim", "htop", "ripgrep", "fd"]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_blank_list_yields_nothing() {
+        assert!(split_package_list("").is_empty());
+        assert!(split_package_list("  ,\n , \t ").is_empty());
+    }
+
+    /// Hibernation is opt-in. A fresh GUI session must not turn it on for
+    /// someone, the way the defaults for every other optional feature behave.
+    #[test]
+    fn hibernation_starts_off() {
+        assert!(!SystemState::default().hibernation);
+    }
+
+    /// The default swap type has to be one hibernation is actually offered
+    /// with, or the Power section would be permanently disabled out of the box
+    /// and the toggle would look broken rather than unavailable.
+    #[test]
+    fn the_default_swap_type_can_carry_a_hibernation_image() {
+        assert_ne!(DiskState::default().swap_type, SwapType::ZramOnly);
     }
 }

@@ -101,6 +101,117 @@ fn generate_hooks(
     Ok(hooks)
 }
 
+/// The hibernation resume attempt, shared verbatim by `mountcrypt` and
+/// `verity-ab`.
+///
+/// The stock mkinitcpio `resume` hook is not usable on either of these
+/// layouts. `construct_hooks` positions `resume` relative to the `filesystems`
+/// hook, and both of these branches replace `filesystems` with a custom
+/// `mount_handler` -- so the stock hook would land *after* the root was already
+/// mounted, which is the one place a resume must never happen: restoring an
+/// image whose kernel has the same filesystem mounted read-write corrupts it.
+/// Running the attempt from these hooks' own `run_hook` puts it exactly where
+/// it belongs, after `encrypt`/`crypttab-unlock`/`lvm2` have made the swap
+/// device reachable and before anything is mounted.
+///
+/// Emitted unconditionally and inert without `resume=` on the cmdline, so
+/// enabling hibernation later needs no initramfs surgery.
+///
+/// `$tag` only labels the log lines with the owning hook.
+fn resume_shell_fn(tag: &str) -> String {
+    format!(
+        r#"# ---- hibernation resume ---------------------------------------------------
+# Read a key from /proc/cmdline; last occurrence wins, matching the kernel.
+deploytix_cmdline_value() {{
+    local key="$1" arg out=""
+    for arg in $(cat /proc/cmdline 2>/dev/null); do
+        case "$arg" in
+            "$key"=*) out="${{arg#$key=}}" ;;
+        esac
+    done
+    echo "$out"
+}}
+
+# Resolve a resume= spec (UUID=/LABEL=/PARTUUID=/path) to a block device.
+deploytix_resume_device() {{
+    local spec="$1" dev=""
+    # resolve_device comes from mkinitcpio's init_functions and already knows
+    # every spec form; blkid is the fallback for an init that lacks it.
+    if command -v resolve_device >/dev/null 2>&1; then
+        dev=$(resolve_device "$spec" 2>/dev/null)
+    fi
+    if [ -z "$dev" ]; then
+        case "$spec" in
+            UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*)
+                dev=$(blkid -t "$spec" -o device 2>/dev/null | head -n1) ;;
+            *)  dev="$spec" ;;
+        esac
+    fi
+    [ -b "$dev" ] || return 1
+    echo "$dev"
+}}
+
+# Attempt to resume from a hibernation image. Returns (and boots cold) whenever
+# anything is missing -- a machine that will not resume must still boot.
+deploytix_try_resume() {{
+    local spec offset dev real majmin tries
+
+    spec=$(deploytix_cmdline_value resume)
+    [ -n "$spec" ] || return 0
+
+    if [ ! -e /sys/power/resume ]; then
+        echo "[{tag}] resume= given but this kernel has no hibernation support" >&2
+        return 0
+    fi
+
+    offset=$(deploytix_cmdline_value resume_offset)
+
+    # The swap device may still be settling: the LUKS container or LV it sits
+    # behind was opened only moments ago by an earlier hook.
+    tries=10
+    while [ "$tries" -gt 0 ]; do
+        dev=$(deploytix_resume_device "$spec") && break
+        dev=""
+        tries=$((tries - 1))
+        sleep 1
+    done
+    if [ -z "$dev" ]; then
+        echo "[{tag}] resume device $spec not found; continuing with a cold boot" >&2
+        return 0
+    fi
+
+    real=$(readlink -f "$dev" 2>/dev/null)
+    [ -n "$real" ] || real="$dev"
+    # /sys/class/block/<name>/dev is major:minor in decimal, which is what
+    # /sys/power/resume wants -- no hex conversion in ash.
+    majmin=$(cat "/sys/class/block/${{real##*/}}/dev" 2>/dev/null)
+    if [ -z "$majmin" ]; then
+        echo "[{tag}] cannot read major:minor for $real; skipping resume" >&2
+        return 0
+    fi
+
+    # resume_offset first: writing to /sys/power/resume is what triggers the
+    # attempt, and the kernel reads the offset at that moment. A swap partition
+    # has no offset; a swap file cannot resume without one.
+    if [ -n "$offset" ]; then
+        if ! echo "$offset" > /sys/power/resume_offset 2>/dev/null; then
+            echo "[{tag}] could not set resume_offset=$offset; skipping resume" >&2
+            return 0
+        fi
+    fi
+
+    echo "[{tag}] Attempting resume from $real ($majmin)${{offset:+ offset $offset}}"
+    # On success this never returns: the hibernated kernel takes the machine
+    # back. Reaching the next line means there was no image to restore.
+    echo "$majmin" > /sys/power/resume 2>/dev/null || true
+    echo "[{tag}] No hibernation image found; continuing with a cold boot"
+}}
+
+"#,
+        tag = tag,
+    )
+}
+
 /// Generate the crypttab-unlock hook (embedded from ref/hooks_crypttab-unlock)
 fn generate_crypttab_unlock_hook() -> GeneratedHook {
     let hook_content = r#"#!/usr/bin/ash
@@ -414,10 +525,10 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     let mut volume_mounts = String::new();
     let use_subvolumes = layout.uses_subvolumes();
 
-    // Immutable root: `/` and `/usr` are mounted read-only, /etc lives on a
-    // writable @etc subvolume, and the live boot is layered with the same
-    // ephemeral overlay the snapshot boots use (so /tmp, /root, etc. stay
-    // writable over the read-only root).
+    // Immutable root: `/` and `/usr` are mounted read-only; /etc lives on a
+    // writable @etc subvolume. Writable paths under `/` (`/tmp` as disk-backed
+    // @tmp, plus /root|/opt|/srv binds from @var) come from fstab — not from
+    // an overlay on the live or set root (see docs/TMP_DISK_BACKED.md).
     let immutable = config.packages.immutable_root;
     // `,ro` suffix for read-only mounts under the immutable model.
     let ro_suffix = if immutable { ",ro" } else { "" };
@@ -542,10 +653,10 @@ fn generate_mountcrypt_hook(config: &DeploymentConfig, layout: &ComputedLayout) 
     #
     # The upperdir is a dedicated writable @overlay subvolume on the root
     # btrfs: disk-backed (tens of GB free, not the ~50%-of-RAM tmpfs ceiling)
-    # yet still ephemeral because upper/work are wiped on every boot. Temp and
-    # build-heavy work (/tmp, /etc, /root all live in the overlay upper) then
-    # has real disk to spend instead of competing for RAM. Falls back to a
-    # tmpfs upper when @overlay is absent (installs predating this subvolume).
+    # yet still ephemeral because upper/work are wiped on every boot. This is
+    # only for *snapper* RO snapshot boots — immutable live/@deploytix-sets
+    # roots skip the overlay and use fstab @tmp + @var binds for writable
+    # paths. Falls back to a tmpfs upper when @overlay is absent.
     if {overlay_guard}; then
         if touch "$new_root/.deploytix-rw-probe" 2>/dev/null; then
             rm -f "$new_root/.deploytix-rw-probe"
@@ -808,9 +919,12 @@ mount_volume() {{
     fi
 }}
 
-{resolve_fn}# run_hook is called during the hooks phase
+{resolve_fn}{resume_fn}# run_hook is called during the hooks phase
 # We set the mount_handler variable to point to our custom mount function
 run_hook() {{
+    # Resume before anything is mounted: restoring an image whose kernel has
+    # these filesystems mounted rw would corrupt them. No-op without resume=.
+    deploytix_try_resume
     echo "[mountcrypt] Setting mount_handler to mountcrypt_handler"
     # Override the default mount handler with our custom one
     mount_handler=mountcrypt_handler
@@ -887,6 +1001,7 @@ mountcrypt_handler() {{
         volume_mounts = volume_mounts,
         boot_mount = boot_mount_section,
         resolve_fn = resolve_fn,
+        resume_fn = resume_shell_fn("mountcrypt"),
     );
 
     let help_volumes: Vec<String> = luks_data_parts
@@ -906,10 +1021,14 @@ mountcrypt_handler() {{
     let install_content = format!(
         r#"#!/bin/bash
 build() {{
-    # blkid is needed for EFI partition detection fallback
+    # blkid is needed for EFI partition detection fallback, and to resolve a
+    # resume= spec when init_functions' resolve_device is unavailable
     add_binary 'blkid'
     # mountpoint is used to check if root is already mounted
     add_binary 'mountpoint'
+    # readlink resolves /dev/mapper/* to the dm-N node the resume attempt
+    # needs a major:minor for
+    add_binary 'readlink'
     add_runscript
 }}
 
@@ -961,7 +1080,7 @@ wait_for_block_device() {{
     [ -b "$device" ]
 }}
 
-# Read a key from /proc/cmdline (last occurrence wins).
+{resume_fn}# Read a key from /proc/cmdline (last occurrence wins).
 cmdline_value() {{
     local key="$1" arg out=""
     for arg in $(cat /proc/cmdline 2>/dev/null); do
@@ -973,6 +1092,9 @@ cmdline_value() {{
 }}
 
 run_hook() {{
+    # Resume before anything is mounted: restoring an image whose kernel has
+    # these filesystems mounted rw would corrupt them. No-op without resume=.
+    deploytix_try_resume
     mount_handler=deploytix_verity_handler
 }}
 
@@ -1053,6 +1175,7 @@ deploytix_verity_handler() {{
 "#,
         vg = vg,
         verity_name = verity_name,
+        resume_fn = resume_shell_fn("verity-ab"),
         root_a = ab::ROOT_A,
         root_b = ab::ROOT_B,
         hash_a = ab::HASH_A,
@@ -1065,6 +1188,9 @@ build() {
     add_binary 'veritysetup'
     add_binary 'blkid'
     add_binary 'mountpoint'
+    # readlink resolves an LV/mapper path to the dm-N node the resume attempt
+    # needs a major:minor for
+    add_binary 'readlink'
     add_module 'dm-verity'
     add_module 'overlay'
     add_runscript
@@ -1087,6 +1213,111 @@ help() {
 mod tests {
     use super::*;
     use crate::config::DeploymentConfig;
+
+    fn assert_valid_shell(script: &str) {
+        if let Ok(status) = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(script)
+            .status()
+        {
+            assert!(status.success(), "not valid shell:\n{script}");
+        }
+    }
+
+    // ── hibernation resume ───────────────────────────────────────────────────
+
+    /// The hooks are ash scripts that only ever run in an initramfs, where a
+    /// syntax error is an unbootable machine with no way to read the message.
+    #[test]
+    fn the_resume_snippet_is_valid_shell() {
+        assert_valid_shell(&resume_shell_fn("mountcrypt"));
+        assert_valid_shell(&resume_shell_fn("verity-ab"));
+    }
+
+    /// Ordering is the whole point: the image must be restored before any
+    /// filesystem the hibernated kernel had mounted is mounted again.
+    #[test]
+    fn both_custom_handlers_resume_before_they_mount() {
+        let mc = generate_mountcrypt_hook(&config_encrypted(true), &standard_encrypted_layout());
+        let va = generate_verity_ab_hook(&config_lvm_ab(true));
+
+        for (name, hook, handler) in [
+            ("mountcrypt", &mc, "mount_handler=mountcrypt_handler"),
+            ("verity-ab", &va, "mount_handler=deploytix_verity_handler"),
+        ] {
+            let c = &hook.hook_content;
+            assert!(
+                c.contains("deploytix_try_resume"),
+                "{name} must attempt the resume"
+            );
+            let resume = c
+                .find("    deploytix_try_resume")
+                .unwrap_or_else(|| panic!("{name} never calls deploytix_try_resume"));
+            let mount = c
+                .find(handler)
+                .unwrap_or_else(|| panic!("{name} never sets its mount handler"));
+            assert!(
+                resume < mount,
+                "{name} must resume before handing off to the mount handler"
+            );
+            // The definition has to precede the call in a sourced script.
+            assert!(
+                c.find("deploytix_try_resume() {").unwrap() < resume,
+                "{name} calls deploytix_try_resume before defining it"
+            );
+            assert_valid_shell(c);
+        }
+    }
+
+    /// Without readlink the mapper/LV path never resolves to the dm-N node the
+    /// major:minor is read from, and every resume silently cold-boots.
+    #[test]
+    fn both_hooks_ship_what_the_resume_needs() {
+        let mc = generate_mountcrypt_hook(&config_encrypted(true), &standard_encrypted_layout());
+        let va = generate_verity_ab_hook(&config_lvm_ab(true));
+        for (name, hook) in [("mountcrypt", &mc), ("verity-ab", &va)] {
+            assert!(
+                hook.install_content.contains("add_binary 'readlink'"),
+                "{name} must add readlink"
+            );
+            assert!(
+                hook.install_content.contains("add_binary 'blkid'"),
+                "{name} must add blkid for the resume= fallback resolver"
+            );
+        }
+    }
+
+    /// A resume attempt that cannot find its device must fall through to a cold
+    /// boot rather than leave the machine wedged in the initramfs.
+    #[test]
+    fn the_resume_snippet_bails_out_rather_than_failing() {
+        let snippet = resume_shell_fn("mountcrypt");
+        assert!(
+            snippet.contains("[ -n \"$spec\" ] || return 0"),
+            "no resume= must be an immediate, silent no-op"
+        );
+        assert!(
+            snippet.contains("continuing with a cold boot"),
+            "a missing device must say so and carry on"
+        );
+        assert!(
+            !snippet.contains("set -e"),
+            "set -e in a sourced initramfs hook would abort init"
+        );
+    }
+
+    /// resume_offset has to be in place before the write that triggers the
+    /// attempt; the kernel reads it at that moment and not before.
+    #[test]
+    fn the_offset_is_set_before_the_resume_is_triggered() {
+        let snippet = resume_shell_fn("verity-ab");
+        let offset = snippet
+            .find("> /sys/power/resume_offset")
+            .expect("sets offset");
+        let trigger = snippet.find("> /sys/power/resume 2>").expect("triggers");
+        assert!(offset < trigger, "resume_offset must be written first");
+    }
 
     /// Helper: build a config with the given encryption flag
     fn config_encrypted(encryption: bool) -> DeploymentConfig {

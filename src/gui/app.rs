@@ -101,7 +101,7 @@ impl DeploytixGui {
                 locale: self.system.locale.clone(),
                 keymap: self.system.keymap.clone(),
                 hostname: self.system.hostname.clone(),
-                hibernation: false,
+                hibernation: self.system.hibernation,
                 secureboot: self.system.secureboot,
                 secureboot_method: self.system.secureboot_method.clone(),
                 secureboot_keys_path: None,
@@ -134,6 +134,10 @@ impl DeploytixGui {
             },
             packages: PackagesConfig {
                 install_yay: self.packages.install_yay,
+                install_warp_terminal: self.packages.install_warp_terminal,
+                install_tkg_kernel: self.packages.install_tkg_kernel,
+                tkg_scheduler: self.packages.tkg_scheduler,
+                install_zen_browser: self.packages.install_zen_browser,
                 install_wine: self.packages.install_wine,
                 install_gaming: self.packages.install_gaming,
                 install_session_switching: self.packages.install_session_switching,
@@ -143,6 +147,7 @@ impl DeploytixGui {
                 sysctl_gaming_tweaks: self.packages.sysctl_gaming_tweaks,
                 sysctl_network_performance: self.packages.sysctl_network_performance,
                 install_hhd: self.packages.install_hhd,
+                steam_prefetch_client: self.packages.steam_prefetch_client,
                 install_decky_loader: self.packages.install_decky_loader,
                 install_evdevhook2: self.packages.install_evdevhook2,
                 handheld_controller_quirks: Some(self.packages.handheld_controller_quirks),
@@ -159,7 +164,14 @@ impl DeploytixGui {
                     }
                     drivers
                 },
-                extra_packages: crate::config::ExtraPackagesConfig::default(),
+                // The GUI used to hardcode `default()` here, so every install
+                // launched from it requested zero extra packages no matter what
+                // the user wanted, and saving a config from the GUI wiped any
+                // extras that had been written into the TOML by hand.
+                extra_packages: crate::config::ExtraPackagesConfig {
+                    pacman: super::state::split_package_list(&self.packages.extra_pacman),
+                    aur: super::state::split_package_list(&self.packages.extra_aur),
+                },
             },
         }
     }
@@ -540,6 +552,12 @@ impl DeploytixGui {
 
 impl eframe::App for DeploytixGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Rescale to whatever display we ended up on. Done per frame rather
+        // than once at startup: the window is not fullscreen yet when `new`
+        // runs, so the screen size is not known there, and a handheld can be
+        // docked to a different panel while the installer is open.
+        theme::fit_to_screen(ctx, theme::WIZARD_REFERENCE);
+
         if self.disk.refreshing {
             self.refresh_disks();
         }
