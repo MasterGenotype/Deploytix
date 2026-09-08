@@ -13,8 +13,10 @@ style of openSUSE MicroOS / Aeon, adapted to Artix + pacman. When enabled:
   set, upgrades inside it, and activates it on the next reboot. Direct
   `pacman -Syu` on the live read-only system is refused.
 - Writable state — `/var`, `/home` — is persistent and shared across sets (not
-  rolled back). `/tmp` is a tmpfs; `/root`, `/opt`, `/srv` are bind mounts out of
-  `@var`, so they are writable and persistent like the rest of `/var`.
+  rolled back). `/tmp` is a **disk-backed** btrfs `@tmp` subvolume on the root
+  filesystem (boot-wiped via tmpfiles, not a half-RAM tmpfs); `/root`, `/opt`,
+  `/srv` are bind mounts out of `@var`, so they are writable and persistent like
+  the rest of `/var`. See `docs/TMP_DISK_BACKED.md`.
 
 Enable it at install time with the wizard prompt *"Enable transactional immutable
 root?"* or `immutable_root = true` in the config's `[packages]` (requires
@@ -35,6 +37,7 @@ single-partition layouts):
 | `@etc` | `/etc` | read-write | ✅ |
 | `@var`, `@log` | `/var`, `/var/log` | read-write | ❌ (persistent) |
 | `@home` | `/home` | read-write | ❌ (persistent) |
+| `@tmp` | `/tmp` | read-write | ❌ (disk scratch; boot-wiped) |
 | `@snapshots` | `/.snapshots` | snapper | — |
 | `@overlay` | snapshot-boot scratch | ephemeral | — |
 | `@deploytix-sets/<id>/{root,usr,etc}` | — | snapshot sets | — |
@@ -78,6 +81,26 @@ The live system's `@` carries `usr=@usr` / `etc=@etc`.
 Because the pointer + marker drive everything, switching systems is just a
 pointer move + a grub regeneration.
 
+> **`/`, `/usr` and `/etc` are absent from `/etc/fstab` — deliberately.** The
+> initramfs has already mounted all three by the time fstab is processed, and an
+> fstab entry can only name the install-time base (`@`, `@usr`, `@etc`). Every
+> snapshot set inherits a copy of fstab on its `@etc`, so listing them meant
+> that booting a set let `mount -a` mount the base subvolumes *on top of* the
+> ones the initramfs had mounted from the pairing marker. The system booted
+> fine — the base `@usr` is a complete `/usr` — but it was not the updated one,
+> so `deploytix update`'s packages appeared to vanish even though pacman had
+> installed them. The LVM A/B backend has always omitted them for the same
+> reason. `deploytix update` repairs a legacy fstab in place (live and in the
+> staged set) via `immutable::etc::sanitize_fstab`; **rolling back to a set
+> created before that repair reintroduces the shadowing**, since that set
+> carries its own pre-fix `@etc`. Verify a booted set with:
+>
+> ```
+> findmnt -no TARGET,SOURCE,FSROOT / /usr /etc
+> ```
+>
+> `/usr` must report `FSROOT=/@deploytix-sets/<id>/usr`, not `/@usr`.
+
 > **No overlay on the immutable root.** The `mountcrypt` hook layers an
 > ephemeral `@overlay` over `/` only when the booted subvolume is a *snapper*
 > snapshot — those are read-only by design and cannot be booted otherwise. The
@@ -91,10 +114,12 @@ pointer move + a grub regeneration.
 > and `grub-mkconfig` work unaided.
 >
 > The writable paths the overlay used to provide are given directly instead: a
-> tmpfs `/tmp`, and `/root`, `/opt`, `/srv` as bind mounts of `/var/roothome`,
-> `/var/opt`, `/var/srv` (bind mounts rather than symlinks — the `filesystem`
-> package owns those three as directories and a symlink would conflict on
-> update). See `immutable_writable_paths()` in `src/install/fstab.rs`.
+> disk-backed btrfs `@tmp` at `/tmp` (not a half-RAM tmpfs — large builds need
+> root-volume free space, not RAM), and `/root`, `/opt`, `/srv` as bind mounts of
+> `/var/roothome`, `/var/opt`, `/var/srv` (bind mounts rather than symlinks — the
+> `filesystem` package owns those three as directories and a symlink would
+> conflict on update). See `immutable_writable_paths()` in `src/install/fstab.rs`
+> and `docs/TMP_DISK_BACKED.md`.
 
 > **Regenerating grub for a target set.** `update` and `rollback` still mount
 > the target `{root,usr,etc}` set at a scratch chroot and run the regeneration
@@ -118,6 +143,7 @@ deploytix update vim git         # sync/upgrade and also install these
 deploytix update --keep 5        # retain 5 previous sets when pruning (default 3)
 deploytix update --reboot        # reboot automatically once staged
 deploytix -n update              # dry-run: print the plan, change nothing
+deploytix remove <pkg>...        # pacman -Rs into a new set (see below)
 ```
 
 What it does:
@@ -164,6 +190,71 @@ grub-btrfs menu remains as a manual recovery path.
 
 ---
 
+## Removing packages
+
+`deploytix remove <pkg>...` is the same transaction as an update with a
+different pacman verb: snapshot the running trio, run `pacman -Rs` inside the
+set, regenerate the initramfs, activate on reboot. `deploytix rollback` undoes a
+removal the same way it undoes an update.
+
+`-s` (`--recursive`) is always on. Without it the system would collect orphaned
+dependencies that cannot be cleaned up interactively, because `/usr` is
+read-only. `--cascade` adds `-c`, which also removes anything depending on the
+package. `--purge` adds `-n`, which deletes config files instead of leaving
+`.pacsave` copies — worth knowing about because `/etc` is the snapshotted
+`@etc`. `-d`/`--nodeps` is deliberately unreachable.
+
+Before removing anything, `pacman -Rs --print --print-format '%n'` works out
+what would actually go. Every package in that resolved list is checked, not just
+the names given on the command line, because `-Rs` pulls in orphaned
+dependencies too.
+
+### What removal refuses, and why
+
+`/boot` and `/var` are shared between all snapshot sets and are not themselves
+snapshotted. Adding files to them is harmless. Deleting files from them is not:
+it happens for every set at once, and no snapshot can undo it.
+
+Three of the four rules therefore look at what a package owns rather than what
+it is called:
+
+| Refused when the package owns | Because |
+|---|---|
+| `usr/lib/modules/*/vmlinuz` | It is a kernel. `60-mkinitcpio-remove.hook` watches exactly this path with `When = PreTransaction`, and deletes `/boot/initramfs-linux.img` and the kernel image. That is the shared `/boot`, it happens before pacman deletes any file, and it breaks every rollback target. |
+| anything under `/boot/` | Microcode, `memtest86+`, bootloader payloads. Shared, and not recoverable. |
+| `usr/bin/cryptsetup` or `usr/lib/initcpio/*`, on encrypted roots | `90-mkinitcpio-install.hook` fires when these are removed and regenerates an initramfs that can no longer unlock the root, into the shared `/boot`. |
+
+A kernel is identified by that file rather than by name because the dangerous
+packages share no naming convention. `linux`, `linux-lts`, `linux-zen` and
+anything built locally are all equally fatal, and all own the file the hook
+watches for.
+
+The fourth rule is a short list of names — `pacman`, `mkinitcpio`, `grub`,
+`btrfs-progs` — because nothing in their file lists shows that deploytix's
+update mechanism depends on them. Removing any one leaves a system with a
+read-only `/usr` that can no longer repair itself.
+
+### The pacman database caveat
+
+The pacman database lives on the shared `/var`. A removal updates it for every
+set at once, while deleting files from the new set only. Roll a removal back and
+the files come back while the database still says the package is gone.
+
+Updates already have the same problem in the other direction: roll one back and
+the database reports versions the files no longer match. It comes from `/var`
+being shared rather than from either command.
+
+Removal does guarantee one thing here. The database is copied aside with
+`cp -a --reflink=auto` before the transaction — instant on btrfs, and using no
+extra space until one copy changes — and restored if pacman or the following
+`mkinitcpio -P` fails. Without that, a failed removal would leave the database
+saying a package is gone while the running system still has every file.
+
+### LVM A/B
+
+Not implemented. `deploytix remove` refuses on an A/B system rather than running
+the btrfs path against a root that is not the one that boots.
+
 ## Direct-pacman prevention
 
 Enforcement is the **read-only `/usr` mount** itself: a direct `pacman -Syu` on
@@ -192,10 +283,10 @@ bypasses it.
   recently installed kernel. The `mountcrypt` hook is version-independent, so
   this is safe; only kernel *contents* are not rolled back.
 - **`/` is read-only, and writes to it fail.** There is no overlay catching
-  stray writes to paths outside `/tmp`, `/etc`, `/var`, `/home`, `/root`,
-  `/opt`, `/srv`. `/mnt` and `/media` in particular are read-only, so a runtime
-  `mkdir /mnt/usb` will not work — mount under `/run/media` (what udisks and
-  desktop automounters already use) instead.
+  stray writes to paths outside `/tmp` (disk-backed `@tmp`), `/etc`, `/var`,
+  `/home`, `/root`, `/opt`, `/srv`. `/mnt` and `/media` in particular are
+  read-only, so a runtime `mkdir /mnt/usb` will not work — mount under
+  `/run/media` (what udisks and desktop automounters already use) instead.
 - **`/etc` is writable at runtime** (a subvolume, not an overlay). Runtime edits
   mutate `@etc` directly and are captured in the next set; a rollback restores
   the paired `@etc`. This is per-set, not per-boot isolation.
@@ -220,8 +311,10 @@ bypasses it.
 | `deploytix update` | `src/immutable/update.rs` |
 | `deploytix rollback` | `src/immutable/rollback.rs` |
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
-| Read-only fstab + `@etc` entry | `src/install/fstab.rs` |
+| fstab generation (omits the initramfs-owned `/`, `/usr`, `/etc`) | `src/install/fstab.rs` |
+| Legacy-fstab repair (`sanitize_fstab`) | `src/immutable/etc.rs` |
 | Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |
 | Writable-path bind sources (`/var/roothome`, `/var/opt`, `/var/srv`) | `src/immutable/mod.rs` |
+| Disk-backed `/tmp` (`@tmp` + tmpfiles drop-in) | `src/immutable/tmp.rs`, `docs/TMP_DISK_BACKED.md` |
 | grub-btrfs config, ESP snapshot list, install-time regeneration | `src/configure/grub_btrfs.rs` |
 | CLI subcommands | `src/main.rs` |
