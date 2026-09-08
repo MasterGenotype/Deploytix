@@ -192,15 +192,59 @@ a mouse.
    Validation now requires a NetworkManager backend when session switching is
    enabled; the wizard and GUI coerce the backend automatically.
 
-**Remaining first-boot dependency**: Steam's first-run client bootstrap downloads
-a large update *before* the OOBE (and its network page) exists, so the device needs
-connectivity from the very first boot. For Wi-Fi-only devices, the deployment
-config now accepts `network.wifi_ssid` / `network.wifi_password`, which deploytix
-pre-seeds as a NetworkManager system connection (or an iwd network file for
-non-gaming iwd installs) so the system auto-connects immediately on boot.
+**First-boot client bootstrap** (previously an unhandled dependency): Steam's
+first-run client download happens *before* the OOBE (and its network page)
+exists, so the device needs connectivity from the very first boot. For Wi-Fi-only
+devices the deployment config accepts `network.wifi_ssid` /
+`network.wifi_password`, which deploytix pre-seeds as a NetworkManager system
+connection (or an iwd network file for non-gaming iwd installs) so the system
+auto-connects immediately on boot.
+
+Connectivity alone was not enough, because nothing ever *performed* that
+download. `seed_steam_bootstrap` unpacks only `bootstraplinux_ubuntu12_32.tar.xz`
+— steam.sh plus the 32-bit launcher. The gamepad UI itself is
+`ubuntu12_64/steamwebhelper` (which renders it) and `steamui.so` (which
+implements it), and both arrive only with the client Steam fetches on its first
+real run. So `-gamepadui` had nothing to draw, Steam exited within seconds, the
+short-session tracker collected its five strikes, and the first boot of every new
+install landed on the desktop with the client still missing. The fix people found
+by hand — `pkill steam`, then a plain `steam` in a terminal — is now the shipped
+path:
+
+- `steam-bootstrap-check` answers "is the client downloaded?", separately from
+  `steam-login-check`'s "is an account remembered?". Both must hold before
+  gamemode is worth entering.
+- `steam-gamescope-session` runs a **plain windowed `steam`** inside the already
+  running compositor when the client is missing, waits (bounded: 45 s for a
+  default route, 15 min for the download), stops it, and only then launches
+  `-gamepadui -steamos3 -steampal -steamdeck`. The download is not scored as a
+  gamemode session, and a failed one routes to the desktop rather than looping.
+- `steam-stop` reaps the real process tree (`steam.sh` → `ubuntu12_32/steam` →
+  `steamwebhelper`, plus `reaper SteamLaunch`) and removes `~/.steam/steam.pipe`
+  and `steam.pid`. Steam is single-instance and the wrapper hands new
+  invocations off through that pipe, so a client that died badly makes every
+  later `steam` exit silently — the reason a manual `pkill` was needed first.
+  The greeter's teardown table mirrors its patterns but never invokes it (see
+  the `cleanup_stale_sessions` warning about running `steam` from a seat-less
+  greeter).
+- `steam-first-login` handles both halves on the desktop fallback, and no longer
+  returns to gamemode on a remembered account whose client was never downloaded.
+- `short_session_recover` re-extracts the bootstrap tarball only when `steam.sh`
+  is genuinely missing. Untarring it over a client that is merely mid-download
+  was turning a slow first boot into a corrupted one.
+
+**Optional: `packages.steam_prefetch_client`.** Downloads the client during
+installation (`xvfb-run steam +quit`, run as the target user in the chroot, with
+`xorg-server-xvfb` pulled in automatically) so the deployed system boots straight
+into Game Mode. Costs a few hundred MB and several minutes of install time.
+Entirely best-effort — no network, no Xvfb, or a timeout just logs, and the
+first-boot path above still covers it.
 
 **Files changed**:
-- `steam-gamescope-session.sh` -- launch flags
+- `steam-gamescope-session.sh` -- launch flags, client bootstrap phase
+- `steam-bootstrap-check.sh`, `steam-stop.sh` -- new helpers
+- `steam-first-login.sh` -- client-aware desktop fallback
+- `packages.rs` -- optional install-time client prefetch
 - `steamos-update.sh`, `jupiter-biosupdate.sh` -- new stubs
 - `50-deploytix-networkmanager.rules` -- new polkit rule template
 - `session_switching.rs` -- deploys the above
@@ -260,6 +304,131 @@ sleeps before the ready-fd read, cold-boot cleanup fast path) and `packages.rs`
 
 ---
 
+### 7. "Return to Desktop" Stopped Working After a Reinstall
+
+**Problem**: On a machine reinstalled in September 2026, selecting "Return to
+Desktop" in Steam's power menu did nothing, and later hung without ever
+reaching a desktop. The same feature had worked for about four months before
+that on the same hardware.
+
+**Root cause**: Not one bug. The whole switch path was rewritten over three
+days at the end of August 2026 — `ea0be34`, `ce81896` and `dc7ef7b` — and
+reinstalling put all of it on the machine at once. The version that had worked
+was the one in the tree from 2026-05-04 to 2026-08-29.
+
+Two things made this hard to see:
+
+- `desktop-session` was installed the whole time, but not through
+  `DEPLOY_FILES`. It has its own write in `setup_session_switching`, so
+  searching the manifest for it finds nothing.
+- The change was to the file's *contents*, not whether it was there.
+  `ea0be34` replaced the static script with a generated template that added
+  `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP` and `XDG_SESSION_TYPE` exports
+  on the startup path, a fallback-candidate loop, and a `printf | while read`
+  teardown whose SIGKILL pass also hit pipewire and wireplumber.
+
+**Solution**: Revert `src/resources/session_switching/` to `ea0be34^`
+(`0f9689c`, 2026-08-28) — the tree as it stood through the four months it
+worked. The scripts are byte-identical to that commit apart from three added
+things, all of which only add:
+
+1. **An invocation log** in `session-select`, written before the `case` that
+   can reject a name. Steam discards the exit code, so a rejected session name
+   is otherwise invisible. The log is at
+   `~/.local/state/deploytix-session-select.log`. Same treatment the
+   `steamos-update` and `jupiter-biosupdate` stubs get.
+
+2. **A console clear** at the end of `cleanup_stale_sessions`. The desktop's
+   processes (plasma, kwin, pipewire, Xwayland) inherit stdio from greetd's
+   session, which is VT1, so their messages land on screen when the greeter
+   kills them. The greeter's own output already goes to a log; theirs cannot
+   be redirected from outside, so it clears what they leave behind.
+
+3. **A network wait** in `steam-first-login`. It runs from XDG autostart, which
+   fires before NetworkManager has finished associating, so Steam's first act
+   was a client update with no route. It now waits up to 45 seconds for a
+   default route, then starts Steam either way.
+
+**Later, separately**: `desktop-session` went back to being generated per
+desktop environment (the `ea0be34` approach), because a KDE install and a GNOME
+install genuinely need different launch commands and teardown lists. What
+changed is that the generator is now the only thing that writes the file, and
+two tests enforce it — one checks the installed file equals the rendering for
+the configured desktop and is not the template, the other fails if a
+destination ever appears in both the static and generated manifests.
+
+**Files changed**:
+- `src/resources/session_switching/` — reverted to `ea0be34^`, plus the three
+  additions above
+- `session_switching.rs` — `GeneratedFile` / `GENERATED_FILES` manifest beside
+  `DEPLOY_FILES`, so the "is everything referenced also installed?" test reads
+  both lists instead of a hand-maintained one
+
+**What was wrong with the first attempt at this**: the original diagnosis said
+`session-select` rejecting unknown session names was the cause, and normalising
+them was the fix. It was not. The same name matching ran for the whole four
+months it worked. The rejection is a real latent bug, but it is not this one,
+and the normalisation was dropped.
+
+---
+
+### 8. "Switch to Desktop" Raced greetd's Restart Against Gamescope's Teardown
+
+**Problem**: Even after problem 7's revert, and after fixing `steam-gamescope-session`
+to wait on gamescope as well as Steam (so a killed compositor always ends the
+session -- see the `wait -n` change below), "Switch to Desktop" from inside
+Steam remained unreliable: intermittently a black screen with no gamescope,
+no desktop and no greeter, matching problem 7's original symptom exactly.
+
+**Root cause**: Two teardown mechanisms were layered on top of each other for
+this one direction. `session-select` unconditionally restarted the greetd
+*daemon* (`sudo setsid deploytix-restart-greetd &`, detached so it survives
+the very teardown it causes), then, only for the desktop target, slept 4
+seconds and fell back to killing gamescope directly if the session was
+somehow still alive.
+
+Restarting greetd this way does not wait for the *old* session to actually
+finish exiting before the *new* greetd instance starts trying to spawn the
+next one. That is invisible for desktop → gamescope (a desktop compositor
+tears down fast enough that the race is essentially never lost, which is why
+`return-to-gamemode` has used this mechanism alone, reliably, since the
+original session-switching implementation). It is not invisible for
+gamescope → desktop: gamescope holds the DRM master *and* two Xwayland
+servers, so it can still be mid-teardown when the freshly restarted greetd
+spawns the next greeter and that greeter tries to start a desktop compositor
+with nowhere to acquire DRM. The 4-second fallback papered over the fast
+path's failure often enough to look like a delay, but when the timing lined
+up worse it produced exactly problem 7's symptom again, from a different
+mechanism than the one problem 7 fixed.
+
+**Solution**: Stop restarting the greetd daemon for the gamescope → desktop
+direction entirely. `session-select` now kills gamescope directly and polls
+(200 ms, up to 3 s) for it to actually die before escalating to `SIGKILL` --
+no daemon restart, no sudo, on this path. This relies on the *same*,
+never-restarted greetd noticing the session's process tree exited and
+starting the greeter itself, which is the ordinary mechanism greetd already
+provides (see `deploytix-session-manager`'s header comment: "greetd
+terminates this greeter and starts the user session; when the user session
+exits, greetd restarts this greeter. No while-loop needed."). It works
+*because* `steam-gamescope-session` now waits on gamescope as well as Steam
+(`wait -n "$steam_pid" "$gamescope_pid"`, added alongside the greetd-restart
+attempt this section replaces): killing gamescope no longer depends on Steam
+noticing and exiting on its own, which is the thing that made the original
+direct-kill mechanism unreliable enough to move away from in the first place.
+
+desktop → gamescope (`return-to-gamemode`, and `session-select`'s own
+`gamescope` target) is untouched and still restarts greetd, since that
+direction has no equivalent race to avoid.
+
+**Files changed**:
+- `session-select.sh` -- desktop target kills gamescope immediately and polls
+  for it to die instead of sleeping 4s behind a greetd restart; gamescope
+  target unchanged
+- `session_switching.rs` -- test rewritten to assert the desktop branch never
+  restarts greetd and the gamescope branch still does
+
+---
+
 ## File Inventory
 
 All session switching resources live in `src/resources/session_switching/` and are
@@ -270,7 +439,7 @@ compiled into the binary via `include_str!` in `src/configure/session_switching.
 | `deploytix-session-manager.sh` | `/usr/bin/deploytix-session-manager` | greetd greeter; chooses session, launches via IPC |
 | `greetd-ipc.py` | `/usr/bin/greetd-ipc` | Python greetd IPC client for creating Class=user sessions |
 | `steam-gamescope-session.sh` | `/usr/local/bin/steam-gamescope-session` | Gamescope + Steam session launcher |
-| `session-select.sh` | `/usr/bin/session-select` | Write sentinel file and kill current session |
+| `session-select.sh` | `/usr/bin/session-select` | Write the sentinel file and end the current session |
 | `return-to-gamemode.sh` | `/usr/bin/return-to-gamemode` | Desktop shortcut to switch back to game mode |
 | `steamos-select-branch.sh` | `/usr/bin/steamos-select-branch` | Stub for Steam compatibility |
 | `steamos-update.sh` | `/usr/bin/steamos-update` | Stub: "no update available" (exit 7) for Steam's `-steamdeck` update checks |
@@ -286,7 +455,11 @@ compiled into the binary via `include_str!` in `src/configure/session_switching.
 
 Additionally, `session_switching.rs` creates a symlink:
 `/usr/bin/steamos-session-select` -> `session-select`
-(Steam internally calls `steamos-session-select` for "Switch to Desktop")
+(Steam calls `steamos-session-select` for "Switch to Desktop")
+
+`/usr/local/bin/desktop-session` is not in the table above because it is not in
+`DEPLOY_FILES`. It is generated per desktop environment and written by
+`GENERATED_FILES` in the same function. See problem 7.
 
 ---
 
@@ -337,13 +510,15 @@ Key pieces:
 
 ## Init-Agnostic greetd Restart
 
-Session switching works by bouncing greetd (desktop → gamescope, and
-`return-to-gamemode`). This was originally hardcoded as `sv restart greetd`,
-which only worked on runit. `session-select` and `return-to-gamemode` now
-invoke `/usr/bin/deploytix-restart-greetd` instead, which detects the
-*running* init system from its runtime state directory (installed binaries
-are not a reliable signal, since supervision tools from several init
-systems can coexist on disk):
+Session switching works by bouncing greetd for the gamescope-bound
+directions: `return-to-gamemode`, and `session-select`'s own `gamescope`
+target. (The desktop-bound direction kills gamescope directly instead --
+see problem 8 -- so it never calls this.) This was originally hardcoded as
+`sv restart greetd`, which only worked on runit. `session-select` and
+`return-to-gamemode` now invoke `/usr/bin/deploytix-restart-greetd` instead,
+which detects the *running* init system from its runtime state directory
+(installed binaries are not a reliable signal, since supervision tools from
+several init systems can coexist on disk):
 
 | Detection | Init | Restart command |
 |-----------|------|-----------------|

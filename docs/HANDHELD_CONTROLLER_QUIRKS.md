@@ -139,3 +139,43 @@ dmesg -w | grep -i 'usb\|xpad'
 5.68, ahead of Handheld Daemon (phase 5.7) — they govern how the controllers
 bind and whether their hidraw nodes are reachable, which is what HHD builds
 its emulated pad on top of.
+
+## Legion Go 2: hhd touchpad patch
+
+`hhd` is installed from the AUR (`hhd-git`), and upstream's Legion Go touchpad
+definition matches the touchpad node on `BTN_MOUSE`. That holds for the original
+Legion Go, which exposes its touchpad as a mouse. The **Legion Go 2** driven by
+the in-kernel `hid-lenovo-go` driver exposes a real touchpad reporting
+`BTN_TOUCH`, and puts `BTN_MOUSE` on a separate `... Mouse` node that hhd's
+`.+Touchpad` name pattern excludes — so nothing matched, and because the
+definition was `required=True` that became a `RuntimeError` and an endless
+
+```
+LLGO ERROR  Assuming controllers disconnected, restarting after 3s.
+```
+
+loop, taking sticks, buttons and gyro down with the touchpad.
+
+Reported upstream as [hhd-dev/hhd#340](https://github.com/hhd-dev/hhd/issues/340).
+Until it lands in the `hhd-git` build, deploytix carries the fix locally:
+
+- `src/resources/patches/hhd-legion-go-2-touchpad.patch` — accepts either
+  presentation, maps `BTN_TOUCH` to `touchpad_touch` (the Go 2 node has no
+  `BTN_TOOL_FINGER`, so matching alone would leave the touchpad silent), and
+  drops `required` so a miss degrades instead of crash-looping.
+- `src/resources/patches/deploytix-hhd-patch.sh` → `/usr/bin/deploytix-hhd-patch`,
+  with the patches in `/usr/share/deploytix/patches/`.
+
+`install_hhd` runs the helper once after `yay` installs `hhd-git`.
+
+**`hhd-git` is an AUR package, so pacman owns its files and every rebuild
+reverts the patch.** After any `yay -S hhd-git` or an update that rebuilt it,
+re-apply with:
+
+```bash
+sudo deploytix-hhd-patch
+```
+
+The helper dry-runs each patch and skips any that no longer applies, so it is
+idempotent and becomes a no-op once the fix is upstream — at which point delete
+the patch file and its entry in `HHD_PATCHES` (`src/configure/packages.rs`).
