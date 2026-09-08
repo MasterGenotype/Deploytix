@@ -253,6 +253,22 @@ enum Commands {
         reboot: bool,
     },
 
+    /// Build and install AUR packages (immutable root): compile them into a
+    /// new snapshot set and activate it on reboot.
+    Aur {
+        /// AUR package names to build.
+        #[arg(required = true, trailing_var_arg = true)]
+        packages: Vec<String>,
+
+        /// Number of previous snapshot sets to keep when pruning.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+
+        /// Reboot automatically once the build is staged.
+        #[arg(long)]
+        reboot: bool,
+    },
+
     /// Transactionally remove packages (immutable root): build a new snapshot
     /// set without them and activate it on reboot.
     Remove {
@@ -393,6 +409,14 @@ fn main() -> Result<()> {
         }) => {
             cmd_update(packages, keep, reboot, cli.dry_run)?;
         }
+        Some(Commands::Aur {
+            packages,
+            keep,
+            reboot,
+        }) => {
+            cmd_aur(packages, keep, reboot, cli.dry_run)?;
+        }
+
         Some(Commands::Remove {
             packages,
             cascade,
@@ -532,6 +556,44 @@ fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -
             },
         )?;
     }
+    Ok(())
+}
+
+/// `deploytix aur` — build AUR packages into a new snapshot set.
+///
+/// The GUI's AUR tab is the same operation; both call `run_aur_install`, and
+/// both take their refusal from `refusal_reason`, so a system that cannot build
+/// says the same thing either way.
+fn cmd_aur(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> Result<()> {
+    use deploytix::aur::capability;
+    use deploytix::aur::install::{run_aur_install, AurInstallOptions};
+    use deploytix::utils::command::CommandRunner;
+
+    let cmd = CommandRunner::new(dry_run);
+    let cap = capability::probe(&cmd, "");
+
+    println!("AUR build");
+    if let (Some(h), Some(u)) = (&cap.helper, &cap.build_user) {
+        println!(
+            "  helper:     {h}\n  build user: {} ({})",
+            u.name,
+            u.source.label()
+        );
+    }
+    for blocker in cap.blockers() {
+        eprintln!("  blocked:    {blocker}");
+    }
+
+    run_aur_install(
+        &cmd,
+        &cap,
+        &packages,
+        &AurInstallOptions {
+            keep_sets: keep,
+            reboot,
+        },
+    )?;
+    println!("Staged. Reboot to activate.");
     Ok(())
 }
 

@@ -126,6 +126,7 @@ impl eframe::App for UpdateGui {
                 .show(ui, |ui| match self.state.tab {
                     Tab::System => panels::system::show(ui, &mut self.state),
                     Tab::Update => panels::update::show(ui, &mut self.state),
+                    Tab::Aur => panels::aur::show(ui, &mut self.state),
                     Tab::Snapshots => panels::snapshots::show(ui, &mut self.state),
                     Tab::Progress => panels::progress::show(ui, &mut self.state),
                 });

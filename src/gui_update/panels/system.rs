@@ -89,7 +89,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     );
                 }
             } else {
-                for blocker in &cap.blockers {
+                for blocker in &cap.blockers() {
                     ui.label(
                         RichText::new(format!("\u{2022} {blocker}")).color(theme::TEXT_SECONDARY),
                     );

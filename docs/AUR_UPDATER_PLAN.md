@@ -1,8 +1,8 @@
 # AUR packages and dependency management in the Updater GUI
 
-Status: **partly implemented.** Phases 1, 2 and 4 have landed, along with the
-dependency preview from Phase 5. Phases 3, 6 and 7 — the build transaction,
-the review step and the history record — are still design.
+Status: **mostly implemented.** Phases 1-5 have landed, including the build
+transaction and the AUR tab. Phases 6 and 7 — the pre-commit review step and
+the rollback caveat in the UI — are still design.
 
 ## What this is for
 

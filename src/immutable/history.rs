@@ -61,6 +61,8 @@ pub enum Request {
     LocalFiles(Vec<String>),
     /// `deploytix remove` — package names to take out.
     Remove(Vec<String>),
+    /// `deploytix aur` — AUR package names, built from source in the set.
+    Aur(Vec<String>),
     /// Both in one transaction.
     Mixed {
         packages: Vec<String>,
@@ -91,6 +93,7 @@ impl Request {
             Self::Packages(p) => format!("Install: {}", p.join(", ")),
             Self::LocalFiles(f) => format!("Local package: {}", f.join(", ")),
             Self::Remove(p) => format!("Remove: {}", p.join(", ")),
+            Self::Aur(p) => format!("AUR build: {}", p.join(", ")),
             Self::Mixed { packages, files } => {
                 format!(
                     "Install: {} + local: {}",

@@ -22,9 +22,13 @@
 pub mod build;
 pub mod capability;
 pub mod helper;
+pub mod install;
 pub mod rpc;
+pub mod search;
 pub mod source;
 
 pub use capability::{AurCapability, Blocker, BuildUser, BuildUserSource};
 pub use helper::AurHelper;
+pub use install::{run_aur_install, AurInstallOptions};
+pub use search::{rank, RankedHit};
 pub use source::{system_source, AurSource, CompositeSource};

@@ -137,6 +137,16 @@ struct InfoResult {
     conflicts: Vec<String>,
     #[serde(default)]
     replaces: Vec<String>,
+    /// Ranking signals, shown in the browser and used to break ties between
+    /// equally good fuzzy matches.
+    #[serde(default)]
+    num_votes: u32,
+    #[serde(default)]
+    popularity: f64,
+    /// Unix seconds when a maintainer flagged the package out of date, if they
+    /// have. Worth surfacing: an out-of-date AUR package often fails to build.
+    #[serde(default)]
+    out_of_date: Option<i64>,
 }
 
 /// The envelope every v5 response comes in.
@@ -173,6 +183,90 @@ impl InfoResult {
 /// handles version constraints and optdepend descriptions unchanged.
 fn parse_deps(tokens: &[String]) -> Vec<Dep> {
     tokens.iter().map(|t| Dep::parse(t)).collect()
+}
+
+/// One AUR search hit.
+///
+/// Distinct from [`Package`] because votes, popularity and the out-of-date flag
+/// are browsing signals, not dependency metadata, and do not belong in the
+/// shared package model that `pkgdeps` resolves against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub votes: u32,
+    pub popularity: f64,
+    /// True when a maintainer has flagged the package out of date.
+    pub out_of_date: bool,
+}
+
+/// How the AUR should match a search term.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchBy {
+    /// Name and description. The AUR's own default, and the widest net — which
+    /// is what local fuzzy ranking then narrows.
+    NameDesc,
+    /// Name only.
+    Name,
+}
+
+impl SearchBy {
+    fn as_param(self) -> &'static str {
+        match self {
+            Self::NameDesc => "name-desc",
+            Self::Name => "name",
+        }
+    }
+}
+
+/// Parse a v5 search response into hits.
+pub fn parse_search_response(body: &str) -> Result<Vec<SearchHit>> {
+    let parsed: RpcResponse =
+        serde_json::from_str(body).map_err(|e| DeploytixError::CommandFailed {
+            command: "AUR RPC response".to_string(),
+            stderr: format!("could not parse: {e}"),
+        })?;
+
+    if parsed.r#type == "error" {
+        return Err(DeploytixError::CommandFailed {
+            command: "AUR RPC".to_string(),
+            stderr: parsed
+                .error
+                .unwrap_or_else(|| "unspecified error".to_string()),
+        });
+    }
+
+    Ok(parsed
+        .results
+        .into_iter()
+        .map(|r| SearchHit {
+            name: r.name,
+            version: r.version,
+            description: r.description.unwrap_or_default(),
+            votes: r.num_votes,
+            popularity: r.popularity,
+            out_of_date: r.out_of_date.is_some(),
+        })
+        .collect())
+}
+
+/// Percent-encode a search term for use in a path segment.
+///
+/// Search terms are free text, unlike package names: a user may type a space
+/// or a slash, and neither can go into a URL path raw. Only unreserved
+/// characters pass through untouched.
+pub fn encode_term(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for b in term.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Client for the subset of the RPC this needs.
@@ -224,6 +318,25 @@ impl<H: HttpGet> AurRpc<H> {
             packages.extend(parse_info_response(&body)?);
         }
         Ok(packages)
+    }
+
+    /// Search the AUR.
+    ///
+    /// The endpoint requires at least two characters and matches by substring,
+    /// so this is the candidate net; ranking them against what the user
+    /// actually typed is [`crate::aur::search`]'s job.
+    pub fn search(&self, term: &str, by: SearchBy) -> Result<Vec<SearchHit>> {
+        let trimmed = term.trim();
+        if trimmed.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let url = format!(
+            "{}/search/{}?by={}",
+            self.base,
+            encode_term(trimmed),
+            by.as_param()
+        );
+        parse_search_response(&self.http.get(&url)?)
     }
 
     /// Packages whose `provides` includes `virtual_name`.
@@ -514,5 +627,77 @@ mod tests {
         assert_eq!(packages[0].name, "hhd-git");
         assert_eq!(packages[0].repo, AUR_REPO);
         assert_eq!(packages[0].depends.len(), 3);
+    }
+
+    const SEARCH_BODY: &str = r#"{
+      "resultcount": 2,
+      "results": [
+        {"Name":"hhd","Version":"3.1.3-1","Description":"Handheld Daemon",
+         "NumVotes":42,"Popularity":1.5},
+        {"Name":"hhd-ui","Version":"1.0-1","Description":"Overlay",
+         "NumVotes":7,"Popularity":0.2,"OutOfDate":1700000000}
+      ],
+      "type":"search","version":5
+    }"#;
+
+    #[test]
+    fn search_captures_the_signals_a_browser_needs() {
+        let hits = parse_search_response(SEARCH_BODY).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "hhd");
+        assert_eq!(hits[0].votes, 42);
+        assert!((hits[0].popularity - 1.5).abs() < f64::EPSILON);
+        assert!(!hits[0].out_of_date);
+    }
+
+    #[test]
+    fn an_out_of_date_flag_is_surfaced() {
+        // Out-of-date AUR packages frequently fail to build, so this must not
+        // be silently dropped.
+        let hits = parse_search_response(SEARCH_BODY).unwrap();
+        assert!(hits[1].out_of_date);
+    }
+
+    #[test]
+    fn a_search_error_envelope_is_an_error() {
+        let err = r#"{"type":"error","error":"Query arg too small.","results":[]}"#;
+        assert!(parse_search_response(err).is_err());
+    }
+
+    #[test]
+    fn a_one_character_term_makes_no_request() {
+        // The endpoint rejects it, so asking is a guaranteed wasted round trip.
+        let http = CannedHttp::new(SEARCH_BODY);
+        let rpc = AurRpc::with_base(http, "https://example.test/rpc/v5");
+        assert!(rpc.search("h", SearchBy::NameDesc).unwrap().is_empty());
+        assert!(rpc.http.urls().is_empty());
+    }
+
+    #[test]
+    fn search_terms_are_url_encoded() {
+        // Free text, unlike package names: a space or slash would otherwise
+        // corrupt the path.
+        assert_eq!(encode_term("hello world"), "hello%20world");
+        assert_eq!(encode_term("a/b"), "a%2Fb");
+        assert_eq!(encode_term("plain-name_1.0~x"), "plain-name_1.0~x");
+        assert_eq!(encode_term("q?x&y"), "q%3Fx%26y");
+    }
+
+    #[test]
+    fn search_builds_the_expected_url() {
+        let http = CannedHttp::new(SEARCH_BODY);
+        let rpc = AurRpc::with_base(http, "https://example.test/rpc/v5");
+        rpc.search("hhd daemon", SearchBy::NameDesc).unwrap();
+        let url = &rpc.http.urls()[0];
+        assert!(url.contains("/search/hhd%20daemon"), "{url}");
+        assert!(url.contains("by=name-desc"), "{url}");
+    }
+
+    #[test]
+    fn search_by_name_only_is_available() {
+        let http = CannedHttp::new(SEARCH_BODY);
+        let rpc = AurRpc::with_base(http, "https://example.test/rpc/v5");
+        rpc.search("hhd", SearchBy::Name).unwrap();
+        assert!(rpc.http.urls()[0].contains("by=name"));
     }
 }

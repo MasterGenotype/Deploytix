@@ -3,6 +3,9 @@
 use super::model::{self, Backend, SnapshotRow};
 use super::preview::{self, Preview};
 use crate::aur::capability::{self, AurCapability};
+use crate::aur::install::{run_aur_install, AurInstallOptions};
+use crate::aur::rpc::{AurRpc, CurlGet, SearchBy};
+use crate::aur::search::{rank, RankedHit};
 use crate::immutable::update::{run_update, UpdateOptions};
 use crate::immutable::{boot, detect_devices, history, lvm_ab, rollback, snapshot};
 use crate::utils::command::{CommandRunner, OperationRecord};
@@ -18,6 +21,8 @@ enum ChannelSlot {
     /// Dependency resolution for the Update tab. Its own channel so a slow
     /// resolve can never displace a running update's messages.
     Resolve,
+    /// AUR search. Separate again: a search runs while a resolve is in flight.
+    Search,
 }
 
 /// How many trailing output lines of each command reach the log pane.
@@ -28,17 +33,28 @@ const LOG_TAIL_LINES: usize = 12;
 pub enum Tab {
     System,
     Update,
+    /// AUR packages, kept apart from Update because they are built from source
+    /// rather than downloaded: they need a helper, a build user and a
+    /// toolchain, and they take minutes rather than seconds.
+    Aur,
     Snapshots,
     Progress,
 }
 
 impl Tab {
-    pub const ALL: [Self; 4] = [Self::System, Self::Update, Self::Snapshots, Self::Progress];
+    pub const ALL: [Self; 5] = [
+        Self::System,
+        Self::Update,
+        Self::Aur,
+        Self::Snapshots,
+        Self::Progress,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Update => "Update",
+            Self::Aur => "AUR",
             Self::Snapshots => "Snapshots",
             Self::Progress => "Progress",
         }
@@ -75,6 +91,13 @@ pub enum Msg {
     },
     /// A dependency preview completed.
     Resolved(Box<Preview>),
+    /// An AUR search completed, ranked best first.
+    SearchResults {
+        term: String,
+        hits: Vec<RankedHit>,
+    },
+    /// An AUR search failed.
+    SearchFailed(String),
     /// A refresh could not read the system.
     RefreshFailed(String),
     /// The operation finished; the string is the user-facing summary.
@@ -127,6 +150,17 @@ pub struct AppState {
     pub preview: Option<Preview>,
     pub resolving: bool,
     pub resolve_receiver: Option<Receiver<Msg>>,
+
+    // AUR tab.
+    pub aur_query: String,
+    /// The term the held results actually describe, so a stale response is not
+    /// shown against a query that has moved on.
+    pub aur_results_term: String,
+    pub aur_results: Vec<RankedHit>,
+    pub aur_selected: Vec<String>,
+    pub aur_searching: bool,
+    pub aur_error: Option<String>,
+    pub search_receiver: Option<Receiver<Msg>>,
 }
 
 impl Default for AppState {
@@ -156,6 +190,13 @@ impl Default for AppState {
             preview: None,
             resolving: false,
             resolve_receiver: None,
+            aur_query: String::new(),
+            aur_results_term: String::new(),
+            aur_results: Vec::new(),
+            aur_selected: Vec::new(),
+            aur_searching: false,
+            aur_error: None,
+            search_receiver: None,
         }
     }
 }
@@ -187,6 +228,7 @@ impl AppState {
             ChannelSlot::Operation,
             ChannelSlot::Refresh,
             ChannelSlot::Resolve,
+            ChannelSlot::Search,
         ] {
             changed |= self.pump_one(slot);
         }
@@ -202,6 +244,7 @@ impl AppState {
             ChannelSlot::Operation => self.receiver.as_ref(),
             ChannelSlot::Refresh => self.refresh_receiver.as_ref(),
             ChannelSlot::Resolve => self.resolve_receiver.as_ref(),
+            ChannelSlot::Search => self.search_receiver.as_ref(),
         };
         if let Some(rx) = rx {
             loop {
@@ -240,6 +283,10 @@ impl AppState {
                     self.resolve_receiver = None;
                     self.resolving = false;
                 }
+                ChannelSlot::Search => {
+                    self.search_receiver = None;
+                    self.aur_searching = false;
+                }
             }
         }
         changed
@@ -263,6 +310,16 @@ impl AppState {
             Msg::Resolved(p) => {
                 self.preview = Some(*p);
                 self.resolving = false;
+            }
+            Msg::SearchResults { term, hits } => {
+                self.aur_results_term = term;
+                self.aur_results = hits;
+                self.aur_error = None;
+                self.aur_searching = false;
+            }
+            Msg::SearchFailed(e) => {
+                self.aur_error = Some(e);
+                self.aur_searching = false;
             }
             Msg::RefreshFailed(e) => {
                 self.refresh_error = Some(e);
@@ -394,6 +451,110 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    /// Search the AUR in the background.
+    ///
+    /// The AUR's own search is a substring match over name and description, so
+    /// the results are re-ranked locally against what was typed. That is what
+    /// makes a typo still find the package.
+    pub fn start_search(&mut self) {
+        let term = self.aur_query.trim().to_string();
+        if term.len() < 2 {
+            // The endpoint rejects shorter terms, so asking is a guaranteed
+            // wasted round trip.
+            self.aur_results.clear();
+            self.aur_results_term.clear();
+            return;
+        }
+        if self.aur_searching {
+            return;
+        }
+        self.aur_searching = true;
+        self.aur_error = None;
+        let (tx, rx) = channel();
+        self.search_receiver = Some(rx);
+
+        thread::spawn(move || {
+            let rpc = AurRpc::new(CurlGet);
+            let msg = match rpc.search(&term, SearchBy::NameDesc) {
+                Ok(hits) => Msg::SearchResults {
+                    hits: rank(&term, hits),
+                    term,
+                },
+                Err(e) => Msg::SearchFailed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    /// Whether the held search results describe the current query.
+    pub fn search_results_current(&self) -> bool {
+        self.aur_results_term == self.aur_query.trim()
+    }
+
+    /// Add an AUR package to the selection, ignoring duplicates.
+    pub fn select_aur(&mut self, name: &str) {
+        if !self.aur_selected.iter().any(|s| s == name) {
+            self.aur_selected.push(name.to_string());
+        }
+    }
+
+    pub fn deselect_aur(&mut self, name: &str) {
+        self.aur_selected.retain(|s| s != name);
+    }
+
+    /// Why an AUR build cannot start, or `None` when it can.
+    ///
+    /// Asks the same function the transaction does, so the greyed-out button
+    /// and the CLI can never give different reasons.
+    pub fn aur_refusal(&self) -> Option<String> {
+        let cap = self.capability.as_ref()?;
+        let is_lvm_ab = self
+            .info
+            .as_ref()
+            .map(|i| i.backend == Backend::LvmAb)
+            .unwrap_or(false);
+        crate::aur::install::refusal_reason(cap, is_lvm_ab)
+    }
+
+    /// Build and install the selected AUR packages in the background.
+    pub fn start_aur_install(&mut self) {
+        let packages = self.aur_selected.clone();
+        if packages.is_empty() {
+            return;
+        }
+        let Some(cap) = self.capability.clone() else {
+            self.error = Some("System state has not been read yet.".to_string());
+            return;
+        };
+
+        let tx = self.begin("Building AUR packages...");
+        self.logs.clear();
+        self.tab = Tab::Progress;
+        let opts = AurInstallOptions {
+            keep_sets: self.keep_sets,
+            reboot: self.reboot_after,
+        };
+
+        thread::spawn(move || {
+            let cmd = command_runner_logging_to(&tx);
+            let _ = tx.send(Msg::Status(
+                "Building from source — this can take a long time.".to_string(),
+            ));
+            match run_aur_install(&cmd, &cap, &packages, &opts) {
+                Ok(()) => {
+                    let _ = tx.send(Msg::Finished(
+                        "AUR packages built and staged. Reboot to activate.".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!(
+                        "{e}\n\nThe running system is unchanged."
+                    )));
+                }
+            }
+        });
     }
 
     /// Run a transactional update in the background.
@@ -740,6 +901,80 @@ mod tests {
         state.start_resolve();
         assert!(state.preview.is_none());
         assert!(!state.resolving, "nothing to resolve, no worker spawned");
+    }
+
+    #[test]
+    fn a_short_query_never_reaches_the_network() {
+        // The endpoint rejects terms under two characters.
+        let mut state = AppState::default();
+        state.aur_query = "h".into();
+        state.start_search();
+        assert!(!state.aur_searching);
+        assert!(state.search_receiver.is_none());
+    }
+
+    #[test]
+    fn stale_search_results_are_not_shown_against_a_newer_query() {
+        let mut state = AppState::default();
+        state.aur_query = "decky".into();
+        state.aur_results_term = "hhd".into();
+        assert!(!state.search_results_current());
+        state.aur_query = "hhd".into();
+        assert!(state.search_results_current());
+    }
+
+    #[test]
+    fn selecting_a_package_twice_does_not_duplicate_it() {
+        let mut state = AppState::default();
+        state.select_aur("hhd-git");
+        state.select_aur("hhd-git");
+        assert_eq!(state.aur_selected, vec!["hhd-git".to_string()]);
+        state.deselect_aur("hhd-git");
+        assert!(state.aur_selected.is_empty());
+    }
+
+    #[test]
+    fn an_aur_build_with_nothing_selected_does_nothing() {
+        let mut state = AppState::default();
+        state.start_aur_install();
+        assert!(!state.busy, "must not start a transaction with no packages");
+        assert!(state.receiver.is_none());
+    }
+
+    #[test]
+    fn an_unprobed_system_refuses_an_aur_build() {
+        // capability is None until the first refresh; treating that as ready
+        // would let a build start before anything was checked.
+        let state = AppState::default();
+        assert!(state.capability.is_none());
+        let mut state = state;
+        state.select_aur("hhd-git");
+        state.start_aur_install();
+        assert!(!state.busy);
+        assert!(state.error.is_some(), "must say why");
+    }
+
+    #[test]
+    fn a_search_never_displaces_a_running_update() {
+        let mut state = AppState::default();
+        let (op_tx, op_rx) = channel();
+        state.receiver = Some(op_rx);
+        state.busy = true;
+
+        let (search_tx, search_rx) = channel();
+        state.search_receiver = Some(search_rx);
+        search_tx
+            .send(Msg::SearchResults {
+                term: "hhd".into(),
+                hits: Vec::new(),
+            })
+            .unwrap();
+        op_tx.send(Msg::Log("update output".into())).unwrap();
+        state.pump();
+
+        assert_eq!(state.logs, vec!["update output"]);
+        assert!(state.busy, "a search must not end the update");
+        assert_eq!(state.aur_results_term, "hhd");
     }
 
     #[test]

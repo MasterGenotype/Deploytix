@@ -87,6 +87,12 @@ pub struct BuildUser {
 }
 
 /// What this system can do with the AUR.
+///
+/// Blockers are computed from the parts rather than stored. Storing them meant
+/// a value built any way other than through the probe -- `Default::default()`,
+/// a struct literal in a caller -- carried an empty blocker list and therefore
+/// reported itself ready, which is the one answer that must never be wrong,
+/// since it gates a build.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AurCapability {
     /// Every helper found, most preferred first.
@@ -95,31 +101,13 @@ pub struct AurCapability {
     pub helper: Option<AurHelper>,
     pub build_user: Option<BuildUser>,
     pub base_devel: bool,
-    pub blockers: Vec<Blocker>,
 }
 
 impl AurCapability {
-    /// Whether an AUR build could start right now.
-    pub fn is_ready(&self) -> bool {
-        self.blockers.is_empty()
-    }
-
-    /// One-line summary for the System tab.
-    pub fn summary(&self) -> String {
-        if let Some(blocker) = self.blockers.first() {
-            return blocker.to_string();
-        }
-        // is_ready() implies both are Some, but render defensively rather than
-        // unwrapping in a UI path.
-        match (&self.helper, &self.build_user) {
-            (Some(h), Some(u)) => format!("{h}, building as {}", u.name),
-            _ => "Unavailable".to_string(),
-        }
-    }
-
-    /// Derive the blocker list from the parts. Kept separate from probing so it
-    /// can be tested without a system to probe.
-    fn with_blockers(mut self) -> Self {
+    /// Everything missing, in the order it is worth reporting.
+    ///
+    /// Derived, so it cannot disagree with the fields it describes.
+    pub fn blockers(&self) -> Vec<Blocker> {
         let mut blockers = Vec::new();
         if self.helper.is_none() {
             blockers.push(Blocker::NoHelper);
@@ -130,8 +118,25 @@ impl AurCapability {
         if !self.base_devel {
             blockers.push(Blocker::NoBaseDevel);
         }
-        self.blockers = blockers;
-        self
+        blockers
+    }
+
+    /// Whether an AUR build could start right now.
+    pub fn is_ready(&self) -> bool {
+        self.blockers().is_empty()
+    }
+
+    /// One-line summary for the System tab.
+    pub fn summary(&self) -> String {
+        if let Some(blocker) = self.blockers().first() {
+            return blocker.to_string();
+        }
+        // is_ready() implies both are Some, but render defensively rather than
+        // unwrapping in a UI path.
+        match (&self.helper, &self.build_user) {
+            (Some(h), Some(u)) => format!("{h}, building as {}", u.name),
+            _ => "Unavailable".to_string(),
+        }
     }
 }
 
@@ -211,12 +216,39 @@ fn is_login_shell(shell: &str) -> bool {
     )
 }
 
-/// Shell that prints `base-devel` if the group is installed.
+/// Binaries `makepkg` cannot build anything without.
 ///
-/// `pacman -Qg` rather than `-Qi`: `base-devel` is a package *group*, so it is
-/// never itself an installed package and `-Qi base-devel` always fails.
-fn base_devel_cmd() -> &'static str {
-    "pacman -Qg base-devel >/dev/null 2>&1 && echo base-devel; true"
+/// The last-resort check, and the most honest one: what actually decides
+/// whether a build works is whether the toolchain is there, not what a
+/// package query is named.
+const BUILD_TOOLS: &[&str] = &["gcc", "make", "fakeroot", "patch", "ld"];
+
+/// Shell that prints `base-devel` if this system can build packages.
+///
+/// Three checks, because the first two each answer only for one era of Arch:
+///
+/// * `-Qi` — `base-devel` is a **meta package** on current Arch and Artix. It
+///   was converted from a group in early 2022.
+/// * `-Qg` — before that it was a package *group*, which `-Qi` cannot see. Old
+///   deployments still look like this.
+/// * the toolchain itself — covers a system that has every build tool but
+///   never had the meta package recorded, which is what an install that
+///   pulled the tools in individually looks like.
+///
+/// Checking only `-Qg`, as this did until it was reported in the wild, reports
+/// "base-devel is not installed" on every modern system: the group no longer
+/// exists, so the query finds nothing however complete the toolchain is.
+fn base_devel_cmd() -> String {
+    let tools = BUILD_TOOLS
+        .iter()
+        .map(|t| format!("command -v {t} >/dev/null 2>&1"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    format!(
+        "{{ pacman -Qi base-devel >/dev/null 2>&1 || \
+           pacman -Qg base-devel >/dev/null 2>&1 || \
+           {{ {tools}; }} ; }} && echo base-devel; true"
+    )
 }
 
 /// Probe `root` for everything an AUR build needs.
@@ -235,9 +267,7 @@ pub fn probe(cmd: &CommandRunner, root: &str) -> AurCapability {
         helper,
         build_user,
         base_devel,
-        blockers: Vec::new(),
     }
-    .with_blockers()
 }
 
 /// Read `/etc/passwd` from `root`, or empty on failure.
@@ -257,7 +287,7 @@ fn probe_helpers(cmd: &CommandRunner, root: &str) -> Vec<AurHelper> {
 
 fn probe_base_devel(cmd: &CommandRunner, root: &str) -> bool {
     let sh = if root.is_empty() {
-        base_devel_cmd().to_string()
+        base_devel_cmd()
     } else {
         format!("chroot {root} sh -c '{}'", base_devel_cmd())
     };
@@ -380,12 +410,31 @@ bin:x:1:1::/:/usr/bin/nologin
 
     #[test]
     fn every_missing_piece_is_reported_not_just_the_first() {
-        let cap = AurCapability::default().with_blockers();
-        assert_eq!(cap.blockers.len(), 3);
-        assert!(cap.blockers.contains(&Blocker::NoHelper));
-        assert!(cap.blockers.contains(&Blocker::NoBuildUser));
-        assert!(cap.blockers.contains(&Blocker::NoBaseDevel));
+        let cap = AurCapability::default();
+        assert_eq!(cap.blockers().len(), 3);
+        assert!(cap.blockers().contains(&Blocker::NoHelper));
+        assert!(cap.blockers().contains(&Blocker::NoBuildUser));
+        assert!(cap.blockers().contains(&Blocker::NoBaseDevel));
+    }
+
+    #[test]
+    fn a_default_capability_is_never_ready() {
+        // Regression: blockers used to be a stored field, so any value not
+        // built by the probe carried an empty list and reported itself ready.
+        // That is the one answer that must never be wrong -- it gates a build.
+        assert!(!AurCapability::default().is_ready());
+    }
+
+    #[test]
+    fn a_partially_equipped_system_is_not_ready() {
+        let cap = AurCapability {
+            helpers: vec![AurHelper::Paru],
+            helper: Some(AurHelper::Paru),
+            build_user: None,
+            base_devel: true,
+        };
         assert!(!cap.is_ready());
+        assert_eq!(cap.blockers(), vec![Blocker::NoBuildUser]);
     }
 
     #[test]
@@ -399,23 +448,54 @@ bin:x:1:1::/:/usr/bin/nologin
                 source: BuildUserSource::Pkexec,
             }),
             base_devel: true,
-            blockers: Vec::new(),
-        }
-        .with_blockers();
+        };
         assert!(cap.is_ready());
         assert_eq!(cap.summary(), "paru, building as deck");
     }
 
     #[test]
     fn summary_explains_the_blocker_rather_than_saying_unavailable() {
-        let cap = AurCapability::default().with_blockers();
+        let cap = AurCapability::default();
         assert!(cap.summary().contains("No AUR helper"));
     }
 
     #[test]
-    fn base_devel_probe_uses_group_query() {
-        // -Qi base-devel always fails: it is a group, never an installed package.
-        assert!(base_devel_cmd().contains("-Qg"));
-        assert!(!base_devel_cmd().contains("-Qi"));
+    fn base_devel_probe_accepts_the_meta_package_the_group_and_the_toolchain() {
+        // Regression: this used to check only -Qg, which reports "not
+        // installed" on every current system -- base-devel became a meta
+        // package in 2022, so the group query finds nothing however complete
+        // the toolchain is.
+        let sh = base_devel_cmd();
+        assert!(
+            sh.contains("-Qi base-devel"),
+            "must see the meta package: {sh}"
+        );
+        assert!(
+            sh.contains("-Qg base-devel"),
+            "must still see the legacy group: {sh}"
+        );
+        for tool in BUILD_TOOLS {
+            assert!(
+                sh.contains(&format!("command -v {tool}")),
+                "toolchain fallback missing {tool}: {sh}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_devel_probe_never_fails_the_shell() {
+        // It runs inside a probe whose failure must mean "absent", not "error".
+        assert!(base_devel_cmd().trim_end().ends_with("true"));
+    }
+
+    #[test]
+    fn base_devel_probe_is_a_disjunction_not_a_conjunction() {
+        // Any one of the three is sufficient; requiring all three would report
+        // a perfectly buildable system as unable to build.
+        let sh = base_devel_cmd();
+        assert!(
+            sh.contains("||"),
+            "the three checks must be alternatives: {sh}"
+        );
     }
 }

@@ -245,7 +245,7 @@ fn show_preview(ui: &mut Ui, state: &AppState) {
             let why = state
                 .capability
                 .as_ref()
-                .and_then(|c| c.blockers.first().map(|b| b.to_string()))
+                .and_then(|c| c.blockers().first().map(|b| b.to_string()))
                 .unwrap_or_else(|| "AUR support is unavailable.".to_string());
             ui.label(
                 RichText::new(format!("\u{26a0} {why}"))
