@@ -4,9 +4,13 @@ on:
   push:
     tags:
       - "v*"
-    # Pushing a release/vX.Y.Z branch cuts release vX.Y.Z at that commit,
-    # for environments that cannot push tags directly.
     branches:
+      # Cargo.toml is the source of truth: a push to main whose version has no
+      # matching tag yet cuts that release automatically. Pushes that do not
+      # change the version stop at the resolve job and release nothing.
+      - "main"
+      # Pushing a release/vX.Y.Z branch cuts release vX.Y.Z at that commit,
+      # for environments that cannot push tags directly.
       - "release/v*"
   workflow_dispatch:
     inputs:
@@ -29,41 +33,68 @@ env:
 
 jobs:
   meta:
-    name: Resolve tag
+    name: Resolve release
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      release: ${{ steps.resolve.outputs.release }}
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve release tag
-        id: tag
+      - name: Resolve tag and decide whether to release
+        id: resolve
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF_NAME#release/}"
+          set -euo pipefail
+
+          crate="$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "$crate" ]; then
+            echo "::error::Could not read the package version from Cargo.toml"
+            exit 1
           fi
+
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"; source="workflow_dispatch"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"; source="tag push"
+          elif [ "$GITHUB_REF_NAME" != "${GITHUB_REF_NAME#release/}" ]; then
+            tag="${GITHUB_REF_NAME#release/}"; source="release branch"
+          else
+            tag="v$crate"; source="main push"
+          fi
+
           case "$tag" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::Release tag '$tag' is not vMAJOR.MINOR.PATCH"; exit 1 ;;
           esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      # The version is compiled into the binaries (clap reads CARGO_PKG_VERSION),
-      # so a tag that disagrees with Cargo.toml publishes vX binaries that report
-      # vY. Fail here, before spending two build jobs on it.
-      - name: Check tag matches Cargo.toml version
-        run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          crate="$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+
+          # The version is compiled into the binaries (clap reads
+          # CARGO_PKG_VERSION), so a tag that disagrees with Cargo.toml
+          # publishes vX binaries that report vY. Trivially true for a main
+          # push, where the tag is derived from Cargo.toml.
           if [ "$tag" != "v$crate" ]; then
             echo "::error::Tag $tag does not match Cargo.toml version $crate."
             echo "::error::Bump the version in Cargo.toml (and Cargo.lock) or retag as v$crate."
             exit 1
           fi
-          echo "Tag $tag matches Cargo.toml version $crate."
+
+          # A main push only releases a version that has no tag yet, so
+          # ordinary pushes are silent and re-running one cannot republish.
+          # An explicit tag/branch/dispatch is always an intentional release.
+          if [ "$source" = "main push" ] \
+             && git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            release=false
+            echo "$tag is already tagged; nothing to release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            release=true
+            echo "Releasing **$tag** (trigger: $source)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
 
   lint:
     name: Lint and test
+    needs: meta
+    if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +118,7 @@ jobs:
   build-cli:
     name: Build CLI binary
     needs: [meta, lint]
+    if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +143,7 @@ jobs:
   build-gui:
     name: Build GUI binaries
     needs: [meta, lint]
+    if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,6 +172,7 @@ jobs:
   release:
     name: Publish release
     needs: [meta, build-cli, build-gui]
+    if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
