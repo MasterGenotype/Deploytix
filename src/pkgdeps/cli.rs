@@ -27,6 +27,12 @@ pub struct DepsArgs {
     /// Path to an offline fixture (JSON list of `Package`) to use
     /// instead of pacman. Useful for CI.
     pub offline: Option<String>,
+    /// Also consult the AUR for names the sync databases do not have.
+    ///
+    /// Off by default: it turns a local, always-available query into one that
+    /// makes network requests, which should be the caller's choice rather than
+    /// a surprise.
+    pub aur: bool,
 }
 
 impl DepsArgs {
@@ -50,10 +56,19 @@ impl DepsArgs {
 /// Construct the metadata source the CLI should use given the args.
 pub fn build_source(args: &DepsArgs) -> Result<Box<dyn MetadataSource>> {
     if let Some(path) = &args.offline {
+        // An offline fixture is a closed universe by definition; consulting
+        // the network would defeat the point of it.
         let mock = load_offline_fixture(Path::new(path))?;
-        Ok(Box::new(mock))
+        return Ok(Box::new(mock));
+    }
+    let pacman = PacmanSource::system(args.pacman_config());
+    if args.aur {
+        Ok(Box::new(crate::aur::source::CompositeSource::new(
+            pacman,
+            crate::aur::source::AurSource::new(crate::aur::rpc::CurlGet),
+        )))
     } else {
-        Ok(Box::new(PacmanSource::system(args.pacman_config())))
+        Ok(Box::new(pacman))
     }
 }
 

@@ -44,6 +44,9 @@ struct DepsCommonArgs {
     /// Emit Graphviz DOT output (overridden by --json for json-capable commands)
     #[arg(long)]
     dot: bool,
+    /// Also resolve against the AUR (makes network requests)
+    #[arg(long)]
+    aur: bool,
     /// Use an offline JSON fixture instead of pacman (for CI / sandboxes)
     #[arg(long)]
     offline: Option<String>,
@@ -61,6 +64,7 @@ impl DepsCommonArgs {
             json: self.json,
             dot: self.dot,
             offline: self.offline,
+            aur: self.aur,
         }
     }
 }

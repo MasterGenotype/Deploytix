@@ -9,6 +9,10 @@
 //!   yay, something else, or nothing.
 //! * [`capability`] — *whether* a build can run at all: helper, build user and
 //!   `base-devel`, each with a reason when missing.
+//! * [`rpc`] — *what exists*: a read-only client for the AUR's RPC interface.
+//! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
+//!   composite that resolves a dependency graph spanning the repositories and
+//!   the AUR together.
 //!
 //! Nothing here starts a transaction. Building on an immutable root goes
 //! through [`crate::immutable::update::run_in_new_set`] like every other
@@ -18,6 +22,9 @@
 pub mod build;
 pub mod capability;
 pub mod helper;
+pub mod rpc;
+pub mod source;
 
 pub use capability::{AurCapability, Blocker, BuildUser, BuildUserSource};
 pub use helper::AurHelper;
+pub use source::{system_source, AurSource, CompositeSource};

@@ -25,8 +25,8 @@
 //!
 //! Everything here is read-only. No transaction, no root, nothing to undo.
 
+use crate::aur::rpc::AUR_REPO;
 use crate::pkgdeps::model::InstallPlan;
-use crate::pkgdeps::pacman::{PacmanConfig, PacmanSource};
 use crate::pkgdeps::resolver::{resolve_closure, ResolveOpts};
 use crate::pkgdeps::source::MetadataSource;
 use crate::utils::error::Result;
@@ -39,8 +39,13 @@ pub struct Preview {
     /// What pacman says the transaction would do. `None` when planning failed
     /// (no network, unknown target); `notes` then says why.
     pub plan: Option<InstallPlan>,
-    /// Targets no sync database knows. Usually AUR packages, sometimes typos —
-    /// this module cannot tell the difference and does not pretend to.
+    /// Packages in the closure that come from the AUR and must be built.
+    /// Includes AUR packages pulled in as dependencies, not just the ones
+    /// typed.
+    pub aur: Vec<String>,
+    /// Names nothing knows — not the repositories and not the AUR. With the
+    /// AUR consulted, this is a typo or a removed package rather than the
+    /// "probably AUR" guess it used to be.
     pub unknown: Vec<String>,
     /// Non-fatal explanations for the user.
     pub notes: Vec<String>,
@@ -65,6 +70,11 @@ impl Preview {
         self.removal_count() > 0 || !self.unknown.is_empty()
     }
 
+    /// Whether staging this needs a working AUR helper.
+    pub fn needs_helper(&self) -> bool {
+        !self.aur.is_empty()
+    }
+
     /// One-line summary for a collapsed view.
     pub fn summary(&self) -> String {
         if self.targets.is_empty() {
@@ -81,8 +91,11 @@ impl Preview {
         if self.removal_count() > 0 {
             parts.push(format!("{} to remove", self.removal_count()));
         }
+        if !self.aur.is_empty() {
+            parts.push(format!("{} from the AUR", self.aur.len()));
+        }
         if !self.unknown.is_empty() {
-            parts.push(format!("{} not in any repo", self.unknown.len()));
+            parts.push(format!("{} not found", self.unknown.len()));
         }
         if let Some(size) = self.plan.as_ref().and_then(|p| p.download_size) {
             parts.push(format!("{} to download", human_size(size)));
@@ -129,11 +142,25 @@ pub fn resolve_with<S: MetadataSource + ?Sized>(source: &S, targets: &[String]) 
 
     let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
 
-    // Which targets no sync DB knows. Asked first, because it explains a
-    // failing plan: pacman cannot plan a transaction for a package it has
-    // never heard of.
+    // Walk the whole graph once. With an AUR-aware source this spans both
+    // universes, so an AUR root's repo dependencies resolve normally and its
+    // AUR dependencies resolve too.
     match resolve_closure(source, &refs, ResolveOpts::default()) {
         Ok(closure) => {
+            // Which of the resolved packages must be built rather than
+            // downloaded. Taken from the whole closure, not just the targets:
+            // an AUR package pulled in as a dependency needs a helper just as
+            // much as one typed by hand.
+            preview.aur = closure
+                .nodes
+                .iter()
+                .filter(|p| p.repo == AUR_REPO)
+                .map(|p| p.name.clone())
+                .collect();
+            preview.aur.sort();
+
+            // Now that the AUR has been consulted, an unresolved target really
+            // is unknown rather than merely absent from a sync database.
             preview.unknown = closure
                 .unresolved
                 .iter()
@@ -147,21 +174,33 @@ pub fn resolve_with<S: MetadataSource + ?Sized>(source: &S, targets: &[String]) 
             .push(format!("Dependency resolution failed: {e}")),
     }
 
+    // Anything the AUR could not answer for — offline, rate limited — is
+    // reported so a thin result is not mistaken for a complete one.
+    preview.notes.extend(source.staleness_warnings());
+
     if !preview.unknown.is_empty() {
         preview.notes.push(format!(
-            "Not in any configured repository: {}. AUR packages are not in a \
-             sync database, so this is expected for them and needs a helper to \
-             build.",
+            "Not found in any repository or in the AUR: {}.",
             preview.unknown.join(", ")
         ));
     }
+    if !preview.aur.is_empty() {
+        preview.notes.push(format!(
+            "Built from source: {}. AUR packages need a helper and build \
+             dependencies; see the System tab.",
+            preview.aur.join(", ")
+        ));
+    }
 
-    // What pacman would actually do. Planning is attempted even with unknown
-    // targets, so a mixed repo/AUR selection still previews its repo half.
+    // What pacman would actually do, for the repo half only: it cannot plan a
+    // transaction for a package that has no database entry, so AUR and unknown
+    // targets are held back rather than failing the whole plan.
     let plannable: Vec<&str> = refs
         .iter()
         .copied()
-        .filter(|t| !preview.unknown.iter().any(|u| u == *t))
+        .filter(|t| {
+            !preview.unknown.iter().any(|u| u == *t) && !preview.aur.iter().any(|a| a == *t)
+        })
         .collect();
     if !plannable.is_empty() {
         match source.install_plan(&plannable, false) {
@@ -176,13 +215,18 @@ pub fn resolve_with<S: MetadataSource + ?Sized>(source: &S, targets: &[String]) 
     preview
 }
 
-/// Resolve `targets` against the live system's pacman databases.
+/// Resolve `targets` against the live pacman databases and the AUR.
 ///
-/// Read-only and unprivileged: it shells out to `pacman -S --print` and
-/// friends, which need no root and change nothing. Blocking, so callers run it
-/// on a worker thread.
+/// Read-only and unprivileged throughout: `pacman -S --print` and friends need
+/// no root, and the AUR side is HTTP GETs. Blocking — including on the network
+/// — so callers run it on a worker thread.
 pub fn resolve(targets: &[String]) -> Result<Preview> {
-    let source = PacmanSource::system(PacmanConfig::default());
+    let source = crate::aur::source::system_source();
+    // One request for every typed name, rather than one per name as the walk
+    // reaches it. Repo packages among them cost nothing extra: the AUR simply
+    // does not return them, and the miss is cached.
+    let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+    source.fallback().prefetch(&refs);
     Ok(resolve_with(&source, targets))
 }
 
@@ -224,16 +268,83 @@ mod tests {
     }
 
     #[test]
-    fn a_package_no_repo_knows_is_flagged_as_probably_aur() {
+    fn a_name_neither_universe_knows_is_reported_as_not_found() {
+        // With the AUR consulted, an unresolved name is a typo or a removed
+        // package -- no longer the "probably AUR" guess it used to be.
         let s = source_with(vec![pkg("vim", &[])]);
-        let p = resolve_with(&s, &["hhd-git".to_string()]);
-        assert_eq!(p.unknown, vec!["hhd-git".to_string()]);
+        let p = resolve_with(&s, &["not-a-real-package".to_string()]);
+        assert_eq!(p.unknown, vec!["not-a-real-package".to_string()]);
+        assert!(p.aur.is_empty());
         assert!(p.needs_attention());
         assert!(
-            p.notes.iter().any(|n| n.contains("AUR")),
-            "the note should explain why it is missing: {:?}",
+            p.notes.iter().any(|n| n.contains("Not found")),
+            "{:?}",
             p.notes
         );
+    }
+
+    /// A source whose AUR half knows `hhd-git`, depending on the repo package
+    /// `python`.
+    fn composite_with_aur() -> impl MetadataSource {
+        use crate::aur::rpc::HttpGet;
+        use crate::aur::source::{AurSource, CompositeSource};
+
+        struct Canned;
+        impl HttpGet for Canned {
+            fn get(&self, url: &str) -> Result<String> {
+                if url.contains("arg[]=hhd-git") {
+                    return Ok(r#"{"resultcount":1,"results":[{
+                        "Name":"hhd-git","Version":"3.1.3-1","Depends":["python"]
+                    }],"type":"multiinfo"}"#
+                        .to_string());
+                }
+                Ok(r#"{"resultcount":0,"results":[],"type":"multiinfo"}"#.to_string())
+            }
+        }
+
+        let mut repo = MockSource::default();
+        repo.insert(Package::new("python", "3.12", "extra"));
+        repo.insert(Package::new("vim", "9.1", "extra"));
+        CompositeSource::new(repo, AurSource::new(Canned))
+    }
+
+    #[test]
+    fn an_aur_package_resolves_instead_of_being_reported_missing() {
+        let p = resolve_with(&composite_with_aur(), &["hhd-git".to_string()]);
+        assert!(
+            p.unknown.is_empty(),
+            "it exists, so it must not be unknown: {:?}",
+            p.unknown
+        );
+        assert_eq!(p.aur, vec!["hhd-git".to_string()]);
+        assert!(p.needs_helper());
+    }
+
+    #[test]
+    fn an_aur_packages_repo_dependencies_resolve_through_the_repositories() {
+        let p = resolve_with(&composite_with_aur(), &["hhd-git".to_string()]);
+        // python is a dependency of the AUR package but comes from a repo, so
+        // it must not be listed as something to build.
+        assert!(!p.aur.contains(&"python".to_string()), "{:?}", p.aur);
+        assert!(p.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_repo_only_selection_needs_no_helper() {
+        let p = resolve_with(&composite_with_aur(), &["vim".to_string()]);
+        assert!(p.aur.is_empty());
+        assert!(!p.needs_helper());
+    }
+
+    #[test]
+    fn a_mixed_selection_separates_what_is_built_from_what_is_downloaded() {
+        let p = resolve_with(
+            &composite_with_aur(),
+            &["vim".to_string(), "hhd-git".to_string()],
+        );
+        assert_eq!(p.aur, vec!["hhd-git".to_string()]);
+        assert!(p.unknown.is_empty());
+        assert!(p.summary().contains("from the AUR"), "{}", p.summary());
     }
 
     #[test]
@@ -250,12 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn a_mixed_selection_still_previews_its_repo_half() {
+    fn an_unresolvable_target_does_not_abort_the_whole_preview() {
         let s = source_with(vec![pkg("vim", &[])]);
-        let p = resolve_with(&s, &["vim".to_string(), "hhd-git".to_string()]);
-        assert_eq!(p.unknown, vec!["hhd-git".to_string()]);
-        // MockSource plans only what it knows; the point is that an unknown
-        // target does not abort the whole preview.
+        let p = resolve_with(&s, &["vim".to_string(), "nope".to_string()]);
+        assert_eq!(p.unknown, vec!["nope".to_string()]);
         assert_eq!(p.targets.len(), 2);
     }
 

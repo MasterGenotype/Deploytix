@@ -231,6 +231,30 @@ fn show_preview(ui: &mut Ui, state: &AppState) {
     };
     ui.label(RichText::new(preview.summary()).color(colour));
 
+    // AUR packages are built rather than downloaded, so they need a helper and
+    // take far longer. Saying so before staging is the whole point.
+    if preview.needs_helper() {
+        let ready = state
+            .capability
+            .as_ref()
+            .map(|c| c.is_ready())
+            .unwrap_or(false);
+        let text = format!("Built from source: {}", preview.aur.join(", "));
+        ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(11.0));
+        if !ready {
+            let why = state
+                .capability
+                .as_ref()
+                .and_then(|c| c.blockers.first().map(|b| b.to_string()))
+                .unwrap_or_else(|| "AUR support is unavailable.".to_string());
+            ui.label(
+                RichText::new(format!("\u{26a0} {why}"))
+                    .color(theme::WARNING)
+                    .size(11.0),
+            );
+        }
+    }
+
     // Removals are the loud case: on a read-only root, a package removed to
     // satisfy a conflict is the hardest outcome to walk back.
     if let Some(plan) = &preview.plan {

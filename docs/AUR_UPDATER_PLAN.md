@@ -1,7 +1,8 @@
 # AUR packages and dependency management in the Updater GUI
 
-Status: **partly implemented.** Phases 1 and 2 have landed, along with the
-dependency preview from Phase 5; the rest is still design.
+Status: **partly implemented.** Phases 1, 2 and 4 have landed, along with the
+dependency preview from Phase 5. Phases 3, 6 and 7 — the build transaction,
+the review step and the history record — are still design.
 
 ## What this is for
 
@@ -108,10 +109,15 @@ rollback even though its files do not.
 
 `src/pkgdeps/mod.rs` says it resolves "from the pacman/libalpm sync database —
 never by scraping the Artix website." AUR packages are in no sync DB, so they
-are invisible to every existing resolver path. The trait boundary
+were invisible to every existing resolver path. The trait boundary
 (`MetadataSource`, `src/pkgdeps/source.rs:17`) is the right place to add them,
 and its contract — "implementations MUST NOT mutate system state" — is exactly
 what an AUR RPC client should honour.
+
+**Landed.** `src/aur/rpc.rs` and `src/aur/source.rs`. The AUR is a second
+`MetadataSource`, and `CompositeSource` asks the repositories first and the AUR
+only for what they lack — so one closure spans both universes and an all-repo
+selection still makes no network calls.
 
 ---
 
@@ -177,27 +183,36 @@ Expose it as `deploytix aur <pkg>...` first. A CLI entry point is testable in
 the rehearsal harness and in a VM without touching egui, and it keeps the GUI a
 thin caller — the same shape `update` and `remove` already have.
 
-### Phase 4 — An AUR metadata source for `pkgdeps`
+### Phase 4 — An AUR metadata source for `pkgdeps` — **landed**
 
-Implement `MetadataSource` against the AUR RPC (`/rpc/v5/info`, `/rpc/v5/search`),
-mapping `Depends`/`MakeDepends`/`OptDepends`/`Provides`/`Conflicts` onto the
-existing `Package` and `Dep` types in `src/pkgdeps/model.rs`. No new types
-should be needed; if they are, that is a signal the mapping is wrong.
+`src/aur/rpc.rs` is a read-only client for `/rpc/v5`, mapping the endpoint's
+`Depends`/`MakeDepends`/`OptDepends`/`Provides`/`Conflicts` onto the existing
+`Package` and `Dep` types. No new model types were needed, which was the signal
+that the mapping was right. Version constraints and optdepend descriptions come
+through the existing `Dep::parse`, since AUR tokens use pacman's syntax.
 
-The interesting part is not the client, it is the **composition**: a real query
-spans both universes (an AUR package usually depends mostly on repo packages).
-So add a source that consults the AUR for names the pacman source does not
-know, and delegates everything else — keeping one resolver, one closure
-algorithm, one graph renderer.
+Fetching is `curl` in a subprocess behind an `HttpGet` trait, not a new crate:
+the tree already fetches that way (Warp, linux-tkg), and adding `reqwest` would
+pull an async runtime and a TLS stack into a binary that is otherwise a
+collection of process invocations. The trait is what makes the whole thing
+testable against canned JSON with no network.
 
-Honour the trait's no-mutation contract, cache responses on disk under
-`/var/cache/deploytix` with a short TTL, batch `info` queries (the RPC takes
-many `arg[]` values per call), and degrade to a clear error when offline rather
-than hanging. `MockSource` already exists, so the resolver tests for this need
-no network.
+`src/aur/source.rs` composes it with the pacman source, repositories first.
+That ordering matters three ways: it matches what a helper actually installs
+(a name in both places comes from the repo), it keeps the local source on the
+hot path so all-repo resolution makes no requests, and it means an unreachable
+AUR degrades to the previous behaviour rather than breaking repo resolution.
+Lookups are memoised including negatives — "the AUR does not have `glibc`"
+is otherwise asked once per package that depends on it — and roots are
+prefetched in one batched request.
 
-This phase is worth landing for `deploytix deps` alone, independently of the
-GUI.
+Deferred from the original sketch: the on-disk cache with a TTL. The cache
+lives as long as the source, and callers build one per resolve, so there is no
+staleness window to reason about and nothing to invalidate. Add it if repeated
+resolves prove slow in practice.
+
+Exposed on the CLI as `deploytix deps <cmd> --aur`, off by default because it
+turns a local query into a networked one.
 
 ### Phase 5 — Search and dependency preview in the GUI
 
@@ -276,7 +291,7 @@ Beyond the gates, each phase has a specific proof:
 | 1 | A large build in the update chroot consumes root-volume free space, not tmpfs; `df` inside the chroot shows the bind, not a half-RAM `tmpfs` on `/tmp` |
 | 2 | Detection reports correctly on a system with yay, one without, and one with no non-root user |
 | 3 | `deploytix -n aur <pkg>` prints a plan and changes nothing; a forced build failure leaves the running system and the set count untouched |
-| 4 | `deploytix deps resolve <aur-pkg>` returns a closure spanning both universes; resolver tests pass offline against `MockSource` |
+| 4 | ✅ `deploytix deps resolve <aur-pkg> --aur` returns a closure spanning both universes; resolver tests pass offline against `MockSource`, and a loopback HTTP server exercises the real curl path |
 | 5 | Search and preview never block the UI thread; results match Phase 4's CLI output for the same package |
 | 6 | Cancelling at review runs no build and creates no set |
 | 7 | A set containing AUR packages is labelled as such, and its rollback dialog names the shared-database caveat |
