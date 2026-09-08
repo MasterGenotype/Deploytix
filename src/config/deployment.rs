@@ -262,6 +262,39 @@ pub struct PackagesConfig {
     /// Install yay AUR helper (built from source; requires go)
     #[serde(default)]
     pub install_yay: bool,
+    /// Install Zen Browser (AUR: `zen-browser-bin`).
+    ///
+    /// Optional, and requires `install_yay = true` — it is an AUR package.
+    /// It was previously installed unconditionally alongside yay, which meant
+    /// every install with an AUR helper also got a browser it had not asked
+    /// for.
+    #[serde(default)]
+    pub install_zen_browser: bool,
+    /// Install Warp Terminal, the agentic terminal.
+    ///
+    /// Warp publishes an Arch/pacman package but is in no repository and has
+    /// no AUR entry, so it is fetched from the vendor
+    /// ([`WARP_TERMINAL_URL`]) and installed with `pacman -U`.
+    #[serde(default)]
+    pub install_warp_terminal: bool,
+    /// Install the prebuilt linux-tkg kernel *instead of* `linux-zen`.
+    ///
+    /// Frogging-Family publishes ready-built Arch packages with every release,
+    /// so the kernel does not have to be compiled on the target — the package
+    /// and its headers are downloaded ([`TKG_RELEASES_API`]) and installed
+    /// with `pacman -U`, the same trust decision as fetching them by hand.
+    ///
+    /// This *replaces* the stock kernel rather than sitting beside it, which
+    /// means there is no fallback if the download fails: the install aborts
+    /// instead of finishing with an unbootable disk. It also rules out ZFS
+    /// (no `zfs-linux-tkg` module exists) and switches NVIDIA to `nvidia-dkms`,
+    /// since the prebuilt `nvidia` package targets a stock kernel ABI.
+    #[serde(default)]
+    pub install_tkg_kernel: bool,
+    /// CPU scheduler variant of the linux-tkg kernel. Ignored unless
+    /// `install_tkg_kernel = true`.
+    #[serde(default)]
+    pub tkg_scheduler: TkgScheduler,
     /// Install Wine compatibility packages
     #[serde(default)]
     pub install_wine: bool,
@@ -311,6 +344,24 @@ pub struct PackagesConfig {
     /// Writes an init-specific service file for runit/s6/dinit/openrc.
     #[serde(default)]
     pub install_hhd: bool,
+    /// Download the Steam client during installation instead of on first boot.
+    ///
+    /// The `steam` package ships only `bootstraplinux_ubuntu12_32.tar.xz`; the
+    /// gamepad UI (`steamwebhelper`, `steamui.so`) arrives in the client Steam
+    /// fetches on its first real run. Without this, that download happens on
+    /// the target's first boot, which is the boot least likely to have a
+    /// working network — and until it completes, Game Mode has no UI to draw.
+    /// Running it here makes the deployed system boot straight into Game Mode.
+    ///
+    /// Costs a few hundred MB and several minutes of install time, and needs
+    /// `xorg-server-xvfb` (added automatically) because Steam will not
+    /// bootstrap without a display. Entirely best-effort: a failure here is
+    /// logged and the first-boot path in `steam-gamescope-session` still
+    /// handles it.
+    ///
+    /// Requires: install_gaming = true.
+    #[serde(default)]
+    pub steam_prefetch_client: bool,
     /// Install Decky Loader (Steam plugin framework).
     /// Requires: install_gaming = true AND install_yay = true
     /// (installed from the decky-loader-bin AUR package).
@@ -360,6 +411,104 @@ pub struct ExtraPackagesConfig {
 impl ExtraPackagesConfig {
     pub fn is_empty(&self) -> bool {
         self.pacman.is_empty() && self.aur.is_empty()
+    }
+}
+
+/// Where Warp's Arch package is downloaded from.
+///
+/// `/download`, not `/get_warp`. The latter is the marketing landing page: it
+/// answers `200 text/html` with an 11 KB SPA, so `curl -f` sees a success and
+/// saves the page under the package's name, and only `pacman -U` notices --
+/// as a corrupt archive, on a best-effort step that shrugs and carries on.
+/// `/download?package=pacman` is the endpoint that redirects to the real
+/// `releases.warp.dev/stable/v<ver>/warp-terminal-v<ver>-1-x86_64.pkg.tar.zst`.
+///
+/// The URL is a constant rather than user input, which is what makes it safe
+/// to interpolate into the `curl` command in
+/// [`crate::configure::packages::warp_terminal_script`]. It is single-quoted
+/// there, and `warp_url_is_safe_to_shell_quote` keeps it that way.
+pub const WARP_TERMINAL_URL: &str = "https://app.warp.dev/download?package=pacman";
+
+/// Where the prebuilt linux-tkg packages are looked up.
+///
+/// Frogging-Family publishes a set of prebuilt Arch packages with every
+/// release — one `.pkg.tar.zst` per CPU scheduler, plus a matching `-headers-`
+/// package. The asset names carry both the kernel series and the build number
+/// (`linux72-tkg-bore-llvm-7.2.3-273-x86_64.pkg.tar.zst`), so there is no
+/// stable "latest" URL to hardcode: every release changes all three.
+///
+/// So the URL is resolved from the releases API at install time and the pinned
+/// pair below is only the fallback for when that lookup cannot be made — the
+/// API is unauthenticated (60 requests/hour), and a rate-limited installer
+/// should still produce a bootable system rather than none at all.
+pub const TKG_RELEASES_API: &str =
+    "https://api.github.com/repos/Frogging-Family/linux-tkg/releases/latest";
+
+/// Release tag of the pinned fallback build.
+pub const TKG_FALLBACK_TAG: &str = "v7.2.3";
+/// Kernel-series prefix of the pinned fallback build (`linux72` = 7.2.x).
+pub const TKG_FALLBACK_KVER: &str = "linux72";
+/// `<version>-<pkgrel>` of the pinned fallback build.
+pub const TKG_FALLBACK_BUILD: &str = "7.2.3-273";
+
+/// The `(kernel, headers)` download URLs for the pinned fallback build.
+///
+/// These are built from constants and a closed enum — never from user input —
+/// which is what keeps them safe to single-quote into the shell script in
+/// [`crate::configure::packages::tkg_kernel_script`].
+pub fn tkg_fallback_urls(sched: TkgScheduler) -> (String, String) {
+    let base = format!(
+        "https://github.com/Frogging-Family/linux-tkg/releases/download/{TKG_FALLBACK_TAG}"
+    );
+    let stem = format!("{TKG_FALLBACK_KVER}-tkg-{}-llvm", sched.as_str());
+    (
+        format!("{base}/{stem}-{TKG_FALLBACK_BUILD}-x86_64.pkg.tar.zst"),
+        format!("{base}/{stem}-headers-{TKG_FALLBACK_BUILD}-x86_64.pkg.tar.zst"),
+    )
+}
+
+/// CPU scheduler variant of the prebuilt linux-tkg kernel.
+///
+/// Every variant is built with LLVM and published under the same naming
+/// scheme, so the choice only ever substitutes one token into the asset name.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TkgScheduler {
+    /// BMQ — BitMap Queue, Alfred Chen's minimal-latency scheduler.
+    Bmq,
+    /// BORE — Burst-Oriented Response Enhancer over EEVDF. The upstream
+    /// default and the most widely used of the set.
+    #[default]
+    Bore,
+    /// EEVDF — the mainline scheduler, TKG-patched.
+    Eevdf,
+    /// MuQSS — Con Kolivas' Multiple Queue Skiplist Scheduler.
+    Muqss,
+    /// PDS — Priority and Deadline based Skiplist.
+    Pds,
+}
+
+impl TkgScheduler {
+    /// The token as it appears in the release asset name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bmq => "bmq",
+            Self::Bore => "bore",
+            Self::Eevdf => "eevdf",
+            Self::Muqss => "muqss",
+            Self::Pds => "pds",
+        }
+    }
+
+    /// Every variant, for the GUI dropdown and the CLI wizard prompt.
+    pub fn all() -> &'static [Self] {
+        &[Self::Bmq, Self::Bore, Self::Eevdf, Self::Muqss, Self::Pds]
+    }
+}
+
+impl std::fmt::Display for TkgScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-llvm", self.as_str())
     }
 }
 
@@ -1036,6 +1185,16 @@ impl DeploymentConfig {
         let swap_idx = prompt_select("Swap configuration", &swap_types, 0)?;
         let swap_type = swap_types[swap_idx].clone();
 
+        // Hibernation. Asked here rather than with the other system options
+        // because it is only answerable once swap is chosen: zram is RAM-backed,
+        // so there is no image to resume from and nothing to ask about.
+        let hibernation = if swap_type == SwapType::ZramOnly {
+            println!("  Hibernation: unavailable with ZRAM-only swap (nothing survives power-off)");
+            false
+        } else {
+            prompt_confirm("Enable hibernation (suspend to disk)?", false)?
+        };
+
         // LVM thin provisioning (available on all layouts)
         let use_lvm_thin = prompt_confirm("Enable LVM thin provisioning?", false)?;
 
@@ -1075,6 +1234,25 @@ impl DeploymentConfig {
 
         // Wine
         let install_wine = prompt_confirm("Install Wine compatibility packages?", false)?;
+        let install_warp_terminal =
+            prompt_confirm("Install Warp Terminal: The Agentic Terminal?", false)?;
+
+        // Kernel.  Offered as a replacement for linux-zen, so the prompt says
+        // so — this is not an additive extra like the others around it.
+        let install_tkg_kernel = prompt_confirm(
+            "Install the prebuilt linux-tkg kernel (replaces linux-zen)?",
+            false,
+        )?;
+        let tkg_scheduler = if install_tkg_kernel {
+            let scheds = TkgScheduler::all();
+            let default = scheds
+                .iter()
+                .position(|s| *s == TkgScheduler::default())
+                .unwrap_or(0);
+            scheds[prompt_select("linux-tkg CPU scheduler", scheds, default)?]
+        } else {
+            TkgScheduler::default()
+        };
 
         // Gaming
         let install_gaming = prompt_confirm("Install Gaming packages (Steam, gamescope)?", false)?;
@@ -1143,6 +1321,13 @@ impl DeploymentConfig {
         // yay AUR helper
         let install_yay = prompt_confirm("Install yay AUR helper? (built from source)", false)?;
 
+        // AUR package, so only offered when there is a helper to build it.
+        let install_zen_browser = if install_yay {
+            prompt_confirm("Install Zen Browser? (AUR: zen-browser-bin)", false)?
+        } else {
+            false
+        };
+
         // Btrfs tools (snapper + btrfs-assistant) via yay — only when btrfs + yay
         let install_btrfs_tools = if install_yay && filesystem == Filesystem::Btrfs {
             prompt_confirm(
@@ -1198,6 +1383,17 @@ impl DeploymentConfig {
             prompt_confirm(
                 "Install Handheld Daemon (HHD)? (gamepad remapping, TDP, profiles — for handhelds)",
                 false,
+            )?
+        } else {
+            false
+        };
+
+        // Steam client prefetch — requires gaming packages (Steam)
+        let steam_prefetch_client = if install_gaming {
+            prompt_confirm(
+                "Download the Steam client now? (a few hundred MB; otherwise \
+                 the target downloads it on first boot before Game Mode works)",
+                install_session_switching,
             )?
         } else {
             false
@@ -1272,7 +1468,7 @@ impl DeploymentConfig {
                 locale,
                 keymap,
                 hostname,
-                hibernation: false,
+                hibernation,
                 secureboot,
                 secureboot_method,
                 secureboot_keys_path: None,
@@ -1295,6 +1491,10 @@ impl DeploymentConfig {
             },
             packages: PackagesConfig {
                 install_yay,
+                install_warp_terminal,
+                install_tkg_kernel,
+                tkg_scheduler,
+                install_zen_browser,
                 install_wine,
                 install_gaming,
                 install_session_switching,
@@ -1304,6 +1504,7 @@ impl DeploymentConfig {
                 sysctl_gaming_tweaks,
                 sysctl_network_performance,
                 install_hhd,
+                steam_prefetch_client,
                 install_decky_loader,
                 install_evdevhook2,
                 handheld_controller_quirks,
@@ -1511,6 +1712,10 @@ impl DeploymentConfig {
             ));
         }
 
+        if let Some(msg) = self.tkg_kernel_conflict() {
+            return Err(DeploytixError::ValidationError(msg));
+        }
+
         // boot_encryption is LUKS1 only - boot_filesystem must not be ZFS
         // (ZFS on /boot with LUKS1 is unsupported)
         if self.disk.boot_encryption && self.disk.boot_filesystem == Filesystem::Zfs {
@@ -1714,6 +1919,13 @@ impl DeploymentConfig {
             ));
         }
 
+        // Prefetching the Steam client is meaningless without Steam.
+        if self.packages.steam_prefetch_client && !self.packages.install_gaming {
+            return Err(DeploytixError::ValidationError(
+                "steam_prefetch_client requires install_gaming = true".to_string(),
+            ));
+        }
+
         // Decky Loader requires gaming (Steam) + yay (decky-loader-bin is AUR)
         if self.packages.install_decky_loader {
             if !self.packages.install_gaming {
@@ -1770,7 +1982,58 @@ impl DeploymentConfig {
         }
 
         self.validate_immutable_backend()?;
+        self.validate_hibernation()?;
 
+        Ok(())
+    }
+
+    /// Hibernation needs somewhere to put the image (device-independent, so
+    /// unit-testable on its own). Called from [`Self::validate`].
+    ///
+    /// Only `zram_only` is rejected, and it has to be: zram is RAM-backed, so
+    /// there is no device that survives the power-off and nothing to resume
+    /// from. It is not a configuration that can be made to work, and a system
+    /// that accepts hibernation and then cold-boots is worse than one that
+    /// refuses up front.
+    ///
+    /// A swap partition and a swap file both work, on a mutable root and on
+    /// either immutable backend: swap is never brought into LUKS or LVM, and
+    /// on an immutable root the swap file is placed on `/var`
+    /// (`configure::swap::swap_file_path`), which is writable and shared across
+    /// snapshot sets rather than inside the read-only, snapshotted root.
+    /// Why this config cannot have the linux-tkg kernel, if it cannot.
+    ///
+    /// Split out of [`Self::validate`] as a pure rule so it can be tested
+    /// without a block device present — `validate` checks that the target
+    /// device exists before it reaches any of the business rules.
+    pub(crate) fn tkg_kernel_conflict(&self) -> Option<String> {
+        if !self.packages.install_tkg_kernel {
+            return None;
+        }
+
+        // The ZFS module is packaged per-kernel (`zfs-linux-zen`) and upstream
+        // ships no `zfs-linux-tkg`.  Since the tkg kernel replaces linux-zen
+        // rather than joining it, allowing this would leave the pool with no
+        // module to import it — an unbootable system, discovered at first boot
+        // instead of here.
+        if self.disk.filesystem == Filesystem::Zfs || self.disk.boot_filesystem == Filesystem::Zfs {
+            return Some(
+                "the linux-tkg kernel is not supported with ZFS: it replaces linux-zen, and \
+                 there is no zfs-linux-tkg module package to import the pool with"
+                    .to_string(),
+            );
+        }
+
+        None
+    }
+
+    pub(crate) fn validate_hibernation(&self) -> Result<()> {
+        if self.system.hibernation && self.disk.swap_type == SwapType::ZramOnly {
+            return Err(DeploytixError::ValidationError(
+                "hibernation requires swap that outlives a power-off, and swap_type = \"zram_only\" is RAM-backed: there is no image to resume from. Use swap_type = \"partition\" or \"file_zram\"."
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1853,6 +2116,52 @@ mod tests {
     #[test]
     fn lvm_ab_backend_rules_pass() {
         assert!(lvm_ab_config().validate_immutable_backend().is_ok());
+    }
+
+    // ── hibernation ──────────────────────────────────────────────────────────
+
+    /// zram is RAM-backed: the image would not survive the power-off it exists
+    /// to survive. Better to refuse than to hand back a system that accepts the
+    /// setting and cold-boots anyway.
+    #[test]
+    fn hibernation_onto_zram_only_is_refused() {
+        let mut c = DeploymentConfig::sample();
+        c.system.hibernation = true;
+        c.disk.swap_type = SwapType::ZramOnly;
+        let err = c.validate_hibernation().unwrap_err().to_string();
+        assert!(err.contains("zram_only"), "got: {err}");
+    }
+
+    /// Both real backing stores are allowed, on a mutable root and on either
+    /// immutable backend — the immutable case is the point of the exercise.
+    #[test]
+    fn hibernation_is_allowed_with_real_swap_including_immutable_roots() {
+        for swap in [SwapType::Partition, SwapType::FileZram] {
+            for immutable in [false, true] {
+                let mut c = DeploymentConfig::sample();
+                c.system.hibernation = true;
+                c.disk.swap_type = swap.clone();
+                c.packages.immutable_root = immutable;
+                assert!(
+                    c.validate_hibernation().is_ok(),
+                    "{swap:?} + immutable_root={immutable} must be allowed"
+                );
+            }
+        }
+        // And the LVM A/B backend specifically.
+        let mut ab = lvm_ab_config();
+        ab.system.hibernation = true;
+        ab.disk.swap_type = SwapType::Partition;
+        assert!(ab.validate_hibernation().is_ok());
+    }
+
+    /// Hibernation off must not make zram_only invalid.
+    #[test]
+    fn zram_only_is_fine_when_nobody_hibernates() {
+        let mut c = DeploymentConfig::sample();
+        c.system.hibernation = false;
+        c.disk.swap_type = SwapType::ZramOnly;
+        assert!(c.validate_hibernation().is_ok());
     }
 
     #[test]
@@ -2003,6 +2312,42 @@ mod tests {
     // Recommended future improvement: extract the pure rule checks into a
     // separate `validate_config_rules()` helper so they can be unit-tested
     // without hardware.  See the test-coverage proposal document for details.
+    /// A ZFS root needs a module built for the running kernel, and there is
+    /// no `zfs-linux-tkg`.  Because the tkg kernel replaces linux-zen instead
+    /// of joining it, letting this through would produce a pool nothing can
+    /// import — caught at first boot, with the disk already written.
+    #[test]
+    fn the_tkg_kernel_is_rejected_on_zfs() {
+        for fs in [Filesystem::Zfs, Filesystem::Btrfs] {
+            for boot_fs in [Filesystem::Zfs, Filesystem::Ext4] {
+                let mut cfg = DeploymentConfig::sample();
+                cfg.packages.install_tkg_kernel = true;
+                cfg.disk.filesystem = fs.clone();
+                cfg.disk.boot_filesystem = boot_fs.clone();
+
+                let conflict = cfg.tkg_kernel_conflict();
+                if fs == Filesystem::Zfs || boot_fs == Filesystem::Zfs {
+                    let msg = conflict.unwrap_or_else(|| {
+                        panic!("tkg + zfs ({fs:?}/{boot_fs:?}) must be rejected")
+                    });
+                    assert!(msg.contains("zfs-linux-tkg"), "{msg}");
+                } else {
+                    assert!(conflict.is_none(), "{conflict:?}");
+                }
+            }
+        }
+    }
+
+    /// The rule only bites when the kernel is actually selected — ZFS on the
+    /// stock kernel is a supported layout and must stay that way.
+    #[test]
+    fn zfs_is_fine_without_the_tkg_kernel() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.packages.install_tkg_kernel = false;
+        cfg.disk.filesystem = Filesystem::Zfs;
+        assert!(cfg.tkg_kernel_conflict().is_none());
+    }
+
     /// Game Mode's first boot needs the machine already online; flag the
     /// config that would reach it with no way to connect.
     #[test]
@@ -2030,6 +2375,35 @@ mod tests {
         cfg.packages.install_session_switching = false;
         cfg.network.wifi_ssid = None;
         assert!(cfg.warnings().is_empty());
+    }
+
+    /// The fstab skip leaves `/`, `/usr` and `/etc` out so the initramfs can
+    /// mount a booted snapshot set without `mount -a` shadowing it. That is
+    /// specific to btrfs snapshot booting: on any other install those three
+    /// must be listed as normal, or nothing mounts them.
+    #[test]
+    fn the_fstab_skip_applies_only_to_the_btrfs_immutable_backend() {
+        let mut cfg = DeploymentConfig::sample();
+
+        cfg.packages.immutable_root = false;
+        cfg.packages.install_grub_btrfs = false;
+        assert!(!cfg.immutable_btrfs(), "a plain install lists all three");
+
+        cfg.packages.install_grub_btrfs = true;
+        assert!(!cfg.immutable_btrfs(), "btrfs alone is not immutable");
+
+        cfg.packages.immutable_root = true;
+        cfg.packages.install_grub_btrfs = false;
+        cfg.disk.use_lvm_thin = true;
+        assert!(!cfg.immutable_btrfs(), "the A/B backend has its own fstab");
+        assert!(cfg.immutable_lvm_ab());
+
+        cfg.disk.use_lvm_thin = false;
+        cfg.packages.install_grub_btrfs = true;
+        assert!(
+            cfg.immutable_btrfs(),
+            "both options together, and only then"
+        );
     }
 
     // ── Recovery install validation ──────────────────────────────────────

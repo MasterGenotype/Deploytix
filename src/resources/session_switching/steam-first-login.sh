@@ -33,6 +33,28 @@ notify() {
 notify "Steam sign-in required" \
     "Sign in to Steam (tick 'Remember me') to enter Game Mode. The system switches to Game Mode automatically after sign-in."
 
+# ---------- Wait for the network ----------
+# This runs from XDG autostart, which fires as soon as the desktop session
+# comes up — typically before NetworkManager has finished associating with the
+# pre-seeded Wi-Fi. Starting Steam there means its first act is a client update
+# against no route at all, which it reports as a connection failure rather than
+# retrying cleanly. Bounded, because a machine with no network at all should
+# still reach a usable desktop with Steam open rather than hang here.
+NETWORK_WAIT_SECONDS=45
+_net_deadline=$(( $(date +%s) + NETWORK_WAIT_SECONDS ))
+while [ "$(date +%s)" -lt "$_net_deadline" ]; do
+    if ip route show default 2>/dev/null | grep -q .; then
+        echo "[first-login] Network is up"
+        break
+    fi
+    sleep 2
+done
+if ! ip route show default 2>/dev/null | grep -q .; then
+    echo >&2 "[first-login] No default route after ${NETWORK_WAIT_SECONDS}s; starting Steam anyway"
+    notify "No network" \
+        "Steam is starting without a connection. Connect to Wi-Fi and sign in to enter Game Mode."
+fi
+
 # Windowed Steam login (regular client; QR code and keyboard available).
 echo "[first-login] Launching windowed Steam for sign-in"
 steam &

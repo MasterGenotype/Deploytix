@@ -72,6 +72,79 @@ pub fn create_and_mount_etc(
     Ok(())
 }
 
+/// Marker prefixed to fstab lines this module disables, so the repair is
+/// idempotent and the original line stays readable.
+const DISABLED_PREFIX: &str = "# deploytix (initramfs-mounted, see .deploytix-pair): ";
+
+/// Comment out any fstab entry for a mount point the initramfs owns
+/// (see [`crate::immutable::INITRAMFS_OWNED_MOUNTPOINTS`]).
+///
+/// Installs made before this was fixed have `/`, `/usr` and `/etc` lines naming
+/// the base `@`/`@usr`/`@etc` in their `@etc` — and every snapshot set
+/// inherited a copy. Booting a set then lets `mount -a` mount the base
+/// subvolumes over the ones the initramfs mounted, hiding everything
+/// `deploytix update` installed. Disabling the lines is enough: the initramfs
+/// has already mounted all three by the time fstab is processed.
+///
+/// Returns `None` when the file already needs no change, so callers can skip
+/// the write (and the log line) on an already-correct system.
+pub fn sanitize_fstab(contents: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(contents.len());
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        // Blank lines, comments and our own disabled entries pass through, which
+        // is what makes repeated repairs a no-op.
+        let owned = !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && line
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(crate::immutable::initramfs_owned_mount);
+        if owned {
+            changed = true;
+            out.push_str(DISABLED_PREFIX);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    changed.then_some(out)
+}
+
+/// Apply [`sanitize_fstab`] to `<root>/etc/fstab` in place. `root` is `""` for
+/// the live system, or a chroot target for a staged snapshot set.
+///
+/// Best-effort by design: a missing or unreadable fstab is not a reason to fail
+/// an update, so this reports what it did rather than propagating I/O errors.
+/// Returns whether the file was rewritten.
+pub fn repair_fstab(cmd: &CommandRunner, root: &str) -> bool {
+    let path = format!("{root}/etc/fstab");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(fixed) = sanitize_fstab(&contents) else {
+        return false;
+    };
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would disable initramfs-owned fstab entries in {path}");
+        return false;
+    }
+    match std::fs::write(&path, fixed) {
+        Ok(()) => {
+            info!(
+                "[immutable] Disabled initramfs-owned /, /usr and /etc entries in {} \
+                 (they would shadow a booted snapshot set)",
+                path
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!("[immutable] Could not repair {}: {}", path, e);
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +171,60 @@ mod tests {
         // Dry-run must not touch the filesystem or error out.
         let cmd = CommandRunner::new(true);
         create_and_mount_etc(&cmd, "/dev/mapper/Crypt-Root", "/mnt/target").unwrap();
+    }
+
+    /// The regression: a legacy fstab naming @/@usr/@etc lets `mount -a` mount
+    /// the base subvolumes over a booted snapshot set, so an update's packages
+    /// vanish even though pacman installed them.
+    #[test]
+    fn sanitize_disables_only_the_initramfs_owned_entries() {
+        let legacy = "\
+# /etc/fstab
+UUID=aaa  /  btrfs  subvol=@,defaults,noatime,compress=zstd,ro  0  0
+UUID=bbb  /usr  btrfs  subvol=@usr,defaults,noatime,compress=zstd,ro  0  0
+UUID=aaa  /etc  btrfs  subvol=@etc,rw,noatime,compress=zstd  0  0
+UUID=ccc  /var  btrfs  subvol=@var,defaults,noatime,compress=zstd  0  0
+UUID=ddd  /home  btrfs  subvol=@home,defaults,noatime,compress=zstd  0  0
+UUID=eee  /boot  btrfs  subvol=@boot,defaults,noatime,compress=zstd  0  0
+UUID=aaa  /tmp  btrfs  subvol=@tmp,rw,noatime,compress=zstd  0  0
+/var/opt  /opt  none  bind  0  0
+";
+        let fixed = sanitize_fstab(legacy).expect("legacy fstab must be rewritten");
+        for owned in ["subvol=@,", "subvol=@usr,", "subvol=@etc,"] {
+            let line = fixed
+                .lines()
+                .find(|l| l.contains(owned))
+                .unwrap_or_else(|| panic!("{owned} line disappeared"));
+            assert!(line.starts_with(DISABLED_PREFIX), "still active: {line}");
+        }
+        // Everything else — including the writable-path binds and /tmp — stays.
+        for kept in ["/var ", "/home ", "/boot ", "/tmp ", "/opt "] {
+            let line = fixed
+                .lines()
+                .find(|l| l.contains(kept))
+                .unwrap_or_else(|| panic!("{kept} line disappeared"));
+            assert!(
+                !line.starts_with(DISABLED_PREFIX),
+                "wrongly disabled: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_is_idempotent_and_skips_correct_files() {
+        let good = "UUID=ccc  /var  btrfs  subvol=@var,defaults  0  0\n";
+        assert!(sanitize_fstab(good).is_none());
+        let legacy = "UUID=bbb  /usr  btrfs  subvol=@usr,ro  0  0\n";
+        let once = sanitize_fstab(legacy).unwrap();
+        assert!(
+            sanitize_fstab(&once).is_none(),
+            "second pass must be a no-op"
+        );
+    }
+
+    #[test]
+    fn repair_is_dry_run_safe_and_tolerates_a_missing_fstab() {
+        let cmd = CommandRunner::new(true);
+        assert!(!repair_fstab(&cmd, "/nonexistent/deploytix-test-root"));
     }
 }

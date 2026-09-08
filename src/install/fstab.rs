@@ -2,7 +2,7 @@
 
 use crate::config::{Filesystem, SwapType};
 use crate::configure::encryption::LuksContainer;
-use crate::configure::swap::{swap_file_fstab_entry, SWAP_FILE_PATH};
+use crate::configure::swap::swap_file_fstab_entry;
 use crate::disk::detection::partition_path;
 use crate::disk::formatting::{get_partition_uuid, ZFS_BOOT_DATASET, ZFS_DATASETS};
 use crate::disk::layouts::{mount_point_to_subvol_name, multi_volume_subvolumes, ComputedLayout};
@@ -159,26 +159,22 @@ pub fn generate_fstab(
                 fstab_content.push_str(&format!("UUID={}\tnone\tswap\tdefaults\t0\t0\n", uuid));
             } else if let Some(ref mount_point) = part.mount_point {
                 // Determine filesystem type and options based on configuration
-                let fstype;
-                let options;
-                let pass;
-                if part.is_efi {
-                    fstype = "vfat".to_string();
-                    options = "umask=0077,defaults".to_string();
-                    pass = 0;
+                let (fstype, options, pass) = if part.is_efi {
+                    ("vfat".to_string(), "umask=0077,defaults".to_string(), 0)
                 } else if part.is_boot_fs {
                     let (bfs, bopts, bpass) = boot_fs_fstab_entry(boot_filesystem);
-                    fstype = bfs.to_string();
-                    options = bopts.to_string();
-                    pass = bpass;
+                    (bfs.to_string(), bopts.to_string(), bpass)
                 } else {
-                    fstype = filesystem.to_string();
-                    options = match filesystem {
+                    let options = match filesystem {
                         Filesystem::Btrfs => "defaults,noatime,compress=zstd".to_string(),
                         _ => "defaults,noatime".to_string(),
                     };
-                    pass = fsck_pass(filesystem, mount_point);
-                }
+                    (
+                        filesystem.to_string(),
+                        options,
+                        fsck_pass(filesystem, mount_point),
+                    )
+                };
 
                 fstab_content.push_str(&format!(
                     "UUID={}\t{}\t{}\t{}\t0\t{}\n",
@@ -198,6 +194,16 @@ pub fn generate_fstab(
     Ok(())
 }
 
+/// Header explaining why `/`, `/usr` and `/etc` are absent from an immutable
+/// system's fstab. Mirrors the equivalent note in [`generate_fstab_lvm_ab`].
+const INITRAMFS_OWNED_NOTE: &str = "\
+# Immutable root: /, /usr and /etc are mounted by the mountcrypt initramfs\n\
+# hook, from the .deploytix-pair marker inside whichever root subvolume the\n\
+# kernel cmdline selected (the base @ or a @deploytix-sets/<id>/root snapshot\n\
+# set). They are intentionally NOT listed here: an fstab entry can only name\n\
+# the base @/@usr/@etc, and `mount -a` would mount those over a booted\n\
+# snapshot set, hiding everything `deploytix update` installed into it.\n\n";
+
 /// fstab entries that give a read-only immutable root its writable paths.
 ///
 /// `/` is mounted read-only and — deliberately — is *not* covered by an
@@ -205,7 +211,8 @@ pub fn generate_fstab(
 /// grub-btrfs and `findmnt` can work with. That leaves the handful of
 /// directories which live inside `/` and still have to be written:
 ///
-/// - `/tmp` on tmpfs, ephemeral, as on any normal system;
+/// - `/tmp` as disk-backed btrfs `@tmp` on the root FS (not a half-RAM tmpfs;
+///   see `docs/TMP_DISK_BACKED.md`). Boot wipe via tmpfiles keeps it ephemeral;
 /// - `/root`, `/opt` and `/srv` bind-mounted out of the writable `@var`, so
 ///   they persist across reboots *and* across snapshot sets.
 ///
@@ -217,13 +224,17 @@ pub fn generate_fstab(
 /// Not covered: `/mnt` and `/media` stay read-only. They are mount points, so
 /// mounting *onto* them still works; only creating new subdirectories under
 /// them at runtime fails, which is what `/run/media` is for.
-fn immutable_writable_paths() -> String {
+///
+/// `root_fs_uuid` is the UUID of the root btrfs that holds `@tmp`.
+fn immutable_writable_paths(root_fs_uuid: &str) -> String {
     let mut s = String::from(
         "\n# Writable paths for the read-only root. `/` is a plain read-only\n\
          # btrfs mount (no overlay), so these are given writable homes\n\
-         # explicitly. /tmp is ephemeral; the rest live on @var and persist.\n\
-         tmpfs  /tmp  tmpfs  rw,nosuid,nodev,mode=1777  0  0\n",
+         # explicitly. /tmp is disk-backed btrfs @tmp on the root FS (not RAM\n\
+         # tmpfs); tmpfiles boot-clean keeps it ephemeral. The rest live on\n\
+         # @var and persist.\n",
     );
+    s.push_str(&crate::immutable::tmp::tmp_fstab_entry(root_fs_uuid));
     for (source, target) in crate::immutable::WRITABLE_BIND_PATHS {
         s.push_str(&format!("{source}  {target}  none  bind  0  0\n"));
     }
@@ -239,6 +250,11 @@ fn generate_fstab_with_subvolumes(
     install_root: &str,
     filesystem: &Filesystem,
     boot_filesystem: &Filesystem,
+    // True only for the btrfs immutable backend. It leaves `/`, `/usr` and
+    // `/etc` out, because the initramfs mounts them from the booted set's
+    // .deploytix-pair marker and listing them here would let `mount -a` shadow
+    // that set with the base subvolumes. Pass false for a plain install and for
+    // the LVM A/B backend, which has its own fstab.
     immutable: bool,
 ) -> Result<()> {
     let subvolumes = layout.subvolumes.as_ref().ok_or_else(|| {
@@ -265,6 +281,9 @@ fn generate_fstab_with_subvolumes(
     if cmd.is_dry_run() {
         println!("  [dry-run] Would generate fstab with btrfs subvolumes:");
         for sv in subvolumes {
+            if immutable && crate::immutable::initramfs_owned_mount(&sv.mount_point) {
+                continue;
+            }
             println!(
                 "    UUID=<ROOT_UUID> {} btrfs subvol={},{} 0 {}",
                 sv.mount_point,
@@ -286,26 +305,22 @@ fn generate_fstab_with_subvolumes(
          # <file system> <mount point> <type> <options> <dump> <pass>\n\n",
     );
 
+    if immutable {
+        content.push_str(INITRAMFS_OWNED_NOTE);
+    }
+
     // Add subvolume entries
     for sv in subvolumes {
+        // Immutable model: `/`, `/usr` and `/etc` are mounted by the initramfs
+        // from the booted root's pairing marker. Listing them here would make
+        // `mount -a` shadow a booted snapshot set with the base subvolumes.
+        if immutable && crate::immutable::initramfs_owned_mount(&sv.mount_point) {
+            continue;
+        }
         let pass = 0; // btrfs: no boot-time fsck
-                      // Immutable model: `/` and `/usr` are mounted read-only.
-        let opts = if immutable && crate::immutable::is_readonly_mount(&sv.mount_point) {
-            format!("{},ro", sv.mount_options)
-        } else {
-            sv.mount_options.clone()
-        };
         content.push_str(&format!(
             "UUID={}  {}  btrfs  subvol={},{}  0  {}\n",
-            root_uuid, sv.mount_point, sv.name, opts, pass,
-        ));
-    }
-    // Immutable model: /etc lives on a dedicated writable @etc subvolume on the
-    // root partition, kept out of the read-only root.
-    if immutable {
-        content.push_str(&format!(
-            "UUID={}  /etc  btrfs  subvol=@etc,rw,noatime,compress=zstd  0  0\n",
-            root_uuid,
+            root_uuid, sv.mount_point, sv.name, sv.mount_options, pass,
         ));
     }
 
@@ -371,7 +386,7 @@ fn generate_fstab_with_subvolumes(
 
     // Last, so the bind sources under /var are already listed above them.
     if immutable {
-        content.push_str(&immutable_writable_paths());
+        content.push_str(&immutable_writable_paths(&root_uuid));
     }
 
     let fstab_path = format!("{}/etc/fstab", install_root);
@@ -399,6 +414,9 @@ pub struct MultiVolumeFstabParams<'a> {
     pub filesystem: &'a Filesystem,
     pub boot_filesystem: &'a Filesystem,
     pub swap_type: &'a SwapType,
+    /// Absolute path of the swap file in the target, for `SwapType::FileZram`.
+    /// Differs on an immutable root -- see `configure::swap::swap_file_path`.
+    pub swap_file: &'a str,
     pub install_root: &'a str,
     /// Transactional immutable root: mount `/` and `/usr` read-only and add a
     /// writable `@etc` subvolume mounted at `/etc`.
@@ -413,6 +431,7 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
     let filesystem = params.filesystem;
     let boot_filesystem = params.boot_filesystem;
     let swap_type = params.swap_type;
+    let swap_file = params.swap_file;
     let install_root = params.install_root;
     info!(
         "Generating /etc/fstab for {} encrypted volumes",
@@ -444,6 +463,9 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
          #\n\
          # <file system> <mount point> <type> <options> <dump> <pass>\n\n",
     );
+    if params.immutable {
+        content.push_str(INITRAMFS_OWNED_NOTE);
+    }
 
     // Add encrypted volume entries
     if layout.uses_subvolumes() {
@@ -452,26 +474,17 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
             let fs_uuid = get_partition_uuid(&container.mapped_path)?;
             let svols = multi_volume_subvolumes(&container.volume_name);
             for sv in &svols {
-                // Immutable model: `/` and `/usr` are mounted read-only.
-                let opts =
-                    if params.immutable && crate::immutable::is_readonly_mount(&sv.mount_point) {
-                        format!("{},ro", sv.mount_options)
-                    } else {
-                        sv.mount_options.clone()
-                    };
+                // Immutable model: `/`, `/usr` and `/etc` belong to the
+                // initramfs, which mounts the booted root's paired trio. An
+                // fstab entry can only name the base subvolume and would be
+                // mounted over a booted snapshot set by `mount -a`.
+                if params.immutable && crate::immutable::initramfs_owned_mount(&sv.mount_point) {
+                    continue;
+                }
                 content.push_str(&format!(
                     "# {} (LUKS encrypted)\n\
                      UUID={}  {}  btrfs  subvol={},{}  0  0\n\n",
-                    container.volume_name, fs_uuid, sv.mount_point, sv.name, opts,
-                ));
-            }
-            // Immutable model: /etc lives on a dedicated writable @etc subvolume
-            // on the root btrfs, kept out of the read-only root.
-            if params.immutable && container.volume_name == "Root" {
-                content.push_str(&format!(
-                    "# {} (writable /etc for immutable root)\n\
-                     UUID={}  /etc  btrfs  subvol=@etc,rw,noatime,compress=zstd  0  0\n\n",
-                    container.volume_name, fs_uuid,
+                    container.volume_name, fs_uuid, sv.mount_point, sv.name, sv.mount_options,
                 ));
             }
         }
@@ -516,7 +529,7 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
             content.push_str(&format!(
                 "# Swap file (ZRAM provides additional compressed swap)\n\
                  {}  none  swap  defaults  0  0\n\n",
-                SWAP_FILE_PATH
+                swap_file
             ));
         }
         SwapType::ZramOnly => {
@@ -551,8 +564,19 @@ pub fn generate_fstab_multi_volume(params: &MultiVolumeFstabParams) -> Result<()
     }
 
     // Last, so the bind sources under /var are already listed above them.
+    // @tmp lives on the Root container's btrfs (same FS as @ / @etc).
     if params.immutable {
-        content.push_str(&immutable_writable_paths());
+        let root_uuid = containers
+            .iter()
+            .find(|c| c.volume_name == "Root")
+            .map(|c| get_partition_uuid(&c.mapped_path))
+            .transpose()?
+            .ok_or_else(|| {
+                crate::utils::error::DeploytixError::ConfigError(
+                    "No Root container found for immutable @tmp fstab entry".to_string(),
+                )
+            })?;
+        content.push_str(&immutable_writable_paths(&root_uuid));
     }
 
     let fstab_path = format!("{}/etc/fstab", install_root);
@@ -576,6 +600,9 @@ pub struct LvmThinFstabParams<'a> {
     pub layout: &'a ComputedLayout,
     pub filesystem: &'a Filesystem,
     pub swap_type: &'a SwapType,
+    /// Absolute path of the swap file in the target, for `SwapType::FileZram`.
+    /// Differs on an immutable root -- see `configure::swap::swap_file_path`.
+    pub swap_file: &'a str,
     pub boot_mapped_device: Option<&'a str>,
     pub boot_filesystem: &'a Filesystem,
     pub install_root: &'a str,
@@ -593,6 +620,7 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
     let device = params.device;
     let layout = params.layout;
     let swap_type = params.swap_type;
+    let swap_file = params.swap_file;
     let boot_mapped_device = params.boot_mapped_device;
     let install_root = params.install_root;
     info!("Generating /etc/fstab for LVM thin volumes");
@@ -653,7 +681,7 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
             content.push_str(&format!(
                 "# Swap file (ZRAM provides additional compressed swap)\n\
                  {}  none  swap  defaults  0  0\n\n",
-                SWAP_FILE_PATH
+                swap_file
             ));
         }
         SwapType::ZramOnly => {
@@ -723,6 +751,9 @@ pub struct LvmAbFstabParams<'a> {
     pub layout: &'a ComputedLayout,
     pub filesystem: &'a Filesystem,
     pub swap_type: &'a SwapType,
+    /// Absolute path of the swap file in the target, for `SwapType::FileZram`.
+    /// Differs on an immutable root -- see `configure::swap::swap_file_path`.
+    pub swap_file: &'a str,
     pub boot_mapped_device: Option<&'a str>,
     pub boot_filesystem: &'a Filesystem,
     pub install_root: &'a str,
@@ -807,7 +838,7 @@ pub fn generate_fstab_lvm_ab(params: &LvmAbFstabParams) -> Result<()> {
             content.push_str(&format!(
                 "# Swap file (ZRAM provides additional compressed swap)\n\
                  {}  none  swap  defaults  0  0\n\n",
-                SWAP_FILE_PATH
+                params.swap_file
             ));
         }
         SwapType::ZramOnly => {
@@ -858,12 +889,15 @@ pub fn generate_fstab_lvm_ab(params: &LvmAbFstabParams) -> Result<()> {
 }
 
 /// Add swap file entry to an existing fstab
-pub fn append_swap_file_entry(install_root: &str) -> Result<()> {
+pub fn append_swap_file_entry(
+    config: &crate::config::DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
     let fstab_path = format!("{}/etc/fstab", install_root);
 
     let mut content = fs::read_to_string(&fstab_path).unwrap_or_default();
     content.push_str("\n# Swap file\n");
-    content.push_str(&swap_file_fstab_entry());
+    content.push_str(&swap_file_fstab_entry(config));
 
     fs::write(&fstab_path, content)?;
     info!("Added swap file entry to fstab");
@@ -873,6 +907,65 @@ pub fn append_swap_file_entry(install_root: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── immutable: initramfs-owned mount points ──────────────────────────────
+
+    /// The regression: fstab listed `/`, `/usr` and `/etc` with the base
+    /// `@`/`@usr`/`@etc`. Every snapshot set inherits that file on its `@etc`,
+    /// so booting a set let `mount -a` mount the base subvolumes on top —
+    /// hiding everything `deploytix update` had installed into the set. The
+    /// initramfs mounts all three from `.deploytix-pair`; fstab must not.
+    #[test]
+    fn immutable_fstab_omits_the_mount_points_the_initramfs_owns() {
+        for mp in ["/", "/usr", "/etc"] {
+            assert!(
+                crate::immutable::initramfs_owned_mount(mp),
+                "{mp} must be recognised as initramfs-owned"
+            );
+        }
+        // The writable-path binds and /tmp are *not* owned — they belong in fstab.
+        for mp in ["/var", "/home", "/boot", "/tmp", "/opt", "/srv", "/root"] {
+            assert!(
+                !crate::immutable::initramfs_owned_mount(mp),
+                "{mp} must stay in fstab"
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_fstab_note_explains_the_omission() {
+        assert!(INITRAMFS_OWNED_NOTE.contains("mountcrypt"));
+        assert!(INITRAMFS_OWNED_NOTE.contains(".deploytix-pair"));
+        assert!(INITRAMFS_OWNED_NOTE.contains("NOT listed here"));
+        // Every line is a comment, so it is safe to splice into an fstab.
+        for line in INITRAMFS_OWNED_NOTE.lines() {
+            assert!(
+                line.is_empty() || line.starts_with('#'),
+                "note line is not a comment: {line}"
+            );
+        }
+    }
+
+    /// The immutable model still needs writable homes for the paths that live
+    /// inside the read-only root; those entries are unaffected by the omission.
+    #[test]
+    fn immutable_writable_paths_cover_tmp_and_the_var_binds() {
+        let s = immutable_writable_paths("9f72ea22-39ab-4a60-8ce0-38a8219c376a");
+        assert!(
+            s.contains("subvol=@tmp"),
+            "/tmp must be disk-backed @tmp, got:\n{s}"
+        );
+        assert!(
+            !s.contains("tmpfs  /tmp  tmpfs"),
+            "must not use half-RAM tmpfs for /tmp"
+        );
+        for (source, target) in crate::immutable::WRITABLE_BIND_PATHS {
+            assert!(
+                s.contains(&format!("{source}  {target}  none  bind")),
+                "missing bind {source} -> {target}"
+            );
+        }
+    }
 
     // ── fsck_pass ────────────────────────────────────────────────────────────
 

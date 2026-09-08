@@ -3,9 +3,8 @@
 //! This is the entry point for the GUI version of Deploytix.
 
 use deploytix::gui::DeploytixGui;
+use deploytix::utils::single_instance::{InstanceLock, LockError};
 use eframe::egui;
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 
 /// Lock file path used to enforce a single running instance.
 const LOCK_PATH: &str = "/tmp/deploytix-gui.lock";
@@ -13,32 +12,27 @@ const LOCK_PATH: &str = "/tmp/deploytix-gui.lock";
 fn main() -> eframe::Result<()> {
     // Enforce single instance via an exclusive lock file.
     // O_CREAT | O_EXCL fails if the file already exists.
-    let lock_result = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(LOCK_PATH);
+    // Held for the life of the process. The lock is an flock on the file, not
+    // the file's existence, so a previous instance that was killed rather than
+    // closed leaves at most a stray file — never a lock that blocks startup.
+    // Removed on a clean exit.
+    // Terminating mode: eframe's event loop never polls `is_interrupted`, so
+    // the installer's two-stage handling would make the first Ctrl+C appear to
+    // hang. The handler still unlinks the lock file registered just below.
+    // `Installer::run` switches back to two-stage mode if an install starts.
+    deploytix::utils::signal::install_terminating_handlers();
 
-    let _lock_file: File = match lock_result {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            eprintln!("Deploytix GUI is already running (lock file {LOCK_PATH} exists).");
+    let _lock = match InstanceLock::acquire(LOCK_PATH) {
+        Ok(l) => l,
+        Err(LockError::AlreadyRunning) => {
+            eprintln!("Deploytix GUI is already running.");
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("Failed to create lock file {LOCK_PATH}: {e}");
+            eprintln!("Failed to take the single-instance lock {LOCK_PATH}: {e}");
             std::process::exit(1);
         }
     };
-
-    // Ensure the lock file is removed on exit (normal or panic).
-    struct LockGuard;
-    impl Drop for LockGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(LOCK_PATH);
-        }
-    }
-    let _guard = LockGuard;
 
     // Set up logging before audio so warnings are visible
     tracing_subscriber::fmt()

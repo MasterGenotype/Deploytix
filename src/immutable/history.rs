@@ -59,6 +59,8 @@ pub enum Request {
     Packages(Vec<String>),
     /// Local `.pkg.tar.*` files (stored as the basenames actually installed).
     LocalFiles(Vec<String>),
+    /// `deploytix remove` — package names to take out.
+    Remove(Vec<String>),
     /// Both in one transaction.
     Mixed {
         packages: Vec<String>,
@@ -88,6 +90,7 @@ impl Request {
             Self::FullUpgrade => "Full system upgrade".to_string(),
             Self::Packages(p) => format!("Install: {}", p.join(", ")),
             Self::LocalFiles(f) => format!("Local package: {}", f.join(", ")),
+            Self::Remove(p) => format!("Remove: {}", p.join(", ")),
             Self::Mixed { packages, files } => {
                 format!(
                     "Install: {} + local: {}",
@@ -329,7 +332,7 @@ pub fn list_records_in(dir: &Path) -> Vec<UpdateRecord> {
             }
         })
         .collect();
-    records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    records.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     records
 }
 

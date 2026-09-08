@@ -83,6 +83,10 @@ impl UpdateGui {
 
 impl eframe::App for UpdateGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Windowed, so this tracks the window rather than the display: shrink
+        // the window and the contents stay whole instead of being clipped.
+        theme::fit_to_screen(ctx, theme::UPDATER_REFERENCE);
+
         if let Some(reason) = self.blocked {
             egui::CentralPanel::default().show(ctx, |ui| self.show_blocked(ui, reason));
             return;

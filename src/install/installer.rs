@@ -184,8 +184,10 @@ impl Installer {
     /// Run the full installation process
     pub fn run(mut self) -> Result<()> {
         // Install signal handlers so SIGINT/SIGTERM trigger cleanup
-        // instead of immediate termination.
-        signal::install_signal_handlers();
+        // instead of immediate termination. The guard restores whatever mode
+        // was in force before, so a GUI that ran an install gets its
+        // first-signal-is-fatal behaviour back afterwards.
+        let _signal_mode = signal::install_signal_handlers();
 
         // Hold off console blanking, X DPMS and elogind's idle/lid actions for
         // the whole run.  Phases 4-6 go many minutes without user input, and a
@@ -290,6 +292,26 @@ impl Installer {
         self.report_progress(0.30, "Installing base system (this may take a while)...");
         self.install_base_system()?;
 
+        // Phase 3.2: linux-tkg kernel, if it is standing in for linux-zen.
+        //
+        // The position is load-bearing, and is why this is not a phase-5.95
+        // extra like Warp Terminal.  It has to land before configure_system()
+        // at 0.65, which is where `mkinitcpio -P` picks up the kernel's own
+        // preset and, more importantly, where grub-mkconfig runs for the only
+        // time: finalize() re-runs mkinitcpio but never grub-mkconfig, and the
+        // pacman hook that would otherwise catch a late kernel
+        // (create_grub_reinstall_hook) is only installed on encrypted or
+        // LVM-thin layouts.  Installed any later on a plain layout, the kernel
+        // would get an initramfs and no boot entry.
+        //
+        // The package's own post-install hook runs mkinitcpio here against a
+        // mkinitcpio.conf deploytix has not customised yet; that image is
+        // discarded by the `mkinitcpio -P` runs at 0.65 and in finalize().
+        if self.config.packages.install_tkg_kernel {
+            self.report_progress(0.52, "Installing linux-tkg kernel...");
+            configure::packages::install_tkg_kernel(&self.cmd, &self.config, INSTALL_ROOT)?;
+        }
+
         // Phase 3.5: Generate fstab
         self.report_progress(0.55, "Generating fstab...");
         if uses_immutable_ab {
@@ -301,7 +323,7 @@ impl Installer {
         } else {
             self.generate_fstab()?;
             if self.config.disk.swap_type == SwapType::FileZram {
-                append_swap_file_entry(INSTALL_ROOT)?;
+                append_swap_file_entry(&self.config, INSTALL_ROOT)?;
             }
         }
 
@@ -381,10 +403,10 @@ impl Installer {
             self.install_yay()?;
         }
 
-        // Phase 5.35: AUR packages via yay (after yay)
-        if self.config.packages.install_yay {
-            self.report_progress(0.875, "Installing AUR packages (zen-browser)...");
-            self.install_aur_packages()?;
+        // Phase 5.35: Zen Browser via yay (optional; after yay)
+        if self.config.packages.install_zen_browser && self.config.packages.install_yay {
+            self.report_progress(0.875, "Installing Zen Browser (AUR)...");
+            self.install_zen_browser()?;
         }
 
         // Phase 5.37: iwd GUI frontend via yay (after yay; only when iwd backend selected)
@@ -420,6 +442,8 @@ impl Installer {
         if self.config.packages.immutable_root {
             self.report_progress(0.888, "Installing immutable-root shell nudge...");
             crate::immutable::lockdown::install(&self.cmd, INSTALL_ROOT)?;
+            // Boot-wipe policy for disk-backed /tmp (@tmp).
+            crate::immutable::tmp::install_tmpfiles(&self.cmd, INSTALL_ROOT)?;
         }
 
         // Phase 5.5: User autostart entries (unconditional, after user creation)
@@ -698,6 +722,12 @@ impl Installer {
             self.config.immutable_lvm_ab(),
         )?;
 
+        // linux-tkg replaces linux-zen, so an install that cannot reach the
+        // release must fail here — before partition_disk() at 0.10 — rather
+        // than after basestrap, where the disk is already gone and there is no
+        // stock kernel to fall back to.
+        self.preflight_tkg_kernel()?;
+
         // Get device info and compute layout
         let device_info = get_device_info(&self.config.disk.device)?;
         let disk_mib = device_info.size_mib();
@@ -953,10 +983,16 @@ impl Installer {
                 })?;
             let root_fs_device = partition_path(&self.config.disk.device, root_part.number);
             crate::immutable::etc::create_and_mount_etc(&self.cmd, &root_fs_device, INSTALL_ROOT)?;
+            // Disk-backed /tmp (@tmp on root btrfs) — not a half-RAM tmpfs.
+            crate::immutable::tmp::create_and_mount_tmp(&self.cmd, &root_fs_device, INSTALL_ROOT)?;
             crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
             // Bind sources for the read-only root's writable paths. /var is
             // mounted by now, so these land on @var and persist across sets.
             crate::immutable::create_writable_path_sources(&self.cmd, INSTALL_ROOT)?;
+            // ...and bind them over /opt, /root and /srv for the rest of the
+            // install, so packages that write there land on @var instead of
+            // inside @ where the boot-time bind mount would hide them.
+            crate::immutable::mount_writable_path_binds(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -982,6 +1018,51 @@ impl Installer {
         Ok(())
     }
 
+    /// Prove the linux-tkg release is reachable before the disk is touched.
+    ///
+    /// Because linux-tkg replaces linux-zen, a download that fails during
+    /// phase 3 leaves a repartitioned disk with no kernel on it.  A HEAD
+    /// request against the pinned fallback asset is enough to catch the cases
+    /// worth catching here — no network, no DNS, GitHub down, a proxy in the
+    /// way — cheaply and without depending on the API rate limit.  The real
+    /// resolve still happens in the chroot, where the newest build is picked.
+    fn preflight_tkg_kernel(&self) -> Result<()> {
+        if !self.config.packages.install_tkg_kernel || self.cmd.is_dry_run() {
+            return Ok(());
+        }
+
+        let sched = self.config.packages.tkg_scheduler;
+        let (kernel_url, _) = crate::config::tkg_fallback_urls(sched);
+        info!("Checking that the linux-tkg release is reachable ({sched})");
+
+        // -I alone would be answered by the redirect, not the asset; -L
+        // follows it to the storage host that actually serves the file.
+        self.cmd
+            .run(
+                "curl",
+                &[
+                    "-fsIL",
+                    "--retry",
+                    "2",
+                    "--connect-timeout",
+                    "15",
+                    "-o",
+                    "/dev/null",
+                    &kernel_url,
+                ],
+            )
+            .map_err(|e| {
+                DeploytixError::ValidationError(format!(
+                    "the linux-tkg kernel was requested but its release is unreachable: {e}. \
+                     It replaces linux-zen, so continuing would install a system with no \
+                     kernel. Check network access to github.com, or untick the linux-tkg \
+                     option to use linux-zen instead."
+                ))
+            })?;
+
+        Ok(())
+    }
+
     /// Install base system using basestrap
     fn install_base_system(&self) -> Result<()> {
         info!("[Phase 3/6] Installing base system via basestrap");
@@ -1003,7 +1084,13 @@ impl Installer {
             INSTALL_ROOT,
             &self.config.disk.filesystem,
             &self.config.disk.boot_filesystem,
-            self.config.packages.immutable_root,
+            // The btrfs backend only. Skipping `/`, `/usr` and `/etc` here is
+            // what lets the initramfs mount a booted snapshot set without
+            // `mount -a` shadowing it with the base subvolumes, and that
+            // mechanism is specific to btrfs snapshot booting. The LVM A/B
+            // backend has its own fstab (generate_fstab_lvm_ab), and a plain
+            // non-immutable install must list all three as normal.
+            self.config.immutable_btrfs(),
         )?;
 
         Ok(())
@@ -1196,9 +1283,9 @@ impl Installer {
     }
 
     /// Install AUR packages via yay
-    fn install_aur_packages(&self) -> Result<()> {
-        info!("Installing AUR packages via yay");
-        configure::packages::install_aur_packages(&self.cmd, &self.config, INSTALL_ROOT)
+    fn install_zen_browser(&self) -> Result<()> {
+        info!("Installing Zen Browser via yay");
+        configure::packages::install_zen_browser(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install the chosen iwd GUI frontend (iwgtk / iwdgui / iwqt) via yay
@@ -1359,6 +1446,18 @@ impl Installer {
         configure::packages::install_evdevhook2(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
+    /// Report an optional step that failed without aborting the run.
+    ///
+    /// These used to be `warn!` only. The logger writes to stderr, which the
+    /// GUI does not read, so an install where Warp or the extras failed looked
+    /// exactly like one where they succeeded -- "Installation completed
+    /// successfully" and a system missing the packages. Anything best-effort
+    /// has to say so on the same channel that reports the successes.
+    fn report_failure(&self, progress: f32, what: &str, err: &str) {
+        warn!("{} failed: {}", what, err);
+        self.report_progress(progress, &format!("WARNING: {} failed: {}", what, err));
+    }
+
     /// Phase 5.95 — post-install extras.
     ///
     /// Pulls the latest extras from two sources, in order:
@@ -1374,22 +1473,37 @@ impl Installer {
         let pre_pacman = self.config.packages.extra_packages.pacman.clone();
         let pre_aur = self.config.packages.extra_packages.aur.clone();
         if !pre_pacman.is_empty() {
-            self.report_progress(0.94, "Installing extra pacman packages from config...");
+            self.report_progress(
+                0.94,
+                &format!("Installing {} extra pacman package(s)...", pre_pacman.len()),
+            );
             if let Err(e) =
                 configure::packages::install_extras_pacman(&self.cmd, INSTALL_ROOT, &pre_pacman)
             {
-                warn!("config-supplied pacman extras failed: {}", e);
+                self.report_failure(0.94, "extra pacman packages", &e.to_string());
             }
         }
         if !pre_aur.is_empty() {
-            self.report_progress(0.945, "Installing extra AUR packages from config...");
+            self.report_progress(
+                0.945,
+                &format!("Installing {} extra AUR package(s)...", pre_aur.len()),
+            );
             if let Err(e) = configure::packages::install_extras_aur(
                 &self.cmd,
                 &self.config,
                 INSTALL_ROOT,
                 &pre_aur,
             ) {
-                warn!("config-supplied AUR extras failed: {}", e);
+                self.report_failure(0.945, "extra AUR packages", &e.to_string());
+            }
+        }
+
+        if self.config.packages.install_warp_terminal {
+            self.report_progress(0.948, "Installing Warp Terminal...");
+            match configure::packages::install_warp_terminal(&self.cmd, &self.config, INSTALL_ROOT)
+            {
+                Ok(_) => self.report_progress(0.949, "Warp Terminal installed"),
+                Err(e) => self.report_failure(0.949, "Warp Terminal", &e.to_string()),
             }
         }
 
@@ -1734,10 +1848,20 @@ impl Installer {
                 &root_container.mapped_path,
                 INSTALL_ROOT,
             )?;
+            // Disk-backed /tmp (@tmp on Crypt-Root) — not a half-RAM tmpfs.
+            crate::immutable::tmp::create_and_mount_tmp(
+                &self.cmd,
+                &root_container.mapped_path,
+                INSTALL_ROOT,
+            )?;
             crate::immutable::write_live_pair_marker(&self.cmd, INSTALL_ROOT)?;
             // Bind sources for the read-only root's writable paths. /var is
             // mounted by now, so these land on @var and persist across sets.
             crate::immutable::create_writable_path_sources(&self.cmd, INSTALL_ROOT)?;
+            // ...and bind them over /opt, /root and /srv for the rest of the
+            // install, so packages that write there land on @var instead of
+            // inside @ where the boot-time bind mount would hide them.
+            crate::immutable::mount_writable_path_binds(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -1826,8 +1950,10 @@ impl Installer {
             filesystem: &self.config.disk.filesystem,
             boot_filesystem: &self.config.disk.boot_filesystem,
             swap_type: &self.config.disk.swap_type,
+            swap_file: crate::configure::swap::swap_file_path(&self.config),
             install_root: INSTALL_ROOT,
-            immutable: self.config.packages.immutable_root,
+            // btrfs snapshot backend only — see generate_fstab above.
+            immutable: self.config.immutable_btrfs(),
         })
     }
 
@@ -2160,6 +2286,7 @@ impl Installer {
             layout,
             filesystem: &self.config.disk.filesystem,
             swap_type: &self.config.disk.swap_type,
+            swap_file: crate::configure::swap::swap_file_path(&self.config),
             boot_mapped_device: boot_mapped,
             boot_filesystem: &self.config.disk.boot_filesystem,
             install_root: INSTALL_ROOT,
@@ -2336,6 +2463,7 @@ impl Installer {
             layout,
             filesystem: &self.config.disk.filesystem,
             swap_type: &self.config.disk.swap_type,
+            swap_file: crate::configure::swap::swap_file_path(&self.config),
             boot_mapped_device: boot_mapped,
             boot_filesystem: &self.config.disk.boot_filesystem,
             install_root: INSTALL_ROOT,

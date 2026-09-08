@@ -6,13 +6,17 @@
 //! marker for the matching `/usr` and `/etc`.
 //!
 //! ## Why grub is regenerated in a chroot
-//! On a booted immutable system `/` is an **overlayfs**, and `grub-probe` (which
-//! `grub-mkconfig` calls) fails with *"failed to get canonical path of
-//! `overlay'"* and aborts — producing an empty grub.cfg. So we never run
-//! `grub-mkconfig` against the live `/`. Instead [`activate_target`] mounts the
-//! target subvolume set at a scratch chroot (a **real** btrfs root, where
-//! `grub-probe` works), points that root's `/etc/default/grub` at itself, and
-//! runs `grub-mkconfig` there — writing the shared `/boot/grub/grub.cfg`.
+//! Not because the live `/` is unusable — under the immutable model it is
+//! deliberately a plain read-only btrfs mount, precisely so `grub-probe`,
+//! grub-btrfs and `findmnt -no FSROOT /` keep working (see
+//! `crate::immutable::WRITABLE_BIND_PATHS`). The reason is that grub.cfg must
+//! describe the **target** set, not the running one: `grub-mkconfig` reads
+//! `/etc/default/grub` from whichever root it runs against, and the running
+//! set's copy still names the running set. So [`activate_target`] mounts the
+//! target subvolume set at a scratch chroot, points *that* root's
+//! `/etc/default/grub` at itself, and runs `grub-mkconfig` there — writing the
+//! shared `/boot/grub/grub.cfg`. Its read-only `/` is also why the live root
+//! cannot simply be edited in place.
 
 use crate::configure::bootloader::REINSTALL_GRUB_PATH;
 use crate::immutable::snapshot::{self, ImmutableDevices, SubvolSet};

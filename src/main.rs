@@ -249,6 +249,36 @@ enum Commands {
         reboot: bool,
     },
 
+    /// Transactionally remove packages (immutable root): build a new snapshot
+    /// set without them and activate it on reboot.
+    Remove {
+        /// Packages to remove.
+        #[arg(required = true, trailing_var_arg = true)]
+        packages: Vec<String>,
+
+        /// Also remove every package that depends on these (pacman -Rc).
+        /// Cascades into base packages faster than most people expect.
+        #[arg(long)]
+        cascade: bool,
+
+        /// Also delete configuration files instead of leaving .pacsave
+        /// (pacman -Rn).
+        #[arg(long)]
+        purge: bool,
+
+        /// Do not prompt for confirmation of the resolved removal set.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Number of previous snapshot sets to keep when pruning.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+
+        /// Reboot automatically once the removal is staged.
+        #[arg(long)]
+        reboot: bool,
+    },
+
     /// Roll back to a previous snapshot set (immutable root).
     Rollback {
         /// Snapshot set id to roll back to, or `@` for the base install.
@@ -358,6 +388,16 @@ fn main() -> Result<()> {
             reboot,
         }) => {
             cmd_update(packages, keep, reboot, cli.dry_run)?;
+        }
+        Some(Commands::Remove {
+            packages,
+            cascade,
+            purge,
+            yes,
+            keep,
+            reboot,
+        }) => {
+            cmd_remove(packages, cascade, purge, yes, keep, reboot, cli.dry_run)?;
         }
         Some(Commands::Rollback {
             target,
@@ -488,6 +528,57 @@ fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -
             },
         )?;
     }
+    Ok(())
+}
+
+/// `deploytix remove` — transactional package removal.
+///
+/// btrfs-backend only. The LVM A/B backend can express the same operation
+/// (rsync the active root into the inactive slot, `pacman -R` in a chroot,
+/// `veritysetup format` a fresh hash, repoint), but it is not implemented, and
+/// silently running the btrfs path on an A/B system would edit a root that is
+/// not the one that boots. Refuse instead.
+fn cmd_remove(
+    packages: Vec<String>,
+    cascade: bool,
+    purge: bool,
+    yes: bool,
+    keep: usize,
+    reboot: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use deploytix::immutable::lvm_ab::detect as is_lvm_ab;
+    use deploytix::immutable::remove::{run_remove, RemoveOptions};
+    use deploytix::utils::command::CommandRunner;
+
+    if !dry_run && !nix::unistd::geteuid().is_root() {
+        return Err(DeploytixError::NotRoot.into());
+    }
+    if is_lvm_ab() {
+        return Err(DeploytixError::ConfigError(
+            "`deploytix remove` is not implemented for the LVM A/B backend. \
+             Remove packages by staging a full `deploytix update` into the inactive \
+             slot instead."
+                .to_string(),
+        )
+        .into());
+    }
+
+    let cmd = CommandRunner::new(dry_run);
+    // A removal is a pacman transaction in a chroot plus an initramfs
+    // regeneration — the same shape as an update, so the same idle inhibitors.
+    let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Removing packages"));
+    run_remove(
+        &cmd,
+        &packages,
+        &RemoveOptions {
+            keep_sets: keep,
+            reboot,
+            cascade,
+            purge,
+            assume_yes: yes,
+        },
+    )?;
     Ok(())
 }
 

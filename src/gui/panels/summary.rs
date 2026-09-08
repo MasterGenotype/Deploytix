@@ -86,6 +86,15 @@ pub fn show(
                         },
                     );
                     row(ui, "Swap", &format!("{}", disk.swap_type));
+                    row(
+                        ui,
+                        "Hibernation",
+                        if system.hibernation {
+                            "Enabled (resume from swap)"
+                        } else {
+                            "Disabled"
+                        },
+                    );
                     row(ui, "Init System", &format!("{}", system.init_system));
                     row(ui, "Bootloader", &format!("{}", system.bootloader));
                     row(
@@ -141,6 +150,33 @@ pub fn show(
                         "yay AUR Helper",
                         if packages.install_yay {
                             "Enabled"
+                        } else {
+                            "Disabled"
+                        },
+                    );
+                    row(
+                        ui,
+                        "Kernel",
+                        &if packages.install_tkg_kernel {
+                            format!("linux-tkg {} (replaces linux-zen)", packages.tkg_scheduler)
+                        } else {
+                            "linux-zen".to_string()
+                        },
+                    );
+                    row(
+                        ui,
+                        "Warp Terminal",
+                        if packages.install_warp_terminal {
+                            "Enabled (downloaded from warp.dev)"
+                        } else {
+                            "Disabled"
+                        },
+                    );
+                    row(
+                        ui,
+                        "Zen Browser",
+                        if packages.install_zen_browser {
+                            "Enabled (AUR: zen-browser-bin)"
                         } else {
                             "Disabled"
                         },

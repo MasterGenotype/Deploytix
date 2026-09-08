@@ -13,7 +13,7 @@
 //! - Decky Loader (Steam plugin framework) + init-specific service file
 //! - evdevhook2 (Cemuhook UDP motion server) via AUR + udev rule + service file
 
-use crate::config::{DeploymentConfig, GpuDriverVendor};
+use crate::config::{DeploymentConfig, GpuDriverVendor, TkgScheduler};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::interactive::PacmanInvocation;
@@ -240,6 +240,17 @@ pub(crate) fn pacman_install_chroot(
 
 const NVIDIA_PACKAGES: &[&str] = &["nvidia", "nvidia-utils", "linux-firmware-nvidia"];
 
+/// NVIDIA packages for a kernel the prebuilt `nvidia` module was not built
+/// against.  `nvidia` ships a module tied to a stock kernel's ABI and simply
+/// will not load on linux-tkg; `nvidia-dkms` builds against whatever kernel is
+/// installed, which is why the headers package comes down alongside the kernel.
+const NVIDIA_DKMS_PACKAGES: &[&str] = &[
+    "nvidia-dkms",
+    "nvidia-utils",
+    "linux-firmware-nvidia",
+    "dkms",
+];
+
 const AMD_PACKAGES: &[&str] = &[
     "linux-firmware-amdgpu",
     "mesa",
@@ -277,8 +288,13 @@ pub fn install_gpu_drivers(
     for vendor in &config.packages.gpu_drivers {
         match vendor {
             GpuDriverVendor::Nvidia => {
-                info!("Adding NVIDIA GPU driver packages");
-                packages.extend(NVIDIA_PACKAGES);
+                if config.packages.install_tkg_kernel {
+                    info!("Adding NVIDIA GPU driver packages (DKMS, for the linux-tkg kernel)");
+                    packages.extend(NVIDIA_DKMS_PACKAGES);
+                } else {
+                    info!("Adding NVIDIA GPU driver packages");
+                    packages.extend(NVIDIA_PACKAGES);
+                }
             }
             GpuDriverVendor::Amd => {
                 info!("Adding AMD GPU driver packages");
@@ -433,6 +449,15 @@ pub fn install_wine_packages(
 /// [lib32] repo which is enabled here.
 const GAMING_PACKAGES: &[&str] = &["steam"];
 
+/// Pulled in alongside Steam when `steam_prefetch_client` is set: Steam will
+/// not run its client bootstrap without a display, and Xvfb is the smallest
+/// thing that satisfies it inside a chroot.
+/// `xorg-server-xvfb` ships `xvfb-run`, but `xvfb-run` shells out to `xauth`
+/// to write its cookie file and does so under its own `set -e`, so without
+/// `xorg-xauth` it exits before Steam ever starts. `xorg-server-xvfb` does not
+/// depend on `xauth`, so both have to be asked for.
+const STEAM_PREFETCH_PACKAGES: &[&str] = &["xorg-server-xvfb", "xorg-xauth"];
+
 /// Enable the [lib32] repository in the chroot's pacman.conf.
 ///
 /// Steam and its 32-bit Vulkan driver dependencies live in `lib32`,
@@ -504,6 +529,12 @@ pub fn install_gaming_packages(
             "  [dry-run] Would install gaming packages: {:?}",
             GAMING_PACKAGES
         );
+        if config.packages.steam_prefetch_client {
+            println!(
+                "  [dry-run] Would install {} and prefetch the Steam client",
+                STEAM_PREFETCH_PACKAGES.join(" ")
+            );
+        }
         return Ok(());
     }
 
@@ -520,13 +551,21 @@ pub fn install_gaming_packages(
         pacman_install_chroot_reviewed(cmd, install_root, "lib32 Vulkan drivers", pkgs)?;
     }
 
-    // Step 3: Install Steam
-    let gaming_pkgs: Vec<String> = GAMING_PACKAGES.iter().map(|s| s.to_string()).collect();
+    // Step 3: Install Steam (plus Xvfb when the client is prefetched below —
+    // Steam refuses to bootstrap without a display of some kind).
+    let mut gaming_pkgs: Vec<String> = GAMING_PACKAGES.iter().map(|s| s.to_string()).collect();
+    if config.packages.steam_prefetch_client {
+        gaming_pkgs.extend(STEAM_PREFETCH_PACKAGES.iter().map(|p| p.to_string()));
+    }
     pacman_install_chroot_reviewed(cmd, install_root, "Gaming (Steam, etc.)", gaming_pkgs)?;
 
     // Step 4: Seed the Steam client bootstrap into the user's home, so the
     // gamepad UI has its runtime before the machine has ever been online.
     seed_steam_bootstrap(cmd, config, install_root)?;
+
+    // Step 5: Optionally download the client itself, so the target boots
+    // straight into Game Mode instead of spending its first boot fetching it.
+    prefetch_steam_client(cmd, config, install_root)?;
 
     info!("Gaming package installation complete");
     Ok(())
@@ -598,6 +637,93 @@ fn steam_bootstrap_script(username: &str) -> String {
     )
 }
 
+/// Download the Steam client into the user's home during installation.
+///
+/// [`seed_steam_bootstrap`] only unpacks the launcher. The client proper —
+/// including `ubuntu12_64/steamwebhelper` and `steamui.so`, which *are* the
+/// gamepad UI — is fetched by Steam's first real run. Leaving that to the
+/// target's first boot is what makes Game Mode fall back to the desktop there:
+/// `steam -gamepadui` has nothing to draw until the download completes. Doing
+/// it here, where the installer already has a working network, means the
+/// deployed system boots straight into Game Mode.
+///
+/// `steam +quit` is the standard way to drive that headlessly: Steam
+/// bootstraps and updates on startup, then the `+quit` console command exits
+/// the client it just installed. It still needs a display, hence `xvfb-run`.
+///
+/// Best-effort by design, like the seed above: no network, no Xvfb, a timeout
+/// or a Steam that exits non-zero must not fail an otherwise complete install.
+/// `steam-gamescope-session` bootstraps on first boot when this did not.
+fn prefetch_steam_client(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.steam_prefetch_client {
+        return Ok(());
+    }
+    let username = &config.user.name;
+
+    info!("Prefetching the Steam client for user {} (this downloads a few hundred MB and can take several minutes)", username);
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would run `xvfb-run steam +quit` as {} to download the Steam client",
+            username
+        );
+        return Ok(());
+    }
+
+    // A non-zero exit is information, not a failure: log it and move on.
+    if let Err(e) = cmd.run_in_chroot(install_root, &steam_prefetch_script(username)) {
+        warn!(
+            "Steam client prefetch did not complete ({}); the target will download it on first boot",
+            e
+        );
+    }
+    Ok(())
+}
+
+/// Render the in-chroot script used by [`prefetch_steam_client`].
+///
+/// `set -e` is deliberately absent, and every step is guarded: the install
+/// must survive a missing `xvfb-run`, an offline mirror, or a Steam that hangs.
+/// The `timeout` is the outer bound on all of it.
+fn steam_prefetch_script(username: &str) -> String {
+    format!(
+        "STEAMDIR=/home/{user}/.local/share/Steam\n\
+         if [ -s \"$STEAMDIR/ubuntu12_64/steamui.so\" ]; then\n\
+         echo 'steam client already present; skipping prefetch'\n\
+         exit 0\n\
+         fi\n\
+         if ! command -v xvfb-run >/dev/null 2>&1; then\n\
+         echo 'xvfb-run not available; skipping prefetch (client downloads on first boot)'\n\
+         exit 0\n\
+         fi\n\
+         if ! command -v xauth >/dev/null 2>&1; then\n\
+         echo 'xauth not available; xvfb-run cannot start, skipping prefetch'\n\
+         exit 0\n\
+         fi\n\
+         su -s /bin/sh {user} -c \
+         'timeout {timeout} xvfb-run -a -s \"-screen 0 1024x768x24\" steam -silent +quit' \
+         || echo 'steam exited non-zero during prefetch'\n\
+         if [ -s \"$STEAMDIR/ubuntu12_64/steamui.so\" ]; then\n\
+         echo \"prefetched steam client into $STEAMDIR\"\n\
+         else\n\
+         echo 'steam client still incomplete; it will finish downloading on first boot'\n\
+         fi\n\
+         chown -R {user}:{user} /home/{user}/.local 2>/dev/null\n\
+         chown -R {user}:{user} /home/{user}/.steam 2>/dev/null\n\
+         exit 0\n",
+        user = username,
+        timeout = STEAM_PREFETCH_TIMEOUT_SECS,
+    )
+}
+
+/// Outer bound on the prefetch. Generous enough for a slow link, short enough
+/// that a wedged Steam cannot hold an install open indefinitely.
+const STEAM_PREFETCH_TIMEOUT_SECS: u32 = 1800;
+
 // ======================== yay AUR Helper ========================
 
 /// Install yay AUR helper from source in chroot.
@@ -660,49 +786,60 @@ pub fn install_yay(
     Ok(())
 }
 
-// ======================== AUR Packages (via yay) ========================
+// ======================== Zen Browser (AUR) ========================
 
-/// AUR packages to install via yay when the AUR helper is available.
-const YAY_AUR_PACKAGES: &[&str] = &["zen-browser-bin"];
+/// The AUR package providing Zen Browser.
+const ZEN_BROWSER_AUR_PACKAGE: &str = "zen-browser-bin";
 
-/// Install additional AUR packages via yay in chroot.
+/// Install Zen Browser via yay, when asked for.
 ///
-/// Runs unconditionally when yay is installed.  These are AUR packages
-/// that are not available in the official Artix or Arch repositories.
-pub fn install_aur_packages(
+/// This used to run unconditionally whenever yay was installed, so every
+/// install that wanted an AUR helper also got a browser it had not asked for.
+/// It is now an option alongside Warp Terminal.
+///
+/// Requires `install_yay = true`; it is an AUR package and there is nothing to
+/// build it with otherwise. The wizard and the GUI only offer it when yay is
+/// selected, and this rechecks rather than trusting that.
+pub fn install_zen_browser(
     cmd: &CommandRunner,
     config: &DeploymentConfig,
     install_root: &str,
 ) -> Result<()> {
+    if !config.packages.install_zen_browser {
+        return Ok(());
+    }
     if !config.packages.install_yay {
+        warn!(
+            "install_zen_browser = true but install_yay = false; skipping {} \
+             (it is an AUR package and needs a helper to build it)",
+            ZEN_BROWSER_AUR_PACKAGE
+        );
         return Ok(());
     }
 
     let username = &config.user.name;
     info!(
-        "Installing AUR packages via yay as {}: {}",
-        username,
-        YAY_AUR_PACKAGES.join(", ")
+        "Installing Zen Browser via yay as {}: {}",
+        username, ZEN_BROWSER_AUR_PACKAGE
     );
 
     if cmd.is_dry_run() {
         println!(
-            "  [dry-run] Would install AUR packages via yay as {}: {:?}",
-            username, YAY_AUR_PACKAGES
+            "  [dry-run] Would install {} via yay as {}",
+            ZEN_BROWSER_AUR_PACKAGE, username
         );
         return Ok(());
     }
 
-    let pkg_strings: Vec<String> = YAY_AUR_PACKAGES.iter().map(|s| s.to_string()).collect();
     yay_install_chroot_reviewed(
         cmd,
         install_root,
         username,
-        "AUR: zen-browser-bin",
-        pkg_strings,
+        "AUR: Zen Browser",
+        vec![ZEN_BROWSER_AUR_PACKAGE.to_string()],
     )?;
 
-    info!("AUR packages installed successfully");
+    info!("Zen Browser installed");
     Ok(())
 }
 
@@ -765,6 +902,210 @@ pub fn install_extras_aur(
         "Extras (AUR)",
         packages.to_vec(),
     )
+}
+
+// ======================== Warp Terminal (vendor package) ========================
+
+/// Where the downloaded package is parked inside the chroot before install.
+const WARP_PKG_PATH: &str = "/var/cache/deploytix/warp-terminal.pkg.tar.zst";
+
+/// Magic bytes every `.pkg.tar.zst` starts with (the zstd frame header),
+/// hex-encoded the way `od -An -N4 -tx1 | tr -d` prints them.
+const ZSTD_MAGIC_HEX: &str = "28b52ffd";
+
+/// The in-chroot script that fetches Warp and installs it.
+///
+/// `curl` is guaranteed present: `pacman` depends on it. The flags that matter:
+///   - `-f` makes an HTTP error status a non-zero exit rather than a saved
+///     error page that `pacman -U` would then reject as a corrupt package.
+///   - `-L` follows redirects. The vendor URL redirects to the real file on
+///     `releases.warp.dev`.
+///   - `--retry` rides out a hiccup instead of failing the install.
+///
+/// `-f` is necessary and not sufficient: the wrong vendor URL answers `200`
+/// with an HTML page, which curl saves happily under the package's name. So
+/// the download is checked for the zstd frame header before `pacman -U` is
+/// allowed near it -- a served web page then fails here, saying so, instead of
+/// reaching pacman as "invalid or corrupted package" on a best-effort step.
+///
+/// `pacman -U` accepts the unsigned local file because pacman's
+/// `LocalFileSigLevel` defaults to `Optional`. That is the same trust decision
+/// as downloading Warp's package by hand, which is what this automates.
+pub fn warp_terminal_script() -> String {
+    format!(
+        "set -e\n\
+         mkdir -p \"$(dirname '{path}')\"\n\
+         curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 -o '{path}' '{url}'\n\
+         magic=$(od -An -N4 -tx1 '{path}' | tr -d ' \\n')\n\
+         if [ \"$magic\" != '{magic}' ]; then\n\
+         rm -f '{path}'\n\
+         echo \"{url} did not serve a pacman package (magic $magic)\" >&2\n\
+         exit 1\n\
+         fi\n\
+         pacman -U --noconfirm '{path}'\n\
+         rm -f '{path}'\n",
+        path = WARP_PKG_PATH,
+        url = crate::config::WARP_TERMINAL_URL,
+        magic = ZSTD_MAGIC_HEX,
+    )
+}
+
+/// Install Warp Terminal from the vendor's Arch package.
+///
+/// Best-effort, like the other optional extras: a download that fails is
+/// reported and the install carries on rather than losing an otherwise
+/// complete system to a terminal emulator.
+///
+/// Returns whether Warp was actually installed. It used to return `Ok(())`
+/// whether or not the download worked, which made a silent failure
+/// indistinguishable from a success -- the caller reported neither, and the
+/// install finished claiming to have done something it had not.
+pub fn install_warp_terminal(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<bool> {
+    if !config.packages.install_warp_terminal {
+        return Ok(false);
+    }
+
+    info!(
+        "Installing Warp Terminal from {}",
+        crate::config::WARP_TERMINAL_URL
+    );
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would download {} and install it with pacman -U",
+            crate::config::WARP_TERMINAL_URL
+        );
+        return Ok(true);
+    }
+
+    match cmd.run_in_chroot(install_root, &warp_terminal_script()) {
+        Ok(_) => Ok(true),
+        Err(e) => Err(DeploytixError::ChrootError(format!(
+            "Warp Terminal did not install: {e}"
+        ))),
+    }
+}
+
+// ======================== linux-tkg kernel (prebuilt) ========================
+
+/// Where the downloaded kernel packages are parked inside the chroot.
+const TKG_KERNEL_PATH: &str = "/var/cache/deploytix/linux-tkg.pkg.tar.zst";
+const TKG_HEADERS_PATH: &str = "/var/cache/deploytix/linux-tkg-headers.pkg.tar.zst";
+
+/// The `grep -o` pattern that finds one linux-tkg release asset URL.
+///
+/// `headers` is the empty string for the kernel package and `-headers` for its
+/// counterpart, which is the whole trick: the two asset names share a prefix,
+/// so a pattern written only for the kernel would match the headers asset too.
+/// Requiring a digit immediately after `-llvm{headers}-` is what separates
+/// them — `…-llvm-7.2.3-273-…` matches the kernel pattern and
+/// `…-llvm-headers-7.2.3-273-…` does not, because `h` is not `[0-9.]`.
+///
+/// The kernel series is `[0-9]*` rather than a literal because it tracks the
+/// kernel version (`linux72` today, `linux73` next release) and changes
+/// without warning.
+fn tkg_asset_pattern(sched: TkgScheduler, headers: bool) -> String {
+    format!(
+        "https://[^\"]*linux[0-9]*-tkg-{sched}-llvm{h}-[0-9.]*-[0-9]*-x86_64\\.pkg\\.tar\\.zst",
+        sched = sched.as_str(),
+        h = if headers { "-headers" } else { "" },
+    )
+}
+
+/// The in-chroot script that fetches the linux-tkg kernel and installs it.
+///
+/// Structured like [`warp_terminal_script`] — `curl -fL`, a zstd frame-header
+/// check before `pacman -U` sees the file — with one addition: the download
+/// URL is *resolved* rather than fixed, because linux-tkg's asset names carry
+/// the kernel series, version and build number, all of which move every
+/// release.
+///
+/// The releases API is consulted first and the pinned build is the fallback,
+/// so an unauthenticated rate limit (60 requests/hour) or an upstream rename
+/// degrades to "slightly old kernel" rather than "no kernel". Both packages
+/// install in a single `pacman -U` transaction so the headers can never end up
+/// paired with a different build than the kernel.
+pub fn tkg_kernel_script(sched: TkgScheduler) -> String {
+    let (fallback_kernel, fallback_headers) = crate::config::tkg_fallback_urls(sched);
+    format!(
+        "set -e\n\
+         mkdir -p \"$(dirname '{kpath}')\"\n\
+         api=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 '{api}' || true)\n\
+         kurl=$(printf '%s' \"$api\" | grep -o '{kpat}' | head -n1)\n\
+         hurl=$(printf '%s' \"$api\" | grep -o '{hpat}' | head -n1)\n\
+         if [ -z \"$kurl\" ] || [ -z \"$hurl\" ]; then\n\
+         echo 'could not resolve the latest linux-tkg release; using the pinned {tag} build' >&2\n\
+         kurl='{fk}'\n\
+         hurl='{fh}'\n\
+         fi\n\
+         echo \"linux-tkg kernel:  $kurl\"\n\
+         echo \"linux-tkg headers: $hurl\"\n\
+         curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 -o '{kpath}' \"$kurl\"\n\
+         curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 -o '{hpath}' \"$hurl\"\n\
+         for f in '{kpath}' '{hpath}'; do\n\
+         magic=$(od -An -N4 -tx1 \"$f\" | tr -d ' \\n')\n\
+         if [ \"$magic\" != '{magic}' ]; then\n\
+         rm -f '{kpath}' '{hpath}'\n\
+         echo \"$f is not a pacman package (magic $magic)\" >&2\n\
+         exit 1\n\
+         fi\n\
+         done\n\
+         pacman -U --noconfirm '{kpath}' '{hpath}'\n\
+         rm -f '{kpath}' '{hpath}'\n",
+        kpath = TKG_KERNEL_PATH,
+        hpath = TKG_HEADERS_PATH,
+        api = crate::config::TKG_RELEASES_API,
+        kpat = tkg_asset_pattern(sched, false),
+        hpat = tkg_asset_pattern(sched, true),
+        tag = crate::config::TKG_FALLBACK_TAG,
+        fk = fallback_kernel,
+        fh = fallback_headers,
+        magic = ZSTD_MAGIC_HEX,
+    )
+}
+
+/// Install the prebuilt linux-tkg kernel in place of `linux-zen`.
+///
+/// Unlike the other downloaded package ([`install_warp_terminal`]) this is not
+/// best-effort. `build_package_list` omits `linux-zen` when this is enabled, so
+/// a failure here leaves the target with no kernel at all — the error
+/// propagates and the install stops rather than completing onto an unbootable
+/// disk.
+pub fn install_tkg_kernel(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.packages.install_tkg_kernel {
+        return Ok(());
+    }
+
+    let sched = config.packages.tkg_scheduler;
+    info!(
+        "Installing the prebuilt linux-tkg kernel ({sched}) resolved from {}",
+        crate::config::TKG_RELEASES_API
+    );
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would resolve the latest linux-tkg {sched} package from {} \
+             and install it (with its headers) via pacman -U",
+            crate::config::TKG_RELEASES_API
+        );
+        return Ok(());
+    }
+
+    cmd.run_in_chroot(install_root, &tkg_kernel_script(sched))
+        .map(|_| ())
+        .map_err(|e| {
+            DeploytixError::ChrootError(format!(
+                "the linux-tkg kernel did not install: {e}. The target has no other kernel \
+                 because linux-tkg replaces linux-zen, so the install cannot continue."
+            ))
+        })
 }
 
 // ======================== iwd GUI Frontend (AUR) ========================
@@ -1152,14 +1493,114 @@ pub fn install_sysctl_network_performance(
 
 /// AUR packages installed for HHD.
 ///
-/// We use `hhd-git` (a split PKGBUILD that depends on `hhd-license-git`)
-/// instead of the tagged `hhd` release or `adjustor` — `adjustor` is now
-/// bundled into `hhd` itself (`replaces=(adjustor)` in the upstream
-/// PKGBUILD).  `hhd-systemd-git` is intentionally excluded (we generate
-/// init-specific service files instead), and `hhd-ui` is excluded because
-/// it spawns a browser overlay that races with the gamescope/Steam session
-/// launch and causes a black screen on the reference handheld device.
-const HHD_AUR_PACKAGES: &[&str] = &["hhd-git"];
+/// `hhd-git` is a split PKGBUILD; `hhd-license-git` comes in as a dependency.
+/// We use it instead of the tagged `hhd` release or `adjustor` — `adjustor` is
+/// now bundled into `hhd` itself (`replaces=(adjustor)` upstream).
+///
+/// `hhd-ui` **is** the Game Mode overlay, despite the AUR describing it as "a
+/// (browser based) graphical user interface". hhd's overlay plugin finds it by
+/// name — `find_overlay_exe` in `src/hhd/plugins/overlay/overlay.py` searches
+/// `hhd-ui.AppImage`, `hhd-ui-dbg` and `hhd-ui` on PATH and in
+/// `~/.local/bin` — and launches it with `STEAM_OVERLAY=1`. Without it
+/// `find_overlay_exe` returns `None` and hhd logs "Failed to start hhd-ui":
+/// the daemon runs, and nothing the user can reach ever appears in Game Mode.
+/// The AUR `hhd-ui` installs `/usr/bin/hhd-ui`, which is exactly what that
+/// lookup finds. It pulls in `electron` and builds with npm, so it is the
+/// slowest part of an HHD install.
+///
+/// `hhd-systemd-git` is deliberately **not** installed. It exists to ship a
+/// systemd unit, and this is an Artix system with no systemd and no plans for
+/// it. Its one useful side effect was `83-hhd.rules`, which deploytix now
+/// ships itself — see [`HHD_DATA_FILES`].
+///
+/// `hhd-ui` **is** the Game Mode overlay, despite the AUR describing it as "a
+/// (browser based) graphical user interface". hhd's overlay plugin finds it by
+/// name — `find_overlay_exe` in `src/hhd/plugins/overlay/overlay.py` searches
+/// `hhd-ui.AppImage`, `hhd-ui-dbg` and `hhd-ui` on PATH and in
+/// `~/.local/bin` — and launches it with `STEAM_OVERLAY=1`. Without it
+/// `find_overlay_exe` returns `None` and hhd logs "Failed to start hhd-ui":
+/// the daemon runs, and nothing the user can reach ever appears in Game Mode.
+/// The AUR `hhd-ui` installs `/usr/bin/hhd-ui`, which is exactly what that
+/// lookup finds. It pulls in `electron` and builds with npm, so it is the
+/// slowest part of an HHD install.
+const HHD_AUR_PACKAGES: &[&str] = &["hhd-git", "hhd-ui"];
+
+/// Local patches applied to the installed Handheld Daemon, and the helper that
+/// (re-)applies them.
+///
+/// `hhd-git` is an AUR package, so its files are pacman-owned and every
+/// rebuild reverts anything we change. The helper is installed alongside the
+/// patches so the user can re-run it after such a rebuild; deploytix runs it
+/// once at install time. Both are self-disabling: a patch is dry-run first and
+/// skipped if it no longer applies, so a fix landing upstream turns this into
+/// a no-op rather than a conflict.
+/// Files upstream ships in its `usr/` tree that no package deploytix installs
+/// will put on disk.
+///
+/// `hhd-git` runs `python -m installer` on a wheel whose pyproject builds only
+/// `where = ["src"]`, so the repository's entire `usr/` tree is absent from it.
+/// `83-hhd.rules` is packaged only by `hhd-systemd-git`, which exists to ship a
+/// systemd unit and has no place on an Artix system, so deploytix ships all
+/// three itself:
+///
+/// - `83-hhd.rules` is what makes controllers work: `uaccess` tags on the
+///   DualSense hidraw nodes, xpad binding for the MSI Claw, TECNO Pocket Go
+///   and Legion Go S, the mask for the Ally HID devices that crash SDL and
+///   Proton controller handlers, and the rule that stops iio buffer polling
+///   interfering with the controllers.
+/// - `83-hhd.hwdb` maps the extra buttons on Ayaneo, Mysten and similar
+///   handhelds to F13-F18, which is how hhd sees them at all.
+/// - `hhd-net.hadess.PowerProfiles.conf` is the D-Bus policy that lets root own
+///   the `net.hadess.PowerProfiles` name on the system bus. hhd's `adjustor`
+///   claims that name (`src/adjustor/drivers/gpu/ppd.py`); without the policy
+///   dbus denies the request and TDP / power-profile switching does not work.
+///
+/// Copied from hhd-dev/hhd at a8bd8be (2026-09-02). They change only when new
+/// hardware appears, but they are copies: check upstream when a new handheld's
+/// buttons do not register.
+const HHD_DATA_FILES: &[(&str, &str)] = &[
+    (
+        "etc/udev/rules.d/83-hhd.rules",
+        include_str!("../resources/hhd/83-hhd.rules"),
+    ),
+    (
+        "etc/udev/hwdb.d/83-hhd.hwdb",
+        include_str!("../resources/hhd/83-hhd.hwdb"),
+    ),
+    (
+        "usr/share/dbus-1/system.d/hhd-net.hadess.PowerProfiles.conf",
+        include_str!("../resources/hhd/hhd-net.hadess.PowerProfiles.conf"),
+    ),
+];
+
+const HHD_PATCH_HELPER: &str = include_str!("../resources/patches/deploytix-hhd-patch.sh");
+
+/// Patches shipped into `HHD_PATCH_DIR`, as `(filename, contents)`.
+///
+/// `hhd-legion-go-2-touchpad.patch` — hhd-dev/hhd#340. On a Legion Go 2
+/// (`17ef:61eb`) driven by the in-kernel `hid-lenovo-go` driver, hhd's
+/// touchpad definition matched on `BTN_MOUSE`, but that driver presents the
+/// touchpad as a real touchpad reporting `BTN_TOUCH` and puts `BTN_MOUSE` on a
+/// separate "... Mouse" node the name pattern excludes. Nothing matched, and
+/// `required=True` turned that into a `RuntimeError` and an endless
+/// "Assuming controllers disconnected, restarting after 3s" loop that took the
+/// whole controller — sticks, buttons, gyro — down with the touchpad. The
+/// patch accepts either presentation, maps `BTN_TOUCH` to `touchpad_touch`
+/// (the Go 2 node has no `BTN_TOOL_FINGER`, so matching alone would leave the
+/// touchpad silent), and drops `required` so a miss degrades instead of
+/// crash-looping.
+///
+/// Remove this entry once the fix is in the `hhd-git` build; until then the
+/// helper's dry-run guard makes carrying it harmless either way.
+const HHD_PATCHES: &[(&str, &str)] = &[(
+    "hhd-legion-go-2-touchpad.patch",
+    include_str!("../resources/patches/hhd-legion-go-2-touchpad.patch"),
+)];
+
+/// Where patches and the helper land in the target.
+const HHD_PATCH_DIR: &str = "usr/share/deploytix/patches";
+/// Installed path of the re-apply helper.
+const HHD_PATCH_HELPER_PATH: &str = "usr/bin/deploytix-hhd-patch";
 
 /// Install Handheld Daemon (HHD) via yay and write an init-specific service
 /// file so that HHD starts automatically on boot.
@@ -1187,7 +1628,15 @@ pub fn install_hhd(
             username,
             HHD_AUR_PACKAGES.join(" ")
         );
+        for (name, _) in HHD_PATCHES {
+            println!("  [dry-run] Would install /{HHD_PATCH_DIR}/{name}");
+        }
+        println!("  [dry-run] Would install /{HHD_PATCH_HELPER_PATH} and run it");
         println!("  [dry-run] Would write /etc/modules-load.d/hhd.conf (uhid)");
+        for (dest, _) in HHD_DATA_FILES {
+            println!("  [dry-run] Would write /{dest}");
+        }
+        println!("  [dry-run] Would run `udevadm hwdb --update`");
         println!(
             "  [dry-run] Would write HHD service file for init: {}",
             config.system.init
@@ -1206,6 +1655,9 @@ pub fn install_hhd(
     )?;
     info!("  HHD AUR packages installed");
 
+    // Step 1.5: Apply deploytix's local patches to the freshly installed hhd.
+    apply_hhd_patches(cmd, install_root)?;
+
     // Step 2: Ensure the uhid kernel module is loaded at boot.
     // uhid provides a user-space HID interface used by HHD to emulate
     // controllers; without it HHD gets permission errors on startup.
@@ -1219,10 +1671,73 @@ pub fn install_hhd(
     fs::set_permissions(&modules_conf, fs::Permissions::from_mode(0o644))?;
     info!("  Written /etc/modules-load.d/hhd.conf");
 
+    // Step 2.5: Install the upstream data files no package ships.
+    for (dest, contents) in HHD_DATA_FILES {
+        let path = format!("{install_root}/{dest}");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, contents)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        info!("  Written /{}", dest);
+    }
+
+    // A hwdb file does nothing until it is compiled into the binary database.
+    // Best-effort: eudev and systemd both provide `udevadm hwdb --update`, but
+    // a missing one must not fail an otherwise complete install.
+    if let Err(e) = cmd.run_in_chroot(install_root, "udevadm hwdb --update") {
+        warn!(
+            "  Could not rebuild the udev hardware database ({}); run \
+             `sudo udevadm hwdb --update` on the target if handheld buttons \
+             do not register",
+            e
+        );
+    }
+
     // Step 3: Write init-specific service file
     write_hhd_service(config, install_root, username)?;
 
     info!("HHD installation complete");
+    Ok(())
+}
+
+/// Install [`HHD_PATCHES`] plus the re-apply helper into the target, then run
+/// the helper once against the just-installed `hhd-git`.
+///
+/// Best-effort throughout: a patch that no longer applies is skipped by the
+/// helper, and a failure to run it is logged rather than propagated. Shipping a
+/// handheld with a working controller is the point, but an unpatchable hhd is a
+/// reason to warn, not to fail an otherwise complete install.
+///
+/// The patches are written to the target as well as applied so the user can
+/// re-run `deploytix-hhd-patch` after any rebuild of `hhd-git`, which — being
+/// an AUR package whose files pacman owns — reverts them.
+fn apply_hhd_patches(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    if HHD_PATCHES.is_empty() {
+        return Ok(());
+    }
+    info!("  Installing deploytix's local hhd patches");
+
+    let patch_dir = format!("{install_root}/{HHD_PATCH_DIR}");
+    fs::create_dir_all(&patch_dir)?;
+    for (name, contents) in HHD_PATCHES {
+        let path = format!("{patch_dir}/{name}");
+        fs::write(&path, contents)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+    }
+
+    let helper = format!("{install_root}/{HHD_PATCH_HELPER_PATH}");
+    fs::write(&helper, HHD_PATCH_HELPER)?;
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
+
+    match cmd.run_in_chroot(install_root, &format!("/{HHD_PATCH_HELPER_PATH}")) {
+        Ok(_) => info!("  hhd patches applied"),
+        Err(e) => warn!(
+            "  Could not apply hhd patches ({}); run `sudo deploytix-hhd-patch` \
+             on the target to retry",
+            e
+        ),
+    }
     Ok(())
 }
 
@@ -1358,11 +1873,17 @@ fn write_hhd_service(config: &DeploymentConfig, install_root: &str, username: &s
 /// ~/.steam/steam -> ~/.local/share/Steam  (symlink)
 /// ```
 ///
-/// The init service runs `PluginLoader` **as the greetd session user**
-/// (not root) per the reference handheld configuration — this means Decky
-/// can read the user's Steam data but is sandboxed out of privileged
-/// system operations.  Plugins that need root use `decky-loader` helper
-/// binaries separately.
+/// The init service runs `PluginLoader` **as root**, matching upstream's
+/// `dist/plugin_loader-release.service` (`User=root`) and the AUR package.
+/// Decky is built for that: its platform layer distinguishes the *effective*
+/// user from an *unprivileged* user, shells out to `chown -R` (including
+/// `chown root:root` for privileged paths), and `CHOWN_PLUGIN_PATH` is on by
+/// default. `UNPRIVILEGED_USER` names the account whose `~/homebrew` this is,
+/// so Decky chowns plugins to the right owner rather than inferring it from
+/// the path — its fallback when it cannot is the literal string `deck`.
+///
+/// deploytix previously dropped to the session user here. That is not a
+/// configuration upstream ships, and it left Decky unreachable in Game Mode.
 ///
 /// Requires `install_gaming = true` (Steam must be present) and
 /// `install_yay = true` (we install via yay).  The caller
@@ -1482,10 +2003,11 @@ pub fn install_decky_loader(
 
 /// Write the `plugin_loader` service file for the configured init system.
 ///
-/// Decky runs as the greetd session user with HOMEBREW_FOLDER pointing at
-/// `~/homebrew` (the canonical Decky / SteamOS layout).
-/// UNPRIVILEGED_PATH / PRIVILEGED_PATH are historical aliases consumed by
-/// older PluginLoader builds; we set them to the same path for compatibility.
+/// Decky runs as root with `HOMEBREW_FOLDER` pointing at `~/homebrew`, the
+/// canonical Decky / SteamOS layout. `UNPRIVILEGED_PATH` and `PRIVILEGED_PATH`
+/// are what the loader actually reads (`localplatformlinux.py`); upstream sets
+/// both to the same directory, and so do we. `UNPRIVILEGED_USER` is set so the
+/// loader does not have to derive the owner from the path.
 fn write_decky_service(
     config: &DeploymentConfig,
     install_root: &str,
@@ -1502,9 +2024,10 @@ fn write_decky_service(
             let sv_dir = format!("{}/etc/runit/sv/plugin_loader", install_root);
             fs::create_dir_all(&sv_dir)?;
 
-            // chpst -u user:user drops to the session user and its primary
-            // group before exec'ing PluginLoader.  Environment is exported
-            // inline so it survives the chpst exec chain.
+            // Runs as root, matching upstream's plugin_loader-release.service
+            // (`User=root`) and the AUR package. UNPRIVILEGED_USER names the
+            // account whose ~/homebrew this is, so Decky chowns plugins to the
+            // right owner instead of guessing.
             let run_script = format!(
                 "#!/bin/sh\n\
                  exec 2>&1\n\
@@ -1512,9 +2035,10 @@ fn write_decky_service(
                  export UNPRIVILEGED_PATH={data}\n\
                  export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
+                 export UNPRIVILEGED_USER={user}\n\
                  export HOME=/home/{user}\n\
                  cd {wd}\n\
-                 exec chpst -u {user}:{user} {pl}\n",
+                 exec {pl}\n",
                 data = decky_data,
                 user = username,
                 wd = working_dir,
@@ -1540,13 +2064,11 @@ fn write_decky_service(
             let init_d = format!("{}/etc/init.d", install_root);
             fs::create_dir_all(&init_d)?;
 
-            // start_pre bootstraps env + working directory; command_user
-            // drops privileges to the session user.
+            // No command_user: PluginLoader runs as root, matching upstream.
             let script = format!(
                 "#!/sbin/openrc-run\n\
                  description=\"SteamDeck Plugin Loader\"\n\
                  command=\"{pl}\"\n\
-                 command_user=\"{user}:{user}\"\n\
                  command_background=true\n\
                  directory=\"{wd}\"\n\
                  pidfile=\"/run/plugin_loader.pid\"\n\
@@ -1555,6 +2077,7 @@ fn write_decky_service(
                  export UNPRIVILEGED_PATH={data}\n\
                  export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
+                 export UNPRIVILEGED_USER={user}\n\
                  export HOME=/home/{user}\n\
                  \n\
                  depend() {{\n\
@@ -1578,16 +2101,17 @@ fn write_decky_service(
 
             fs::write(format!("{}/type", sv_dir), "longrun\n")?;
 
-            // s6-setuidgid drops to the session user.
+            // Runs as root (no s6-setuidgid), matching upstream.
             let run_script = format!(
                 "#!/bin/sh\n\
                  export HOMEBREW_FOLDER={data}\n\
                  export UNPRIVILEGED_PATH={data}\n\
                  export PRIVILEGED_PATH={data}\n\
                  export LOG_LEVEL=INFO\n\
+                 export UNPRIVILEGED_USER={user}\n\
                  export HOME=/home/{user}\n\
                  cd {wd}\n\
-                 exec s6-setuidgid {user} {pl} 2>&1\n",
+                 exec {pl} 2>&1\n",
                 data = decky_data,
                 user = username,
                 wd = working_dir,
@@ -1609,6 +2133,7 @@ fn write_decky_service(
                  UNPRIVILEGED_PATH={data}\n\
                  PRIVILEGED_PATH={data}\n\
                  LOG_LEVEL=INFO\n\
+                 UNPRIVILEGED_USER={user}\n\
                  HOME=/home/{user}\n",
                 data = decky_data,
                 user = username
@@ -1621,12 +2146,10 @@ fn write_decky_service(
                 "type = process\n\
                  command = {pl}\n\
                  working-dir = {wd}\n\
-                 run-as = {user}\n\
                  env-file = /etc/dinit.d/plugin_loader.env\n\
                  restart = true\n",
                 pl = plugin_loader,
                 wd = working_dir,
-                user = username,
             );
             let service_path = format!("{}/plugin_loader", dinit_d);
             fs::write(&service_path, &service)?;
@@ -1875,6 +2398,87 @@ fn write_evdevhook2_service(
 }
 
 #[cfg(test)]
+mod hhd_patch_tests {
+    use super::*;
+
+    /// hhd-dev/hhd#340: on a Legion Go 2 the touchpad node reports BTN_TOUCH,
+    /// not BTN_MOUSE, so hhd matched nothing and — with required=True — restarted
+    /// the controller every 3s forever.
+    #[test]
+    fn legion_go_2_touchpad_patch_is_shipped() {
+        let (name, body) = HHD_PATCHES
+            .iter()
+            .find(|(n, _)| n.contains("legion-go-2-touchpad"))
+            .expect("the Legion Go 2 touchpad patch must be shipped");
+        assert!(name.ends_with(".patch"));
+        // All three halves of the fix: match either presentation, actually
+        // report a touch, and degrade instead of crash-looping.
+        assert!(body.contains(r#"EC("BTN_MOUSE"), EC("BTN_TOUCH")"#));
+        assert!(body.contains(r#"B("BTN_TOOL_FINGER"), B("BTN_TOUCH")"#));
+        assert!(body.contains("+        required=False,"));
+        assert!(body.contains("-        required=True,"));
+    }
+
+    /// The helper globs `hhd-*.patch`, so a name that does not match would be
+    /// silently ignored — installed, never applied.
+    #[test]
+    fn every_patch_matches_the_helper_glob() {
+        for (name, _) in HHD_PATCHES {
+            assert!(
+                name.starts_with("hhd-") && name.ends_with(".patch"),
+                "{name} would not be picked up by the helper's hhd-*.patch glob"
+            );
+        }
+    }
+
+    /// Patches are diffed against the upstream source tree (a/src/hhd/...) but
+    /// applied to <site-packages>/hhd/..., so the strip level must be 2.
+    #[test]
+    fn patches_are_source_tree_relative_and_helper_strips_to_match() {
+        for (name, body) in HHD_PATCHES {
+            assert!(
+                body.contains("--- a/src/hhd/"),
+                "{name} is not relative to the upstream source tree"
+            );
+        }
+        assert!(HHD_PATCH_HELPER.contains("patch -p2"));
+    }
+
+    /// A rebuild of the AUR package reverts the patches, and the helper is the
+    /// only way back. It must be installed, executable, and self-disabling.
+    #[test]
+    fn helper_is_dry_run_guarded_and_never_fatal() {
+        // Dry run before every apply: an already-applied or upstream-fixed
+        // patch must be skipped rather than forced.
+        assert!(HHD_PATCH_HELPER.contains("--forward --dry-run"));
+        // Never a gate on the install.
+        assert!(HHD_PATCH_HELPER.trim_end().ends_with("exit 0"));
+        // Stale bytecode would shadow the patched sources.
+        assert!(HHD_PATCH_HELPER.contains("__pycache__"));
+    }
+
+    #[test]
+    fn helper_is_valid_shell() {
+        if let Ok(status) = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(HHD_PATCH_HELPER)
+            .status()
+        {
+            assert!(status.success(), "the hhd patch helper is not valid shell");
+        }
+    }
+
+    /// The helper is invoked by absolute path inside the chroot, so the path it
+    /// is written to and the path it is run from must not drift apart.
+    #[test]
+    fn helper_install_path_is_on_the_default_path() {
+        assert_eq!(HHD_PATCH_HELPER_PATH, "usr/bin/deploytix-hhd-patch");
+        assert!(HHD_PATCH_HELPER.contains(HHD_PATCH_DIR));
+    }
+}
+
+#[cfg(test)]
 mod steam_bootstrap_tests {
     use super::*;
 
@@ -1896,6 +2500,475 @@ mod steam_bootstrap_tests {
         assert!(script.contains(r#"if [ ! -f "$BOOTSTRAP" ]"#));
         // No `set -e`: extraction failure logs and continues.
         assert!(!script.contains("set -e"));
+    }
+
+    fn assert_valid_shell(script: &str) {
+        if let Ok(status) = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(script)
+            .status()
+        {
+            assert!(status.success(), "not valid shell:\n{script}");
+        }
+    }
+
+    #[test]
+    fn bootstrap_script_is_valid_shell() {
+        assert_valid_shell(&steam_bootstrap_script("gamer"));
+    }
+
+    /// The seed unpacks only the launcher. What Game Mode actually needs —
+    /// steamwebhelper and steamui.so — arrives with the client download, which
+    /// is what this prefetch front-loads; the probe must therefore test for the
+    /// client, not for anything the tarball already provides.
+    #[test]
+    fn prefetch_probes_for_the_client_and_runs_as_the_user() {
+        let script = steam_prefetch_script("gamer");
+        assert!(script.contains("STEAMDIR=/home/gamer/.local/share/Steam"));
+        assert!(script.contains("ubuntu12_64/steamui.so"));
+        assert!(!script.contains("ubuntu12_32"));
+        // makepkg-style: never as root, and never without a display.
+        assert!(script.contains("su -s /bin/sh gamer -c"));
+        assert!(script.contains("xvfb-run"));
+        // `+quit` is what makes the run terminate once the update is done.
+        assert!(script.contains("+quit"));
+        assert!(script.contains("chown -R gamer:gamer /home/gamer/.local"));
+        assert_valid_shell(&script);
+    }
+
+    use crate::config::InitSystem;
+
+    fn test_root(tag: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "deploytix-decky-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+
+    fn decky_config() -> DeploymentConfig {
+        DeploymentConfig::sample()
+    }
+
+    /// Read back whichever file `write_decky_service` produced for `init`.
+    fn decky_unit_text(root: &str, init: &InitSystem) -> String {
+        let path = match init {
+            InitSystem::Runit => format!("{root}/etc/runit/sv/plugin_loader/run"),
+            InitSystem::OpenRC => format!("{root}/etc/init.d/plugin_loader"),
+            InitSystem::S6 => format!("{root}/etc/s6/adminsv/plugin_loader/run"),
+            InitSystem::Dinit => format!("{root}/etc/dinit.d/plugin_loader"),
+        };
+        let unit = std::fs::read_to_string(&path).unwrap_or_default();
+        // dinit keeps its environment in a sidecar file.
+        let env = std::fs::read_to_string(format!("{root}/etc/dinit.d/plugin_loader.env"))
+            .unwrap_or_default();
+        format!("{unit}\n{env}")
+    }
+
+    /// Upstream's plugin_loader-release.service is `User=root`, and the AUR
+    /// package keeps it. Decky's platform layer is written for that: it
+    /// separates the effective user from the unprivileged user and chowns
+    /// between them. Dropping privileges here is not a configuration upstream
+    /// ships, and it left Decky unreachable in Game Mode.
+    #[test]
+    fn decky_runs_as_root_on_every_init() {
+        let config = decky_config();
+        for init in [
+            InitSystem::Runit,
+            InitSystem::OpenRC,
+            InitSystem::S6,
+            InitSystem::Dinit,
+        ] {
+            let root = test_root(&format!("decky-{init:?}"));
+            let mut cfg = config.clone();
+            cfg.system.init = init.clone();
+            write_decky_service(&cfg, &root, "gamer", "/home/gamer/homebrew").unwrap();
+
+            let unit = decky_unit_text(&root, &init);
+            for dropper in ["chpst -u", "s6-setuidgid", "run-as =", "command_user"] {
+                assert!(
+                    !unit.contains(dropper),
+                    "{init:?} still drops privileges via `{dropper}`:\n{unit}"
+                );
+            }
+            // And the loader is told whose homebrew this is, so it never has
+            // to fall back to guessing (its default guess is "deck").
+            assert!(
+                unit.contains("UNPRIVILEGED_USER=gamer"),
+                "{init:?} must set UNPRIVILEGED_USER:\n{unit}"
+            );
+            // Both paths upstream sets must still point at ~/homebrew.
+            assert!(unit.contains("UNPRIVILEGED_PATH=/home/gamer/homebrew"));
+            assert!(unit.contains("PRIVILEGED_PATH=/home/gamer/homebrew"));
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// `hhd-git` runs `python -m installer` on a wheel whose pyproject builds
+    /// only `where = ["src"]`, so the repository's `usr/` tree is not in it.
+    /// `83-hhd.rules` is packaged only by `hhd-systemd-git`, which exists to
+    /// ship a systemd unit — so on Artix deploytix has to ship the rules
+    /// itself rather than pull in a systemd package for them.
+    #[test]
+    fn hhd_installs_no_systemd_package_and_ships_the_rules_itself() {
+        assert!(HHD_AUR_PACKAGES.contains(&"hhd-git"));
+        assert!(
+            !HHD_AUR_PACKAGES.contains(&"hhd-systemd-git"),
+            "this system has no systemd; the rules are shipped directly instead"
+        );
+        assert!(
+            !HHD_AUR_PACKAGES.iter().any(|p| p.contains("systemd")),
+            "no systemd package belongs in an Artix install"
+        );
+        assert!(
+            HHD_DATA_FILES
+                .iter()
+                .any(|(d, _)| *d == "etc/udev/rules.d/83-hhd.rules"),
+            "dropping hhd-systemd-git must not drop the udev rules with it"
+        );
+        // hhd-ui is the overlay itself, not an optional browser UI: hhd's
+        // find_overlay_exe looks for it by name and logs "Failed to start
+        // hhd-ui" without it, leaving a running daemon with no reachable UI.
+        assert!(
+            HHD_AUR_PACKAGES.contains(&"hhd-ui"),
+            "hhd-ui renders the Game Mode overlay"
+        );
+    }
+
+    /// The rules are the half that makes controllers work at all, so a copy
+    /// that lost its substance would be worse than no copy.
+    #[test]
+    fn the_shipped_udev_rules_still_carry_the_device_quirks() {
+        let (_, rules) = HHD_DATA_FILES
+            .iter()
+            .find(|(d, _)| d.ends_with("83-hhd.rules"))
+            .expect("rules are shipped");
+        // Steam reading the raw controllers.
+        assert!(rules.contains("uaccess"));
+        // xpad binding for the handhelds that need it.
+        assert!(rules.contains("xpad"));
+        // The Ally HID devices that crash SDL and Proton controller handlers.
+        assert!(rules.contains("0b05"));
+    }
+
+    /// Two upstream files that no package installs at all. Without the hwdb the
+    /// extra handheld buttons never reach hhd; without the D-Bus policy, root
+    /// cannot own `net.hadess.PowerProfiles` and TDP switching fails.
+    #[test]
+    fn hhd_ships_the_data_files_no_package_provides() {
+        let dests: Vec<&str> = HHD_DATA_FILES.iter().map(|(d, _)| *d).collect();
+        assert!(dests.contains(&"etc/udev/hwdb.d/83-hhd.hwdb"));
+        assert!(dests.contains(&"usr/share/dbus-1/system.d/hhd-net.hadess.PowerProfiles.conf"));
+
+        for (dest, contents) in HHD_DATA_FILES {
+            assert!(!contents.is_empty(), "{dest} is empty");
+            assert!(
+                !dest.starts_with('/'),
+                "{dest} must be install-root relative"
+            );
+        }
+
+        // The policy has to allow root to *own* the name, not merely talk to
+        // it — hhd runs as root and is the one claiming it.
+        let (_, policy) = HHD_DATA_FILES
+            .iter()
+            .find(|(d, _)| d.ends_with("PowerProfiles.conf"))
+            .unwrap();
+        assert!(policy.contains(r#"<allow own="net.hadess.PowerProfiles"/>"#));
+        assert!(policy.contains(r#"<policy user="root">"#));
+    }
+
+    /// Zen Browser used to be installed unconditionally alongside yay, so every
+    /// install that wanted an AUR helper also got a browser it had not asked
+    /// for. It is an option now, and skipping it must be the default.
+    #[test]
+    fn zen_browser_is_opt_in_and_needs_yay() {
+        let cmd = CommandRunner::new(true);
+        let mut cfg = DeploymentConfig::sample();
+
+        cfg.packages.install_zen_browser = false;
+        cfg.packages.install_yay = true;
+        assert!(install_zen_browser(&cmd, &cfg, "/mnt").is_ok());
+
+        // Asked for without a helper to build it: skipped, not fatal.
+        cfg.packages.install_zen_browser = true;
+        cfg.packages.install_yay = false;
+        assert!(install_zen_browser(&cmd, &cfg, "/mnt").is_ok());
+
+        cfg.packages.install_yay = true;
+        assert!(install_zen_browser(&cmd, &cfg, "/mnt").is_ok());
+    }
+
+    /// A fresh config must not opt anyone into either of the optional extras.
+    #[test]
+    fn the_optional_extras_default_to_off() {
+        let cfg = DeploymentConfig::sample();
+        assert!(!cfg.packages.install_zen_browser);
+        assert!(!cfg.packages.install_warp_terminal);
+    }
+
+    /// The URL is a constant, and it is single-quoted in the script, so what
+    /// keeps that safe is the constant never containing a quote. If someone
+    /// ever edits it to one that does, this fails rather than the shell
+    /// silently running the tail of it.
+    #[test]
+    fn warp_url_is_safe_to_shell_quote() {
+        let url = crate::config::WARP_TERMINAL_URL;
+        assert!(url.starts_with("https://"), "{url}");
+        assert!(
+            !url.chars()
+                .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\'' | '"' | '\\')),
+            "{url} cannot be single-quoted safely"
+        );
+    }
+
+    #[test]
+    fn warp_script_downloads_then_installs() {
+        let script = warp_terminal_script();
+        // -f so an HTTP error is a failure rather than an error page saved as
+        // a package; -L because the vendor URL is a redirect.
+        assert!(script.contains("curl -fL"));
+        assert!(script.contains(crate::config::WARP_TERMINAL_URL));
+        assert!(script.contains("pacman -U --noconfirm"));
+        let download = script.find("curl").expect("downloads");
+        let install = script.find("pacman -U").expect("installs");
+        assert!(download < install, "download must precede install");
+        // The package is not left sitting in the image afterwards.
+        assert!(script.contains("rm -f"));
+        assert_valid_shell(&script);
+    }
+
+    /// `/get_warp` is the marketing page and answers `200 text/html`, so `-f`
+    /// cannot tell it apart from a package. Pinning the endpoint is what keeps
+    /// the download an actual package rather than a saved landing page.
+    #[test]
+    fn warp_url_is_the_download_endpoint_not_the_landing_page() {
+        let url = crate::config::WARP_TERMINAL_URL;
+        assert!(
+            url.contains("/download"),
+            "{url} must be the download endpoint"
+        );
+        assert!(
+            !url.contains("get_warp"),
+            "{url} is the landing page, which serves HTML with a 200"
+        );
+        assert!(url.contains("package=pacman"), "{url} must ask for pacman");
+    }
+
+    /// The guard that makes a wrong URL loud. Without it a served web page
+    /// reaches `pacman -U` and comes back as "invalid or corrupted package" on
+    /// a step that is best-effort and therefore shrugs it off.
+    #[test]
+    fn warp_script_rejects_a_download_that_is_not_a_package() {
+        let script = warp_terminal_script();
+        assert!(script.contains(ZSTD_MAGIC_HEX), "checks the zstd magic");
+        let check = script.find(ZSTD_MAGIC_HEX).expect("checks");
+        let install = script.find("pacman -U").expect("installs");
+        assert!(check < install, "the check must precede the install");
+        assert!(script.contains("exit 1"), "a bad download fails the step");
+    }
+
+    // ── linux-tkg kernel ───────────────────────────────────────────────
+
+    /// Run one of the script's `grep -o` patterns against a line, the same way
+    /// the script does, and return what it matched. Testing the pattern by
+    /// eye is not enough: the kernel and headers asset names share a prefix,
+    /// and the whole correctness of the resolve rests on telling them apart.
+    fn grep_o(pattern: &str, input: &str) -> Vec<String> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("grep")
+            .arg("-o")
+            .arg(pattern)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("grep");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes())
+            .expect("write");
+        let out = child.wait_with_output().expect("wait");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A slice of the real releases API payload: both assets for one
+    /// scheduler, plus a neighbouring scheduler's, all on one line the way the
+    /// unformatted JSON arrives.
+    const TKG_API_SAMPLE: &str = "\"browser_download_url\":\
+        \"https://github.com/Frogging-Family/linux-tkg/releases/download/v7.2.3/\
+        linux72-tkg-bore-llvm-7.2.3-273-x86_64.pkg.tar.zst\",\
+        \"browser_download_url\":\
+        \"https://github.com/Frogging-Family/linux-tkg/releases/download/v7.2.3/\
+        linux72-tkg-bore-llvm-headers-7.2.3-273-x86_64.pkg.tar.zst\",\
+        \"browser_download_url\":\
+        \"https://github.com/Frogging-Family/linux-tkg/releases/download/v7.2.3/\
+        linux72-tkg-pds-llvm-7.2.3-273-x86_64.pkg.tar.zst\"";
+
+    /// The subtle one. `linux72-tkg-bore-llvm-headers-…` starts with every
+    /// character of the kernel pattern's prefix, so a pattern that stops at
+    /// `-llvm-` matches both assets and the resolve installs the headers
+    /// package twice — with no kernel, on a config that has no linux-zen to
+    /// fall back to.
+    #[test]
+    fn the_kernel_pattern_does_not_also_match_the_headers_asset() {
+        let kernel = grep_o(
+            &tkg_asset_pattern(TkgScheduler::Bore, false),
+            TKG_API_SAMPLE,
+        );
+        assert_eq!(kernel.len(), 1, "matched {kernel:?}");
+        assert!(kernel[0].ends_with("linux72-tkg-bore-llvm-7.2.3-273-x86_64.pkg.tar.zst"));
+        assert!(!kernel[0].contains("headers"));
+
+        let headers = grep_o(&tkg_asset_pattern(TkgScheduler::Bore, true), TKG_API_SAMPLE);
+        assert_eq!(headers.len(), 1, "matched {headers:?}");
+        assert!(headers[0].ends_with("linux72-tkg-bore-llvm-headers-7.2.3-273-x86_64.pkg.tar.zst"));
+    }
+
+    /// The scheduler token is the only thing separating five otherwise
+    /// identical asset names, so picking one must not drag in another's.
+    #[test]
+    fn the_pattern_selects_only_the_chosen_scheduler() {
+        let pds = grep_o(&tkg_asset_pattern(TkgScheduler::Pds, false), TKG_API_SAMPLE);
+        assert_eq!(pds.len(), 1, "matched {pds:?}");
+        assert!(pds[0].contains("-tkg-pds-llvm-"));
+
+        // A scheduler with no asset in the payload resolves to nothing, which
+        // is what sends the script to the pinned fallback.
+        let muqss = grep_o(
+            &tkg_asset_pattern(TkgScheduler::Muqss, false),
+            TKG_API_SAMPLE,
+        );
+        assert!(muqss.is_empty(), "matched {muqss:?}");
+    }
+
+    /// The series prefix tracks the kernel version (`linux72` today), so
+    /// pinning it as a literal would break on the next release.
+    #[test]
+    fn the_pattern_is_not_pinned_to_one_kernel_series() {
+        let next = "\"https://github.com/Frogging-Family/linux-tkg/releases/download/v7.3.0/\
+                    linux73-tkg-bore-llvm-7.3.0-1-x86_64.pkg.tar.zst\"";
+        let found = grep_o(&tkg_asset_pattern(TkgScheduler::Bore, false), next);
+        assert_eq!(found.len(), 1, "matched {found:?}");
+        assert!(found[0].contains("linux73"));
+    }
+
+    #[test]
+    fn tkg_script_resolves_then_downloads_then_installs() {
+        let script = tkg_kernel_script(TkgScheduler::Bore);
+        assert!(script.contains(crate::config::TKG_RELEASES_API), "resolves");
+        assert!(script.contains("curl -fL"));
+        // Both packages go in as one transaction, so the headers can never be
+        // paired with a different build than the kernel they describe.
+        assert!(script.contains("pacman -U --noconfirm '/var/cache/deploytix/linux-tkg.pkg.tar.zst' '/var/cache/deploytix/linux-tkg-headers.pkg.tar.zst'"));
+        let resolve = script
+            .find(crate::config::TKG_RELEASES_API)
+            .expect("resolves");
+        let download = script.find("curl -fL").expect("downloads");
+        let install = script.find("pacman -U").expect("installs");
+        assert!(resolve < download && download < install);
+        assert!(
+            script.contains("rm -f"),
+            "packages are not left in the image"
+        );
+        assert_valid_shell(&script);
+    }
+
+    /// Losing the API — it is unauthenticated, and 60 requests/hour is easy to
+    /// exhaust on a shared address — must cost a slightly older kernel, not
+    /// the whole install, because there is no linux-zen behind it.
+    #[test]
+    fn tkg_script_falls_back_to_the_pinned_build() {
+        let script = tkg_kernel_script(TkgScheduler::Bore);
+        let (kernel, headers) = crate::config::tkg_fallback_urls(TkgScheduler::Bore);
+        assert!(script.contains(&kernel), "pins a kernel fallback");
+        assert!(script.contains(&headers), "pins a headers fallback");
+    }
+
+    #[test]
+    fn tkg_script_rejects_a_download_that_is_not_a_package() {
+        let script = tkg_kernel_script(TkgScheduler::Bore);
+        assert!(script.contains(ZSTD_MAGIC_HEX), "checks the zstd magic");
+        let check = script.find(ZSTD_MAGIC_HEX).expect("checks");
+        let install = script.find("pacman -U").expect("installs");
+        assert!(check < install, "the check must precede the install");
+        assert!(script.contains("exit 1"), "a bad download fails the step");
+    }
+
+    /// Both URLs are built from constants and a closed enum, never from user
+    /// input, which is what makes single-quoting them into the script safe.
+    #[test]
+    fn tkg_fallback_urls_are_safe_to_shell_quote() {
+        for sched in TkgScheduler::all() {
+            let (kernel, headers) = crate::config::tkg_fallback_urls(*sched);
+            for url in [&kernel, &headers] {
+                assert!(url.starts_with("https://"), "{url}");
+                assert!(url.ends_with("-x86_64.pkg.tar.zst"), "{url}");
+                assert!(
+                    url.contains(&format!("-tkg-{}-llvm", sched.as_str())),
+                    "{url}"
+                );
+                assert!(
+                    !url.chars().any(|c| c.is_control()
+                        || c.is_whitespace()
+                        || matches!(c, '\'' | '"' | '\\')),
+                    "{url} cannot be single-quoted safely"
+                );
+            }
+            assert!(headers.contains("-llvm-headers-"), "{headers}");
+            assert!(!kernel.contains("headers"), "{kernel}");
+        }
+    }
+
+    /// The prebuilt `nvidia` module is built against a stock kernel's ABI and
+    /// will not load on linux-tkg, so selecting the kernel has to switch the
+    /// driver to DKMS or the machine boots without a GPU driver.
+    #[test]
+    fn nvidia_becomes_dkms_on_the_tkg_kernel() {
+        assert!(NVIDIA_PACKAGES.contains(&"nvidia"));
+        assert!(!NVIDIA_PACKAGES.contains(&"nvidia-dkms"));
+        assert!(NVIDIA_DKMS_PACKAGES.contains(&"nvidia-dkms"));
+        assert!(!NVIDIA_DKMS_PACKAGES.contains(&"nvidia"));
+        // DKMS builds the module on the target, so the tool has to be there.
+        assert!(NVIDIA_DKMS_PACKAGES.contains(&"dkms"));
+        // Userspace is kernel-independent and must not be dropped.
+        assert!(NVIDIA_DKMS_PACKAGES.contains(&"nvidia-utils"));
+    }
+
+    /// `xorg-server-xvfb` provides `xvfb-run` but does not depend on `xauth`,
+    /// which `xvfb-run` needs in order to start at all. Asking for only the
+    /// first package buys a feature that never runs.
+    #[test]
+    fn the_prefetch_asks_for_everything_xvfb_run_needs() {
+        assert!(STEAM_PREFETCH_PACKAGES.contains(&"xorg-server-xvfb"));
+        assert!(STEAM_PREFETCH_PACKAGES.contains(&"xorg-xauth"));
+    }
+
+    /// A prefetch is an optimisation, never a reason to fail an install: it is
+    /// skipped when the client is already there or Xvfb is missing, bounded by
+    /// a timeout, and every failure path still exits 0.
+    #[test]
+    fn prefetch_is_bounded_and_never_fails_the_install() {
+        let script = steam_prefetch_script("gamer");
+        assert!(script.contains("skipping prefetch"));
+        assert!(script.contains("command -v xvfb-run"));
+        // xvfb-run shells out to xauth under its own `set -e`, so a missing
+        // xauth stops the prefetch before Steam starts. The guard has to check
+        // for it too, or the skip message would be a lie and the run would
+        // silently do nothing.
+        assert!(script.contains("command -v xauth"));
+        assert!(script.contains(&format!("timeout {STEAM_PREFETCH_TIMEOUT_SECS}")));
+        assert!(!script.contains("set -e"));
+        assert!(script.trim_end().ends_with("exit 0"));
     }
 }
 
