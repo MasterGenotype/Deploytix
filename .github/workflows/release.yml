@@ -18,12 +18,52 @@ on:
 permissions:
   contents: write
 
+# One release at a time. Two runs racing here would force the same tag to two
+# different commits and publish whichever finished last.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  meta:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME#release/}"
+          fi
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Release tag '$tag' is not vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # The version is compiled into the binaries (clap reads CARGO_PKG_VERSION),
+      # so a tag that disagrees with Cargo.toml publishes vX binaries that report
+      # vY. Fail here, before spending two build jobs on it.
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          crate="$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$tag" != "v$crate" ]; then
+            echo "::error::Tag $tag does not match Cargo.toml version $crate."
+            echo "::error::Bump the version in Cargo.toml (and Cargo.lock) or retag as v$crate."
+            exit 1
+          fi
+          echo "Tag $tag matches Cargo.toml version $crate."
+
   lint:
-    name: Lint
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,14 +71,22 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install ALSA headers
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # --all-features pulls the egui GUI into the library, so the test
+      # binaries link eframe and need its X11/Wayland deps, not just ALSA.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl-dev
       - run: cargo fmt -- --check
       - run: cargo clippy --all-features -- -D warnings
+      - run: cargo test --all-features
 
   build-cli:
     name: Build CLI binary
-    needs: lint
+    needs: [meta, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +96,9 @@ jobs:
       # build on the runners, so a fully static musl binary is not possible.
       - name: Install ALSA headers
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # Built without the gui feature so the CLI carries no egui dependency.
+      # deploytix-rehearsal is deliberately not released: it is a build-tree
+      # tool and is not packaged either (see BUILD.md, Packaging).
       - name: Build CLI binary
         run: cargo build --release --bin deploytix
       - name: Upload artifact
@@ -55,10 +106,11 @@ jobs:
         with:
           name: deploytix-x86_64-linux-gnu
           path: target/release/deploytix
+          if-no-files-found: error
 
   build-gui:
-    name: Build GUI binary
-    needs: lint
+    name: Build GUI binaries
+    needs: [meta, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,17 +123,22 @@ jobs:
             libasound2-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libgl-dev
-      - name: Build GUI binary
-        run: cargo build --release --features gui
+      # Both GUI binaries ship as packages (deploytix-gui-git and
+      # deploytix-update-gui-git), so both belong in the release.
+      - name: Build GUI binaries
+        run: cargo build --release --features gui --bin deploytix-gui --bin deploytix-update-gui
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: deploytix-gui-x86_64-linux-gnu
-          path: target/release/deploytix-gui
+          path: |
+            target/release/deploytix-gui
+            target/release/deploytix-update-gui
+          if-no-files-found: error
 
   release:
     name: Publish release
-    needs: [build-cli, build-gui]
+    needs: [meta, build-cli, build-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,27 +147,24 @@ jobs:
         with:
           name: deploytix-x86_64-linux-gnu
           path: artifacts/
-      - name: Download GUI artifact
+      - name: Download GUI artifacts
         uses: actions/download-artifact@v4
         with:
           name: deploytix-gui-x86_64-linux-gnu
           path: artifacts/
+      # upload-artifact does not preserve the executable bit.
       - name: Prepare release assets
-        run: chmod +x artifacts/deploytix artifacts/deploytix-gui
-      - name: Resolve release tag
-        id: tag
+        working-directory: artifacts
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME#release/}" >> "$GITHUB_OUTPUT"
-          fi
+          chmod +x deploytix deploytix-gui deploytix-update-gui
+          sha256sum deploytix deploytix-gui deploytix-update-gui > SHA256SUMS
+          cat SHA256SUMS
       # action-gh-release never moves an existing tag, so force the tag to
       # the built commit ourselves. No-op for tag-push runs (same commit);
       # for release-branch runs this keeps tag, source, and binaries in sync.
       - name: Point tag at built commit
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
+          TAG="${{ needs.meta.outputs.tag }}"
           git tag -f "$TAG" "$GITHUB_SHA"
           git push -f origin "refs/tags/$TAG:refs/tags/$TAG"
       - name: Create GitHub release
@@ -120,9 +174,12 @@ jobs:
           # and workflow_dispatch create the tag at the built commit.
           # Without target_commitish a new tag lands on the default branch
           # HEAD instead of the commit the binaries were built from.
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             artifacts/deploytix
             artifacts/deploytix-gui
+            artifacts/deploytix-update-gui
+            artifacts/SHA256SUMS

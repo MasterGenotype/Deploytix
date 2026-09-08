@@ -165,8 +165,8 @@ make test     # cargo test --all-features
 ```
 
 The release workflow (`.github/workflows/release.yml`) gates every build on
-`cargo fmt -- --check` and `cargo clippy --all-features -- -D warnings`, so run
-both before pushing.
+`cargo fmt -- --check`, `cargo clippy --all-features -- -D warnings` and
+`cargo test --all-features`, so run all three before pushing.
 
 ---
 
@@ -190,9 +190,20 @@ Artix ISO with deploytix preinstalled.
 ## Releases
 
 Pushing a `v*` tag — or a `release/v*` branch, for environments that cannot push
-tags directly — triggers `.github/workflows/release.yml`, which lints, builds the
-CLI and GUI binaries on `ubuntu-latest`, and publishes them as a GitHub release
-with generated notes. `workflow_dispatch` accepts an explicit tag input.
+tags directly — triggers `.github/workflows/release.yml`, which lints and tests,
+builds on `ubuntu-latest`, and publishes a GitHub release with generated notes.
+`workflow_dispatch` accepts an explicit tag input.
+
+Released assets are `deploytix`, `deploytix-gui`, `deploytix-update-gui` and a
+`SHA256SUMS` file covering the three. `deploytix-rehearsal` is not released, for
+the same reason it is not packaged. The CLI is built without the `gui` feature so
+it carries no egui dependency.
+
+The tag must be `vMAJOR.MINOR.PATCH` and must match the `version` in
+`Cargo.toml`: the version is compiled into the binaries, so a mismatched tag
+would publish `vX` binaries reporting `vY`. The workflow checks this before
+building and fails with the version it expected, so bump `Cargo.toml` in the
+commit you tag.
 
 ---
 
