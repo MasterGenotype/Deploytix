@@ -13,6 +13,7 @@
 mod app;
 pub mod model;
 mod panels;
+pub mod preview;
 pub mod state;
 
 pub use app::{Blocked, UpdateGui};

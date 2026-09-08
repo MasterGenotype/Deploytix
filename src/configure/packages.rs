@@ -13,6 +13,7 @@
 //! - Decky Loader (Steam plugin framework) + init-specific service file
 //! - evdevhook2 (Cemuhook UDP motion server) via AUR + udev rule + service file
 
+use crate::aur::build as aur_build;
 use crate::config::{DeploymentConfig, GpuDriverVendor, TkgScheduler};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
@@ -766,19 +767,27 @@ pub fn install_yay(
         ],
     )?;
 
-    // Create build dir, clone, build, and clean up in a single chroot
-    // invocation.  artix-chroot may mount a tmpfs over /tmp, so a
-    // directory created in one invocation would not survive to the next.
+    // Build on the disk-backed scratch, not /tmp.  Both chroot paths give the
+    // target a tmpfs /tmp with no size= (artix-chroot mounts one itself; the
+    // plain-chroot fallback does it in chroot_api_setup_cmd), so the kernel
+    // caps it at half of RAM and a large build tree hits ENOSPC while the root
+    // volume still has tens of gigabytes free -- the failure mode
+    // docs/TMP_DISK_BACKED.md describes for the booted system.
+    //
+    // Still one chroot invocation: a tmpfs /tmp also means a directory created
+    // in one invocation would not survive to the next.
+    aur_build::ensure_build_root(cmd, install_root, username)?;
+    let clone_dir = format!("{}/yay", aur_build::BUILD_ROOT);
     let build_cmd = format!(
-        "mkdir -p /tmp/yay-build && \
-         chown {0}:{0} /tmp/yay-build && \
-         sudo -u {0} bash -c '\
-           cd /tmp/yay-build && \
-           git clone https://aur.archlinux.org/yay.git && \
-           cd yay && \
+        "rm -rf {clone} && \
+         sudo -u {user} env {env}bash -c '\
+           git clone https://aur.archlinux.org/yay.git {clone} && \
+           cd {clone} && \
            makepkg -si --noconfirm' && \
-         rm -rf /tmp/yay-build",
-        username
+         rm -rf {clone}",
+        user = username,
+        env = aur_build::build_env_prefix(),
+        clone = clone_dir,
     );
     cmd.run_in_chroot(install_root, &build_cmd)?;
 

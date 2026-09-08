@@ -50,6 +50,65 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         ui.add_space(theme::SPACING_SM);
     }
 
+    if let Some(cap) = state.capability.clone() {
+        widgets::section(ui, "AUR packages", |ui| {
+            if cap.is_ready() {
+                row(
+                    ui,
+                    "Helper",
+                    &cap.helper.map(|h| h.to_string()).unwrap_or_default(),
+                );
+                if let Some(user) = &cap.build_user {
+                    row(
+                        ui,
+                        "Builds as",
+                        &format!("{} ({})", user.name, user.source.label()),
+                    );
+                    if user.source.is_guess() {
+                        ui.label(
+                            RichText::new(
+                                "\u{26a0} That account was guessed from /etc/passwd. makepkg \
+                                 cannot run as root, so builds run as this user.",
+                            )
+                            .color(theme::WARNING)
+                            .size(11.0),
+                        );
+                    }
+                }
+                if cap.helpers.len() > 1 {
+                    let others: Vec<String> = cap
+                        .helpers
+                        .iter()
+                        .filter(|h| Some(**h) != cap.helper)
+                        .map(|h| h.to_string())
+                        .collect();
+                    ui.label(
+                        RichText::new(format!("Also installed: {}", others.join(", ")))
+                            .color(theme::TEXT_MUTED)
+                            .size(11.0),
+                    );
+                }
+            } else {
+                for blocker in &cap.blockers {
+                    ui.label(
+                        RichText::new(format!("\u{2022} {blocker}")).color(theme::TEXT_SECONDARY),
+                    );
+                }
+            }
+            ui.add_space(theme::SPACING_XS);
+            ui.label(
+                RichText::new(
+                    "AUR builds use a disk-backed scratch directory on /var, not the chroot's \
+                     /tmp, which is capped at half of RAM.",
+                )
+                .color(theme::TEXT_MUTED)
+                .size(11.0),
+            );
+        });
+
+        ui.add_space(theme::SPACING_SM);
+    }
+
     widgets::section(ui, "How updates work here", |ui| {
         ui.label(
             RichText::new(

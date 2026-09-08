@@ -1,5 +1,6 @@
 //! Deploytix library - Artix Linux deployment automation
 
+pub mod aur;
 pub mod cleanup;
 pub mod config;
 pub mod configure;

@@ -1,6 +1,7 @@
 # AUR packages and dependency management in the Updater GUI
 
-Status: **draft — not started.** This is a design document for future work.
+Status: **partly implemented.** Phases 1 and 2 have landed, along with the
+dependency preview from Phase 5; the rest is still design.
 
 ## What this is for
 
@@ -46,15 +47,24 @@ are ordered the way they are. None of them are visible from the GUI layer.
 `/tmp` into the set at all (`src/immutable/update.rs:71` binds only `var`,
 `home`, `boot`, plus the writable binds).
 
-An AUR build inside that chroot therefore gets **half of physical RAM** of
-scratch space — which is precisely the incident that `docs/TMP_DISK_BACKED.md`
-was written about: a linux-tkg tree filling an 11 GiB tmpfs on a 21 GiB machine
+Anything that builds under `/tmp` in that chroot therefore gets **half of
+physical RAM** of scratch space — the incident `docs/TMP_DISK_BACKED.md` was
+written about: a linux-tkg tree filling an 11 GiB tmpfs on a 21 GiB machine
 while the root volume had 67 GiB free. The disk-backed `@tmp` subvolume solved
 that for the *booted* system and does nothing for the *update chroot*.
 
-Building AUR packages without fixing this reproduces the original bug in the
-one place it is hardest to diagnose. This is Phase 1 and nothing else should
-start before it.
+Being precise about the exposure, because an earlier draft of this document
+overstated it: `makepkg`'s default `BUILDDIR` is the directory holding the
+PKGBUILD, so a helper that clones into the user's cache already builds on disk.
+What lands on the tmpfs is anything naming `/tmp` explicitly — which included
+`install_yay`, building in `/tmp/yay-build`, and includes PKGBUILDs and vendor
+tools that do the same.
+
+**Landed.** `src/aur/build.rs` puts the scratch on `/var/cache/deploytix/build`
+and exports `BUILDDIR`, `SRCDEST`, `PKGDEST`, `SRCPKGDEST`, `LOGDEST` and
+`TMPDIR` from `makepkg`'s own environment — one mechanism that works for every
+helper, rather than per-helper build-directory flags that differ or do not
+exist. `install_yay` builds there instead of `/tmp/yay-build`.
 
 ### 2. `makepkg` refuses to run as root, and the updater is root
 
@@ -71,10 +81,15 @@ something to infer silently.
 
 ### 3. yay may simply not be there
 
-`install_yay` is opt-in and defaults to false. Nothing in the tree does a
-runtime check for it — `grep` for `command -v yay` finds nothing. So the
-updater cannot assume a helper exists, and "install yay for me" is itself a
-transaction (it needs `go`, `git`, `base-devel` and a build user).
+`install_yay` is opt-in and defaults to false. Nothing in the tree did a
+runtime check for it. So the updater cannot assume a helper exists, and
+"install yay for me" is itself a transaction (it needs `go`, `git`,
+`base-devel` and a build user).
+
+**Landed.** `src/aur/helper.rs` detects paru, yay, pikaur, trizen and aura and
+drives whichever is present, preferring them in that order. `aura` is handled
+separately throughout because it runs as root and takes `-A`, where the rest
+must drop privileges and take `-S`.
 
 ### 4. The pacman DB and the build cache are on shared, non-snapshotted storage
 

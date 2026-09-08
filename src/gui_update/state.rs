@@ -1,6 +1,8 @@
 //! State and background workers for the update GUI.
 
 use super::model::{self, Backend, SnapshotRow};
+use super::preview::{self, Preview};
+use crate::aur::capability::{self, AurCapability};
 use crate::immutable::update::{run_update, UpdateOptions};
 use crate::immutable::{boot, detect_devices, history, lvm_ab, rollback, snapshot};
 use crate::utils::command::{CommandRunner, OperationRecord};
@@ -13,6 +15,9 @@ use std::thread;
 enum ChannelSlot {
     Operation,
     Refresh,
+    /// Dependency resolution for the Update tab. Its own channel so a slow
+    /// resolve can never displace a running update's messages.
+    Resolve,
 }
 
 /// How many trailing output lines of each command reach the log pane.
@@ -65,7 +70,11 @@ pub enum Msg {
     Refreshed {
         info: SystemInfo,
         rows: Vec<SnapshotRow>,
+        /// What this system can do with the AUR, probed alongside the rest.
+        capability: AurCapability,
     },
+    /// A dependency preview completed.
+    Resolved(Box<Preview>),
     /// A refresh could not read the system.
     RefreshFailed(String),
     /// The operation finished; the string is the user-facing summary.
@@ -82,6 +91,9 @@ pub struct AppState {
     pub rows: Vec<SnapshotRow>,
     /// Target whose package list is expanded in the Snapshots tab.
     pub expanded: Option<String>,
+
+    /// What this system can do with the AUR. `None` until the first refresh.
+    pub capability: Option<AurCapability>,
 
     // Update form
     pub repo_packages: String,
@@ -110,6 +122,11 @@ pub struct AppState {
     pub refreshing: bool,
     pub refresh_error: Option<String>,
     pub refresh_receiver: Option<Receiver<Msg>>,
+
+    // Dependency preview, on its own channel for the same reason.
+    pub preview: Option<Preview>,
+    pub resolving: bool,
+    pub resolve_receiver: Option<Receiver<Msg>>,
 }
 
 impl Default for AppState {
@@ -119,6 +136,7 @@ impl Default for AppState {
             info: None,
             rows: Vec::new(),
             expanded: None,
+            capability: None,
             repo_packages: String::new(),
             selected_files: Vec::new(),
             keep_sets: UpdateOptions::default().keep_sets,
@@ -135,6 +153,9 @@ impl Default for AppState {
             refreshing: false,
             refresh_error: None,
             refresh_receiver: None,
+            preview: None,
+            resolving: false,
+            resolve_receiver: None,
         }
     }
 }
@@ -162,7 +183,11 @@ impl AppState {
     /// can request a repaint).
     pub fn pump(&mut self) -> bool {
         let mut changed = false;
-        for slot in [ChannelSlot::Operation, ChannelSlot::Refresh] {
+        for slot in [
+            ChannelSlot::Operation,
+            ChannelSlot::Refresh,
+            ChannelSlot::Resolve,
+        ] {
             changed |= self.pump_one(slot);
         }
         changed
@@ -176,6 +201,7 @@ impl AppState {
         let rx = match slot {
             ChannelSlot::Operation => self.receiver.as_ref(),
             ChannelSlot::Refresh => self.refresh_receiver.as_ref(),
+            ChannelSlot::Resolve => self.resolve_receiver.as_ref(),
         };
         if let Some(rx) = rx {
             loop {
@@ -210,6 +236,10 @@ impl AppState {
                     self.refresh_receiver = None;
                     self.refreshing = false;
                 }
+                ChannelSlot::Resolve => {
+                    self.resolve_receiver = None;
+                    self.resolving = false;
+                }
             }
         }
         changed
@@ -219,11 +249,20 @@ impl AppState {
         match msg {
             Msg::Status(s) => self.status = s,
             Msg::Log(l) => self.logs.push(l),
-            Msg::Refreshed { info, rows } => {
+            Msg::Refreshed {
+                info,
+                rows,
+                capability,
+            } => {
                 self.info = Some(info);
                 self.rows = rows;
+                self.capability = Some(capability);
                 self.refresh_error = None;
                 self.refreshing = false;
+            }
+            Msg::Resolved(p) => {
+                self.preview = Some(*p);
+                self.resolving = false;
             }
             Msg::RefreshFailed(e) => {
                 self.refresh_error = Some(e);
@@ -285,17 +324,85 @@ impl AppState {
         thread::spawn(move || {
             let cmd = CommandRunner::new(false);
             let msg = match collect_state(&cmd) {
-                Ok((info, rows)) => Msg::Refreshed { info, rows },
+                // Probed against the live root: the set an update builds is a
+                // snapshot of it, so what is installed here is what the build
+                // chroot will have.
+                Ok((info, rows)) => Msg::Refreshed {
+                    info,
+                    rows,
+                    capability: capability::probe(&cmd, ""),
+                },
                 Err(e) => Msg::RefreshFailed(e.to_string()),
             };
             let _ = tx.send(msg);
         });
     }
 
+    /// Resolve the typed package names in the background.
+    ///
+    /// Read-only and unprivileged — `pacman -S --print` and metadata queries —
+    /// so it needs no confirmation and cannot affect a running update. Called
+    /// when the user finishes editing the package field, not per keystroke.
+    ///
+    /// A resolve already in flight is left alone rather than cancelled: its
+    /// result is discarded by the staleness check in [`Self::preview_matches`]
+    /// if the field has moved on.
+    pub fn start_resolve(&mut self) {
+        let targets = model::parse_package_names(&self.repo_packages);
+        if targets.is_empty() {
+            self.preview = None;
+            return;
+        }
+        if self.resolving {
+            return;
+        }
+        self.resolving = true;
+        let (tx, rx) = channel();
+        self.resolve_receiver = Some(rx);
+
+        thread::spawn(move || {
+            let msg = match preview::resolve(&targets) {
+                Ok(p) => Msg::Resolved(Box::new(p)),
+                // A preview is an aid, not a gate: a failure to resolve must
+                // not block staging, so it is reported as an empty preview
+                // carrying the reason rather than as an error banner.
+                Err(e) => Msg::Resolved(Box::new(Preview {
+                    targets,
+                    notes: vec![format!("Could not resolve dependencies: {e}")],
+                    ..Default::default()
+                })),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    /// Whether the held preview describes what is currently typed.
+    ///
+    /// The field can change while a resolve is in flight, so the panel checks
+    /// this before showing a preview rather than trusting whatever landed last.
+    pub fn preview_matches(&self) -> bool {
+        match &self.preview {
+            Some(p) => p.targets == model::parse_package_names(&self.repo_packages),
+            None => false,
+        }
+    }
+
+    /// The preview to display, if it is still current.
+    pub fn current_preview(&self) -> Option<&Preview> {
+        if self.preview_matches() {
+            self.preview.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// Run a transactional update in the background.
     pub fn start_update(&mut self, args: Vec<String>) {
         let tx = self.begin("Building update...");
         self.logs.clear();
+        // The preview described the pre-update system; it is stale the moment
+        // the transaction starts.
+        self.preview = None;
         self.tab = Tab::Progress;
 
         let opts = UpdateOptions {
@@ -554,12 +661,85 @@ mod tests {
                 pointer: "100".into(),
             },
             rows: Vec::new(),
+            capability: AurCapability::default(),
         })
         .unwrap();
         state.pump();
 
         assert!(state.refresh_error.is_none());
         assert!(state.info.is_some());
+        assert!(
+            state.capability.is_some(),
+            "a refresh must also land the AUR capability"
+        );
+    }
+
+    #[test]
+    fn a_resolve_never_displaces_a_running_update() {
+        // The whole reason resolution has its own channel: a slow pacman query
+        // must not take over the channel an in-flight update reports on.
+        let mut state = AppState::default();
+        let (op_tx, op_rx) = channel();
+        state.receiver = Some(op_rx);
+        state.busy = true;
+
+        let (res_tx, res_rx) = channel();
+        state.resolve_receiver = Some(res_rx);
+        res_tx
+            .send(Msg::Resolved(Box::new(Preview::default())))
+            .unwrap();
+        op_tx.send(Msg::Log("update output".into())).unwrap();
+        state.pump();
+
+        assert_eq!(state.logs, vec!["update output"]);
+        assert!(state.preview.is_some());
+        assert!(state.busy, "a resolve must not end the update");
+    }
+
+    #[test]
+    fn a_preview_for_different_packages_is_not_shown() {
+        // A resolve in flight while the user keeps typing lands a preview for
+        // the old text; showing it would misdescribe what is about to be staged.
+        let mut state = AppState::default();
+        state.repo_packages = "vim".into();
+        state.preview = Some(Preview {
+            targets: vec!["neovim".into()],
+            ..Default::default()
+        });
+        assert!(!state.preview_matches());
+        assert!(state.current_preview().is_none());
+
+        state.repo_packages = "neovim".into();
+        assert!(state.preview_matches());
+        assert!(state.current_preview().is_some());
+    }
+
+    #[test]
+    fn staging_an_update_drops_the_stale_preview() {
+        let mut state = AppState::default();
+        state.repo_packages = "vim".into();
+        state.preview = Some(Preview {
+            targets: vec!["vim".into()],
+            ..Default::default()
+        });
+        state.start_update(vec!["vim".to_string()]);
+        assert!(
+            state.preview.is_none(),
+            "the preview described the pre-update system"
+        );
+    }
+
+    #[test]
+    fn clearing_the_field_clears_the_preview() {
+        let mut state = AppState::default();
+        state.preview = Some(Preview {
+            targets: vec!["vim".into()],
+            ..Default::default()
+        });
+        state.repo_packages = String::new();
+        state.start_resolve();
+        assert!(state.preview.is_none());
+        assert!(!state.resolving, "nothing to resolve, no worker spawned");
     }
 
     #[test]

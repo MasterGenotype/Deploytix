@@ -35,11 +35,19 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         ui.label(
             RichText::new("Repository packages, separated by spaces:").color(theme::TEXT_SECONDARY),
         );
-        ui.add(
+        let field = ui.add(
             egui::TextEdit::singleline(&mut state.repo_packages)
                 .hint_text("vim git neovim")
                 .desired_width(f32::INFINITY),
         );
+        // Resolve when editing stops, not per keystroke: each resolve spawns
+        // pacman, and doing that on every character would be a subprocess per
+        // letter typed.
+        if field.lost_focus() || (field.changed() && !state.repo_packages.ends_with(' ')) {
+            state.start_resolve();
+        }
+
+        show_preview(ui, state);
 
         ui.add_space(theme::SPACING_SM);
         ui.horizontal(|ui| {
@@ -194,4 +202,51 @@ fn read_dir_split(dir: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     dirs.sort();
     files.sort();
     (dirs, files)
+}
+
+/// Render the dependency preview for whatever is currently typed.
+///
+/// Deliberately quiet when there is nothing to say: an empty field, or a
+/// resolve that has not landed, shows nothing rather than a spinner that
+/// flickers on every keystroke.
+fn show_preview(ui: &mut Ui, state: &AppState) {
+    if state.resolving && state.current_preview().is_none() {
+        ui.label(
+            RichText::new("Resolving dependencies...")
+                .color(theme::TEXT_MUTED)
+                .size(11.0),
+        );
+        return;
+    }
+
+    let Some(preview) = state.current_preview() else {
+        return;
+    };
+
+    ui.add_space(theme::SPACING_XS);
+    let colour = if preview.needs_attention() {
+        theme::WARNING
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    ui.label(RichText::new(preview.summary()).color(colour));
+
+    // Removals are the loud case: on a read-only root, a package removed to
+    // satisfy a conflict is the hardest outcome to walk back.
+    if let Some(plan) = &preview.plan {
+        if !plan.to_remove.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "\u{26a0} Would remove: {}",
+                    plan.to_remove.join(", ")
+                ))
+                .color(theme::WARNING)
+                .size(11.0),
+            );
+        }
+    }
+
+    for note in &preview.notes {
+        ui.label(RichText::new(note).color(theme::TEXT_MUTED).size(11.0));
+    }
 }
