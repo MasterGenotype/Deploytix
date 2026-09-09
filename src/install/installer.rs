@@ -722,6 +722,19 @@ impl Installer {
             self.config.immutable_lvm_ab(),
         )?;
 
+        // Binaries being present says nothing about the kernel behind them.
+        // lvcreate/cryptsetup/veritysetup are front-ends: they run, then fail at
+        // the ioctl when the running kernel has no such device-mapper target.
+        // That failure lands in phase 2, after the disk is partitioned, so the
+        // check belongs here — before partition_disk() at 0.10.
+        crate::utils::deps::ensure_kernel_dm_targets(
+            &self.cmd,
+            self.config.disk.encryption,
+            self.config.disk.integrity,
+            self.config.disk.use_lvm_thin,
+            self.config.immutable_lvm_ab(),
+        )?;
+
         // linux-tkg replaces linux-zen, so an install that cannot reach the
         // release must fail here — before partition_disk() at 0.10 — rather
         // than after basestrap, where the disk is already gone and there is no
