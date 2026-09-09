@@ -175,6 +175,13 @@ pub struct UpdateRecord {
     pub backend: Backend,
     /// btrfs set id, or `"A"`/`"B"` for a slot.
     pub target: String,
+    /// The set/slot this transaction composed onto: an update that was already
+    /// staged for the next boot but not yet booted. `None` when the transaction
+    /// started from the running system, which is every update made after a
+    /// reboot. Lets `deploytix` report "3 updates composed into set …" rather
+    /// than three records that each look like a separate boot target.
+    #[serde(default)]
+    pub composed_from: Option<String>,
     pub request: Request,
     pub outcome: Outcome,
     /// Empty when the transaction never got as far as changing packages.
@@ -424,6 +431,7 @@ mod tests {
             duration_secs: 12,
             backend: Backend::Btrfs,
             target: target.to_string(),
+            composed_from: None,
             request: Request::FullUpgrade,
             outcome: Outcome::Succeeded,
             changes: PackageChanges::default(),

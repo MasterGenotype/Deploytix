@@ -148,14 +148,20 @@ intercepts *interactive* `pacman` upgrade/install/remove and points you at
   slot and run `deploytix rollback`.
 - **Storage.** Two full root images (thin-provisioned, so physical use tracks
   actual data).
-- **Do not run two updates in one session (known bug).** `run_update` picks its
-  target as `other_slot(state.active)`, but `active` means "boots next", not
-  "running now" — nothing here reads `deploytix.slot=` from the cmdline. After
-  one update stages the other slot, a second update before rebooting selects the
-  **running** slot, mounts its root LV read-write and rsyncs over it. That
-  discards the first update *and* invalidates the running system's dm-verity
-  tree. Reboot between updates until this is fixed; see
+- **Updates compose within a session.** `run_update` derives its target from the
+  slot the system actually booted (`running_slot()`, reading `deploytix.slot=`
+  from the cmdline) rather than from `state.active`, which means "boots next".
+  A second update before rebooting builds into the already-staged slot, skipping
+  the root rsync so the earlier update is not reverted; `select_target_slot()`
+  is asserted never to return the running slot, since building there would mount
+  a live dm-verity data device read-write. See
   `docs/IMMUTABLE_SET_COMPOSITION.md`.
+- **A failed compose loses the staged update.** Composing writes directly into
+  the slot the boot pointer already names — LVM offers no cheap snapshot to
+  branch from, unlike btrfs. If that transaction fails, the slot's image no
+  longer matches its recorded root hash, so the boot pointer is moved back to
+  the running slot and the staged update is discarded. The running system is
+  never at risk; the staged work is.
 
 ---
 

@@ -50,6 +50,41 @@ pub const TMP_SUBVOL: &str = "@tmp";
 /// root of `@` (readable even when the root is mounted read-only).
 pub const PAIR_MARKER: &str = ".deploytix-pair";
 
+/// What the system is running now versus what it will boot next.
+///
+/// These are two different things the moment an update is staged, and conflating
+/// them is what made a second update in one session discard the first: the btrfs
+/// backend rebuilt from the *booted* set (losing the staged one) and the LVM A/B
+/// backend picked the *running* slot as its build target (losing the staged slot
+/// and writing into a live dm-verity image).
+///
+/// `running` is authoritative from `/proc/cmdline` — what the initramfs actually
+/// mounted. `staged` is authoritative from the boot pointer: `/etc/default/grub`
+/// plus grub.cfg on btrfs, the slot state file on LVM A/B.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionState {
+    /// The set/slot the initramfs mounted.
+    pub running: String,
+    /// The set/slot selected for the next boot.
+    pub staged: String,
+}
+
+impl SessionState {
+    /// The set/slot staged this session but not yet booted, if any.
+    ///
+    /// `Some(x)` means an update already ran since boot and `x` holds its
+    /// result: the next update must build **on** it, not beside it. `None`
+    /// means the pointer still names the running system, so the next update
+    /// starts from `running`.
+    pub fn pending(&self) -> Option<&str> {
+        if self.staged == self.running {
+            None
+        } else {
+            Some(self.staged.as_str())
+        }
+    }
+}
+
 /// Mount points the `mountcrypt` initramfs hook mounts itself, from the booted
 /// root's `.deploytix-pair` marker, before `switch_root`.
 ///
@@ -184,6 +219,44 @@ pub fn detect_devices() -> ImmutableDevices {
     ImmutableDevices {
         root_fs: ROOT_FS_DEVICE.to_string(),
         usr_fs,
+    }
+}
+
+#[cfg(test)]
+mod session_state_tests {
+    use super::SessionState;
+
+    fn session(running: &str, staged: &str) -> SessionState {
+        SessionState {
+            running: running.to_string(),
+            staged: staged.to_string(),
+        }
+    }
+
+    #[test]
+    fn nothing_is_pending_when_the_pointer_names_the_running_system() {
+        assert_eq!(session("@", "@").pending(), None);
+        assert_eq!(session("1739000000", "1739000000").pending(), None);
+        assert_eq!(session("A", "A").pending(), None);
+    }
+
+    #[test]
+    fn a_staged_set_is_pending_until_it_is_booted() {
+        // The state right after one update: still running the base, pointer
+        // moved to the new set. A second update must compose onto that set.
+        assert_eq!(session("@", "1739000000").pending(), Some("1739000000"));
+        assert_eq!(session("A", "B").pending(), Some("B"));
+    }
+
+    #[test]
+    fn pending_is_about_difference_not_ordering() {
+        // After a rollback the pointer names an *older* set than the running
+        // one. That is still a pending change, and still what the next update
+        // has to build on -- otherwise the rollback is silently undone.
+        assert_eq!(
+            session("1739000900", "1739000000").pending(),
+            Some("1739000000")
+        );
     }
 }
 

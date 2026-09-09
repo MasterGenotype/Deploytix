@@ -1,18 +1,19 @@
 # Composing Staged Updates Between Reboots
 
-Status: **design / not implemented**
+Status: **implemented** — see §8 for what shipped and what did not
 Applies to: `deploytix update`, `deploytix rollback`, both immutable backends
 
 ---
 
-## 1. The problem
+## 1. The problem (as it was)
 
 > Installing or updating once sets the system to reboot into that set. If a
 > second install or update is performed before the next reboot, the first one is
 > forgotten.
 
-Confirmed in code on both backends. They fail differently, and the LVM A/B
-failure is considerably worse than "forgotten".
+Confirmed in code on both backends. They failed differently, and the LVM A/B
+failure was considerably worse than "forgotten". Both are fixed; this section
+records what the defect was, because the shape of it explains the design.
 
 ### 1.1 btrfs backend — the staged set is orphaned
 
@@ -347,3 +348,66 @@ Composing is the fix, and it is mostly a matter of *reusing* the staged set
 instead of ignoring it. The A/B target-selection guard (WP1) is a small,
 self-contained change that removes a data-integrity hazard and should land
 first.
+
+---
+
+## 8. What shipped
+
+Implemented against the plan in §5, with two deviations noted below.
+
+| WP | Status | Where |
+|---|---|---|
+| WP1 — A/B target from the running slot, `target != running` assertion | ✅ | `lvm_ab::running_slot`, `select_target_slot`, guard in `run_update` |
+| WP2 — `SessionState` / `pending()` | ✅ | `immutable::SessionState` |
+| WP3 — btrfs composes | ✅ | `update::run_in_new_set` |
+| WP4 — A/B composes (rsync skipped) | ✅ | `lvm_ab::run_update` |
+| WP5 — undo point for a failed compose | ⚠️ partial — see below | — |
+| WP6 — `flock` | ✅ | `update::acquire_update_lock`, `/run/deploytix-update.lock` |
+| WP7 — rollback discards a staged set | ✅ | `rollback::resolve_target` (btrfs); already correct on A/B |
+| WP8 — history records composition | ✅ | `history::UpdateRecord::composed_from` |
+
+### Deviation 1 — composition is a snapshot, not an in-place write (btrfs)
+
+§3.2 proposed writing into the staged set directly, which made §4's first row
+("update fails while composing") the hard case and motivated WP5.
+
+What shipped instead: composing snapshots **from** the staged set into a new
+set, exactly as a fresh update snapshots from the running one. Only the *source*
+changes. This is strictly better:
+
+- the failure path is unchanged — `delete_set` throws away the new set and the
+  staged one is untouched, so WP5 needs no separate undo machinery;
+- `create_set`, `mount_set_cmd`, `activate_target` and pruning are all
+  unmodified;
+- each composition step remains individually rollback-able, rather than
+  collapsing into one mutable set.
+
+The cost is that a session with N updates leaves N sets rather than one. They
+are ordinary sets, pruned by `keep_sets` like any other, and only the newest is
+ever the boot target — so "at most one *staged* set" (§2) still holds even
+though more than one set exists.
+
+### Deviation 2 — A/B cannot do the same, and says so
+
+LVM has no cheap snapshot to branch from, so the A/B backend does write into the
+staged slot in place. A failed compose therefore leaves that slot modified but
+not re-sealed: its image no longer matches its recorded root hash, and it is
+already the boot target.
+
+`run_update` handles this by moving the boot pointer back to the running slot on
+a failed compose (the running image is untouched and still sealed) and reporting
+that the staged update was lost. The running system is never at risk; the staged
+work is. This is the one place where the two backends genuinely differ in what a
+failure costs, and it is documented in `docs/IMMUTABLE_LVM_AB.md`.
+
+### Tests
+
+Unit coverage per §6: `SessionState::pending` (three cases including the
+post-rollback pointer-behind-running case), `parse_slot` (including
+last-occurrence-wins and rejection of non-A/B values), and `select_target_slot`
+over all four (running, staged) combinations — the last asserting the target is
+never the running slot, which is the invariant that prevents the
+data-integrity bug.
+
+The integration matrix in §6 still needs a VM: nothing here proves the composed
+set actually boots with both updates present. That remains the acceptance test.

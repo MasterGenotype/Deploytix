@@ -109,6 +109,69 @@ impl SlotState {
     }
 }
 
+/// Kernel cmdline of the running system.
+const PROC_CMDLINE: &str = "/proc/cmdline";
+
+/// The slot letter named by a kernel cmdline's `deploytix.slot=`.
+///
+/// Last occurrence wins, matching the kernel's own handling of a repeated
+/// parameter and the `verity-ab` hook that actually performed the mount.
+pub fn parse_slot(cmdline: &str) -> Option<String> {
+    let mut found = None;
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("deploytix.slot=") {
+            let value = value.trim_matches('"').to_uppercase();
+            if value == "A" || value == "B" {
+                found = Some(value);
+            }
+        }
+    }
+    found
+}
+
+/// The slot the running system actually booted from.
+///
+/// This is deliberately **not** [`SlotState::active`]: `active` is written at the
+/// end of an update and means "boots next". Between staging an update and
+/// rebooting, the two differ — and treating `active` as the running slot is what
+/// made a second update in one session select the live slot as its build target,
+/// mounting a dm-verity data device read-write underneath the running system.
+///
+/// Falls back to `active` only when the cmdline says nothing, which means an
+/// install predating the `deploytix.slot=` parameter; there is no better source
+/// there, and the fallback reproduces the previous behaviour rather than
+/// guessing.
+pub fn running_slot(state: &SlotState) -> String {
+    std::fs::read_to_string(PROC_CMDLINE)
+        .ok()
+        .and_then(|cmdline| parse_slot(&cmdline))
+        .unwrap_or_else(|| {
+            warn!(
+                "[lvm-ab] No deploytix.slot= on the kernel cmdline; assuming the running \
+                 slot is the state file's active slot ({})",
+                state.active
+            );
+            state.active.to_uppercase()
+        })
+}
+
+/// Pick the slot an update should build into, and whether that composes onto an
+/// already-staged update.
+///
+/// Returns `(target, composing)`. The one hard rule is that `target` is never the
+/// running slot: building there mounts a live dm-verity data device read-write
+/// underneath the running system.
+///
+/// - Nothing staged (`staged == running`) → build into the other slot, fresh.
+/// - Something staged → build into *that* slot, composing onto it, so the two
+///   updates end up in one image rather than the second discarding the first.
+pub fn select_target_slot(session: &crate::immutable::SessionState) -> (String, bool) {
+    match session.pending() {
+        Some(pending) => (pending.to_string(), true),
+        None => (ab::other_slot(&session.running).to_string(), false),
+    }
+}
+
 /// Whether this system uses the LVM immutable A/B backend (used for dispatch).
 pub fn detect() -> bool {
     std::path::Path::new(STATE_FILE).exists()
@@ -210,17 +273,51 @@ pub fn run_update(
     extra_packages: &[String],
     opts: &UpdateOptions,
 ) -> Result<()> {
+    let _lock = update::acquire_update_lock(cmd)?;
     let state = read_state()?;
-    let active = state.active.clone();
-    let target = ab::other_slot(&active).to_string();
     let vg = state.vg.clone();
+
+    // `state.active` is the slot that boots *next*, not the one running now —
+    // those differ as soon as an update is staged. Read the running slot from
+    // the cmdline and drive everything from that.
+    let session = crate::immutable::SessionState {
+        running: running_slot(&state),
+        staged: state.active.to_uppercase(),
+    };
+
+    // Compose onto a slot already staged this session; otherwise build into the
+    // slot we are not running from.
+    let (target, composing) = select_target_slot(&session);
+
+    // The invariant that keeps the running system intact. Building into the
+    // running slot means mounting its root LV read-write while the live
+    // dm-verity root sits on top of it, then rsync-ing and pacman-ing over it —
+    // which both discards whatever was staged and invalidates the verity tree
+    // of the system currently executing. Assert it rather than trusting the
+    // selection above to stay correct.
+    if target.eq_ignore_ascii_case(&session.running) {
+        return Err(DeploytixError::ConfigError(format!(
+            "refusing to build into slot {} — it is the running slot. \
+             (running={}, staged={})",
+            target, session.running, session.staged
+        )));
+    }
+
     let (root_lv, hash_lv) = ab::slot_lvs(&target)
         .ok_or_else(|| DeploytixError::ConfigError(format!("invalid target slot '{target}'")))?;
 
-    info!(
-        "[lvm-ab] Building update into inactive slot {} ({}/{})",
-        target, root_lv, hash_lv
-    );
+    if composing {
+        info!(
+            "[lvm-ab] Composing onto slot {} ({}/{}), already staged for next boot; \
+             running slot is {}",
+            target, root_lv, hash_lv, session.running
+        );
+    } else {
+        info!(
+            "[lvm-ab] Building update into inactive slot {} ({}/{}); running slot is {}",
+            target, root_lv, hash_lv, session.running
+        );
+    }
 
     let (local_files, repo_names) = update::classify_args(extra_packages);
 
@@ -232,8 +329,19 @@ pub fn run_update(
     let result = (|| -> Result<history::PackageChanges> {
         cmd.run("sh", &["-c", &mount_target_cmd(&vg, root_lv, &target)])?;
         let t = target_dir(&target);
-        info!("[lvm-ab] Syncing active root -> slot {}", target);
-        cmd.run("sh", &["-c", &rsync_root_cmd(&target)])?;
+        if composing {
+            // The slot already holds the staged update's result. Re-syncing the
+            // running root over it — with `--delete`, no less — is exactly how
+            // that update would be reverted, which is the bug being fixed.
+            info!(
+                "[lvm-ab] Slot {} already carries a staged update; skipping the root sync \
+                 so this update composes with it",
+                target
+            );
+        } else {
+            info!("[lvm-ab] Syncing running root -> slot {}", target);
+            cmd.run("sh", &["-c", &rsync_root_cmd(&target)])?;
+        }
 
         let staged = update::stage_local_pkgs(cmd, &local_files)?;
         // Bracket the transaction with two `pacman -Q` reads. /var is shared
@@ -263,6 +371,7 @@ pub fn run_update(
             duration_secs: start.elapsed().as_secs(),
             backend: history::Backend::LvmAb,
             target: target.clone(),
+            composed_from: composing.then(|| session.staged.clone()),
             request: history::Request::classify(&repo_names, &local_files),
             outcome: match &result {
                 Ok(_) => history::Outcome::Succeeded,
@@ -273,10 +382,39 @@ pub fn run_update(
     }
 
     if let Err(e) = result {
-        warn!(
-            "[lvm-ab] Update failed; slot {} left inactive, boot pointer unchanged",
-            target
-        );
+        if composing {
+            // Composing writes into the slot the boot pointer *already* names.
+            // A failed transaction has therefore modified the image that boots
+            // next, without re-sealing it — its recorded root hash no longer
+            // describes it, so the next boot fails verity on the default entry.
+            // Send the pointer back to the running slot, which this transaction
+            // never touched and whose hash is still valid.
+            let running_hash = state.roothash(&session.running).to_string();
+            if running_hash.is_empty() {
+                warn!(
+                    "[lvm-ab] Update failed while composing into slot {}, and slot {} has no \
+                     recorded root hash to fall back to. That slot's image no longer matches \
+                     its hash: pick a good slot at the GRUB prompt if the next boot fails.",
+                    target, session.running
+                );
+            } else {
+                warn!(
+                    "[lvm-ab] Update failed while composing into slot {} (which the boot \
+                     pointer already named). Repointing boot back to the running slot {}, \
+                     whose image is untouched and still sealed; the staged update is lost.",
+                    target, session.running
+                );
+                let mut reverted = state.clone();
+                reverted.active = session.running.clone();
+                let _ = write_state(cmd, &reverted);
+                let _ = activate_slot(cmd, &session.running, &running_hash);
+            }
+        } else {
+            warn!(
+                "[lvm-ab] Update failed; slot {} left inactive, boot pointer unchanged",
+                target
+            );
+        }
         return Err(e);
     }
 
@@ -291,10 +429,18 @@ pub fn run_update(
     write_state(cmd, &new_state)?;
     activate_slot(cmd, &target, &roothash)?;
 
-    info!(
-        "[lvm-ab] Update ready. Reboot to activate slot {} (rollback: `deploytix rollback`).",
-        target
-    );
+    if composing {
+        info!(
+            "[lvm-ab] Update ready. Slot {} now carries this update composed with the one \
+             already staged; reboot to activate it (rollback: `deploytix rollback`).",
+            target
+        );
+    } else {
+        info!(
+            "[lvm-ab] Update ready. Reboot to activate slot {} (rollback: `deploytix rollback`).",
+            target
+        );
+    }
     if opts.reboot {
         cmd.run("reboot", &[])?;
     }
@@ -384,6 +530,80 @@ fn slot_fs(fs: &Filesystem) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(running: &str, staged: &str) -> crate::immutable::SessionState {
+        crate::immutable::SessionState {
+            running: running.to_string(),
+            staged: staged.to_string(),
+        }
+    }
+
+    // ── running slot: cmdline, not the state file ────────────────────────────
+
+    #[test]
+    fn parses_the_running_slot_from_the_cmdline() {
+        assert_eq!(
+            parse_slot("root=/dev/mapper/deploytix_root deploytix.slot=B ro"),
+            Some("B".to_string())
+        );
+        assert_eq!(parse_slot("deploytix.slot=a quiet"), Some("A".to_string()));
+    }
+
+    #[test]
+    fn a_repeated_slot_parameter_takes_the_last_value() {
+        // Kernel behaviour for a repeated parameter, and what the verity-ab
+        // hook itself acted on.
+        assert_eq!(
+            parse_slot("deploytix.slot=A quiet deploytix.slot=B"),
+            Some("B".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cmdline_without_a_slot_yields_nothing() {
+        assert_eq!(parse_slot("root=/dev/sda2 ro quiet"), None);
+        assert_eq!(parse_slot("deploytix.slot=C"), None, "only A and B exist");
+    }
+
+    // ── target selection: never the running slot ────────────────────────────
+
+    /// The reported bug. After one update, `active` is the staged slot B while
+    /// the machine still runs A. Selecting `other_slot(active)` picked A -- the
+    /// running slot -- and rsync'd over a live dm-verity image.
+    #[test]
+    fn a_second_update_composes_onto_the_staged_slot_not_the_running_one() {
+        let (target, composing) = select_target_slot(&session("A", "B"));
+        assert_eq!(
+            target, "B",
+            "must build into the staged slot, not the running one"
+        );
+        assert!(composing);
+    }
+
+    #[test]
+    fn a_first_update_builds_into_the_inactive_slot() {
+        let (target, composing) = select_target_slot(&session("A", "A"));
+        assert_eq!(target, "B");
+        assert!(!composing);
+
+        let (target, composing) = select_target_slot(&session("B", "B"));
+        assert_eq!(target, "A");
+        assert!(!composing);
+    }
+
+    /// The invariant that protects the running system, over every combination.
+    #[test]
+    fn the_target_is_never_the_running_slot() {
+        for running in ["A", "B"] {
+            for staged in ["A", "B"] {
+                let (target, _) = select_target_slot(&session(running, staged));
+                assert_ne!(
+                    target, running,
+                    "running={running} staged={staged} selected the running slot"
+                );
+            }
+        }
+    }
 
     fn sample_state() -> SlotState {
         SlotState {

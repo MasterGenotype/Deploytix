@@ -152,12 +152,16 @@ Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
 interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`
 image builds and deploys).
 
-**Known bug — updates do not compose within a session.** Both backends resolve
-"what to build from" incorrectly when a set is already staged but not yet
-booted: the btrfs backend re-branches from the booted set (discarding the staged
-one), and the LVM A/B backend selects the *running* slot as its build target
-(discarding the staged slot and invalidating the live dm-verity tree). Reboot
-between updates. Design for the fix: `docs/IMMUTABLE_SET_COMPOSITION.md`.
+**Composing updates within a session.** Both backends distinguish what is
+*running* (from `/proc/cmdline`: `rootflags=subvol=` or `deploytix.slot=`) from
+what is *staged* for the next boot (the boot pointer), via
+`immutable::SessionState::pending()`. A second `deploytix update` before
+rebooting builds on the staged set/slot rather than beside it, so the two
+compose. On the A/B backend the build target is derived from the running slot
+and asserted never to be it — building into the running slot would mount a live
+dm-verity data device read-write. `deploytix rollback` with no argument discards
+a staged set and returns to the running one. Transactions are serialised by an
+flock on `/run/deploytix-update.lock`. See `docs/IMMUTABLE_SET_COMPOSITION.md`.
 
 ## Reference Materials
 

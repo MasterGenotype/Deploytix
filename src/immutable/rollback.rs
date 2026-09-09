@@ -85,10 +85,35 @@ pub fn resolve_target(cmd: &CommandRunner, selection: Option<&str>) -> Result<St
             Ok(snapshot::set_root_subvol(id))
         }
         None => {
-            // One step back from the current pointer in the ordered target list.
             let targets = list_targets(cmd)?;
             let current = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
                 .unwrap_or_else(|| "@".to_string());
+
+            // A set staged this session but never booted is not history to step
+            // back through — it is a pending change. Undoing it means returning
+            // to what is actually running, not to whatever preceded it: stepping
+            // one place back in the list would land on the set *before* the
+            // running one and roll the machine back further than asked.
+            let running = boot::running_set_id();
+            let session = crate::immutable::SessionState {
+                running: running.clone(),
+                staged: current.clone(),
+            };
+            if session.pending().is_some() {
+                info!(
+                    "[immutable] Discarding the update staged for next boot ({}); \
+                     returning the boot pointer to the running system ({})",
+                    current, running
+                );
+                return Ok(if running == crate::immutable::ROOT_SUBVOL {
+                    crate::immutable::ROOT_SUBVOL.to_string()
+                } else {
+                    snapshot::set_root_subvol(&running)
+                });
+            }
+
+            // Otherwise: one step back from the current pointer in the ordered
+            // target list.
             let idx = targets.iter().position(|t| *t == current).unwrap_or(0);
             if idx == 0 {
                 return Err(DeploytixError::ConfigError(

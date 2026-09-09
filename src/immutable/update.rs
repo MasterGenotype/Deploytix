@@ -3,13 +3,21 @@
 //! The running system's `/` and `/usr` are read-only, so updates never modify it
 //! in place. Instead:
 //!
-//! 1. Snapshot the **running** `{root, usr, etc}` trio into a new *writable*
-//!    set. That is the base `{@, @usr, @etc}` only on a never-updated system;
-//!    once an update has been activated the running trio is a snapshot set, and
-//!    snapshotting it is what makes successive updates stack rather than each
-//!    one rebasing onto the install-time base. The running trio is read from
-//!    the kernel cmdline (see [`crate::immutable::boot::running_subvols`]),
-//!    which is what the initramfs itself mounted.
+//! 1. Snapshot a `{root, usr, etc}` trio into a new *writable* set. The source
+//!    is whichever trio the next boot would use:
+//!    - **nothing staged** — the running trio, read from the kernel cmdline
+//!      (see [`crate::immutable::boot::running_subvols`]), which is what the
+//!      initramfs itself mounted. That is the base `{@, @usr, @etc}` on a
+//!      never-updated system, and a snapshot set once one has been booted.
+//!    - **an update already staged this session** — that staged set, so the two
+//!      updates *compose* into one. Snapshotting the running trio again here is
+//!      what used to make a second update in one session silently discard the
+//!      first: the pointer moved to the new set, and the new set had been
+//!      branched from a trio that never contained the earlier update.
+//!
+//!    The distinction is [`crate::immutable::SessionState::pending`]. Because a
+//!    composition is still a *fresh* snapshot taken from the staged set, a
+//!    failure deletes only the new set and leaves the staged one intact.
 //! 2. Mount that set (root + paired usr/etc, with `/var`, `/home`, `/boot`
 //!    bind-mounted so state and the kernel/initramfs are shared, and the
 //!    `WRITABLE_BIND_PATHS` reproduced so `/opt` & co. land where the booted
@@ -182,6 +190,56 @@ pub(crate) fn stage_local_pkgs(cmd: &CommandRunner, files: &[String]) -> Result<
     Ok(staged)
 }
 
+/// Whether a snapshot set still exists on disk.
+///
+/// The boot pointer can outlive the set it names — pruned, or removed by hand —
+/// and composing onto a set that is gone would fail the whole transaction at the
+/// snapshot step. In dry-run there is nothing to inspect, so the answer is
+/// "yes": that is the path worth previewing.
+fn set_exists(cmd: &CommandRunner, devices: &ImmutableDevices, id: &str) -> bool {
+    if cmd.is_dry_run() {
+        return true;
+    }
+    snapshot::list_sets(cmd, &devices.root_fs)
+        .map(|sets| sets.iter().any(|s| s == id))
+        .unwrap_or(false)
+}
+
+/// Lockfile serialising `deploytix update` / `rollback` against each other.
+pub const UPDATE_LOCK: &str = "/run/deploytix-update.lock";
+
+/// An exclusive lock held for the duration of a transaction, released on drop.
+///
+/// Two concurrent updates were merely wasteful when each built its own set from
+/// the running system. Now that a second update *composes onto* the set the
+/// first one staged, an overlap means two writers inside one snapshot — so the
+/// lock is a correctness requirement, not a nicety.
+pub struct UpdateLock(#[allow(dead_code)] nix::fcntl::Flock<std::fs::File>);
+
+/// Take the update lock, failing rather than blocking if another run holds it.
+///
+/// Released when the guard drops — including on panic and on process exit — so a
+/// crashed run leaves nothing to clean up by hand.
+pub fn acquire_update_lock(cmd: &CommandRunner) -> Result<Option<UpdateLock>> {
+    use nix::fcntl::{Flock, FlockArg};
+
+    if cmd.is_dry_run() {
+        return Ok(None);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(UPDATE_LOCK)?;
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(locked) => Ok(Some(UpdateLock(locked))),
+        Err(_) => Err(DeploytixError::ConfigError(format!(
+            "another deploytix update or rollback is already running (lock: {UPDATE_LOCK}). \
+             Wait for it to finish before starting another transaction."
+        ))),
+    }
+}
+
 /// Confirm we are on an immutable deploytix system before updating.
 pub(crate) fn ensure_immutable(cmd: &CommandRunner) -> Result<()> {
     if cmd.is_dry_run() {
@@ -266,6 +324,7 @@ where
     F: FnOnce(&CommandRunner, &str, &str) -> Result<history::PackageChanges>,
 {
     ensure_immutable(cmd)?;
+    let _lock = acquire_update_lock(cmd)?;
     let devices = detect_devices();
 
     // Repair the live fstab *before* snapshotting, so the new set inherits the
@@ -275,13 +334,48 @@ where
     etc::repair_fstab(cmd, "");
 
     // What the system is running now, read from the kernel cmdline before
-    // anything moves the boot pointer. The new set is snapshotted from it, and
-    // pruning must never delete it.
+    // anything moves the boot pointer. Pruning must never delete it.
     let running = boot::running_set_id();
-    let source = boot::running_subvols();
+
+    // ...and what is already staged for the next boot. When an update has
+    // already run this session these differ, and the new set must be built from
+    // the *staged* one so the two compose. Building from `running` again — what
+    // this did before — silently discarded the earlier update the moment the
+    // pointer moved to the new set.
+    let session = crate::immutable::SessionState {
+        running: running.clone(),
+        staged: boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+            .unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string()),
+    };
+    let composing = match session.pending() {
+        // Only compose onto a set that is actually still there: a pointer can
+        // outlive its set (pruned, or deleted by hand), and snapshotting a
+        // missing subvolume fails the whole transaction.
+        Some(pending) => set_exists(cmd, &devices, pending),
+        None => false,
+    };
+
+    let source = match session.pending() {
+        Some(pending) if composing => {
+            info!(
+                "[immutable] Composing onto the set already staged for next boot ({})",
+                pending
+            );
+            snapshot::SubvolSet::for_root(&snapshot::set_root_subvol(pending))
+        }
+        Some(pending) => {
+            warn!(
+                "[immutable] Boot pointer names set {} but it no longer exists; \
+                 building from the running system ({}) instead",
+                pending, running
+            );
+            boot::running_subvols()
+        }
+        None => boot::running_subvols(),
+    };
 
     info!(
-        "[immutable] Building transactional set from the running system ({})",
+        "[immutable] Building transactional set from {}",
         source.root
     );
     let id = snapshot::create_set(cmd, &devices, &source, /* readonly = */ false)?;
@@ -312,6 +406,7 @@ where
             duration_secs: start.elapsed().as_secs(),
             backend: history::Backend::Btrfs,
             target: id.clone(),
+            composed_from: composing.then(|| session.staged.clone()),
             request,
             outcome: match &result {
                 Ok(_) => history::Outcome::Succeeded,
@@ -330,10 +425,18 @@ where
             // boot pointer here would return the set we just staged, leaving
             // the actually-booted set unprotected and eligible for deletion.
             prune_sets(cmd, &devices, opts.keep_sets, &running, &id)?;
-            info!(
-                "[immutable] Ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
-                id
-            );
+            if composing {
+                info!(
+                    "[immutable] Ready. Set {} composes this update with the one already \
+                     staged ({}); reboot to activate it (rollback: `deploytix rollback`).",
+                    id, session.staged
+                );
+            } else {
+                info!(
+                    "[immutable] Ready. Reboot to activate set {} (rollback: `deploytix rollback`).",
+                    id
+                );
+            }
             if opts.reboot {
                 cmd.run("reboot", &[])?;
             }
