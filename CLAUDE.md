@@ -72,6 +72,14 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 
 **Proportional Partitioning**: Fixed partitions (EFI 512 MiB, Boot 2 GiB, Swap 2×RAM clamped 4–20 GiB) are allocated first; remaining space is distributed by weighted proportions.
 
+**Swap**: three modes — `partition`, `file_zram` (ZRAM + on-disk swap file),
+`zram_only`. The swap file's path is layout-dependent: `/swap/swapfile`
+normally, `/var/swap/swapfile` on an immutable root (`/` is read-only, and on
+btrfs a snapshot invalidates the physical extents `resume_offset=` names). Its
+allocation is filesystem-dependent — `btrfs filesystem mkswapfile` on btrfs,
+`fallocate` on ext, `dd` everywhere else, because `swapon` rejects the unwritten
+extents `fallocate` leaves on XFS and F2FS. See `docs/SWAP_AUDIT.md`.
+
 **Init System Abstraction**: `InitSystem` enum provides `base_package()`, `service_dir()`, `enabled_dir()`. Package naming follows Artix convention: `{package}-{init}` (e.g., `iwd-runit`).
 
 **Signal-Safe Cleanup**: SIGINT/SIGTERM handlers catch interruptions and automatically unmount filesystems and close LUKS containers.
@@ -143,6 +151,13 @@ the `verity-ab` hook in `src/configure/hooks.rs`. See `docs/IMMUTABLE_LVM_AB.md`
 Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
 interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`
 image builds and deploys).
+
+**Known bug — updates do not compose within a session.** Both backends resolve
+"what to build from" incorrectly when a set is already staged but not yet
+booted: the btrfs backend re-branches from the booted set (discarding the staged
+one), and the LVM A/B backend selects the *running* slot as its build target
+(discarding the staged slot and invalidating the live dm-verity tree). Reboot
+between updates. Design for the fix: `docs/IMMUTABLE_SET_COMPOSITION.md`.
 
 ## Reference Materials
 

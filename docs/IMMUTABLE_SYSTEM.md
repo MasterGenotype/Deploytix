@@ -296,6 +296,13 @@ bypasses it.
   deletes a partially built set on any failure.
 - **Recovery.** A bad activated set is always escapable: pick an older entry from
   the grub-btrfs menu, or boot any set and run `deploytix rollback`.
+- **Two updates in one session do not compose (known bug).** Each `deploytix
+  update` snapshots the set named by `rootflags=subvol=` on the kernel cmdline —
+  the set the initramfs *booted*. A second update before rebooting therefore
+  branches from the booted set again, not from the set the first update staged,
+  and activating it discards the first update's changes. Updates stack only
+  across reboots. Reboot between updates until this is fixed; see
+  `docs/IMMUTABLE_SET_COMPOSITION.md`.
 
 ---
 

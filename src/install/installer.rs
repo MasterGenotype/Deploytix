@@ -322,9 +322,17 @@ impl Installer {
             self.generate_fstab_multi_volume()?;
         } else {
             self.generate_fstab()?;
-            if self.config.disk.swap_type == SwapType::FileZram {
-                append_swap_file_entry(&self.config, INSTALL_ROOT)?;
-            }
+        }
+
+        // The swap file is created for every layout that asks for one (phase
+        // 3.7 runs `configure_swap` on any non-partition swap type), so its
+        // fstab entry belongs to every layout too. It used to be appended only
+        // in the plain branch above, which meant an encrypted, LVM-thin or
+        // immutable A/B install built and `mkswap`ed a multi-gigabyte file that
+        // nothing ever swapped on -- and, with hibernation enabled, wrote a
+        // `resume=`/`resume_offset=` pointing into it.
+        if self.config.disk.swap_type == SwapType::FileZram {
+            append_swap_file_entry(&self.config, INSTALL_ROOT)?;
         }
 
         // Phase 3.6: Crypttab and keyfiles (for encrypted systems)

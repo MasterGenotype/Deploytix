@@ -367,13 +367,13 @@ pub fn create_swap_file(
     // Create swap directory
     fs::create_dir_all(&swap_dir)?;
 
-    // Check if btrfs
-    let is_btrfs = check_is_btrfs(&swap_dir);
+    // Allocation strategy is per-filesystem: see `create_regular_swap_file`.
+    let fs_type = fs_type_of(&swap_dir);
 
-    if is_btrfs {
+    if fs_type == "btrfs" {
         create_btrfs_swap_file(cmd, &swap_file, size_mib)?;
     } else {
-        create_regular_swap_file(cmd, &swap_file, size_mib)?;
+        create_regular_swap_file(cmd, &swap_file, size_mib, &fs_type)?;
     }
 
     // Set permissions
@@ -392,19 +392,34 @@ pub fn create_swap_file(
     Ok(())
 }
 
-/// Check if a path is on a btrfs filesystem
-fn check_is_btrfs(path: &str) -> bool {
+/// The filesystem type holding `path`, as `stat -f` names it.
+///
+/// Note the names are `stat`'s, not mkfs's: every ext filesystem — ext4
+/// included — reports as `ext2/ext3`. Returns an empty string when `stat`
+/// cannot be run, which callers treat as "unknown" and handle conservatively.
+fn fs_type_of(path: &str) -> String {
     use std::process::Command;
 
-    let output = Command::new("stat").args(["-f", "-c", "%T", path]).output();
+    Command::new("stat")
+        .args(["-f", "-c", "%T", path])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
 
-    match output {
-        Ok(out) => {
-            let fs_type = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            fs_type == "btrfs"
-        }
-        Err(_) => false,
-    }
+/// Whether `fs_type` is one where `fallocate` produces a swappable file.
+///
+/// `swapon` refuses a file that contains holes or unwritten extents, and it
+/// resolves blocks with `bmap` rather than going through the filesystem. On the
+/// ext family a fallocated file is fully mapped and works. On XFS `fallocate`
+/// leaves *unwritten* extents, so `swapon` fails with "skipping - it appears to
+/// have holes" — XFS swap files have to be written out, which is why the
+/// upstream advice for XFS is `dd`, not `fallocate`. F2FS is stricter still
+/// (a swap file must be contiguous and pinned), so it takes the same path.
+/// An unknown type is treated as not-fallocatable: writing the file out is
+/// slower but always correct.
+fn fallocate_is_swappable(fs_type: &str) -> bool {
+    matches!(fs_type, "ext2/ext3" | "ext4")
 }
 
 /// Create swap file on btrfs
@@ -453,15 +468,51 @@ fn create_btrfs_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Res
     Ok(())
 }
 
-/// Create regular swap file (ext4, xfs, etc.)
-fn create_regular_swap_file(cmd: &CommandRunner, path: &str, size_mib: u64) -> Result<()> {
-    info!("Creating regular swap file at {}", path);
+/// Create a swap file on a non-btrfs filesystem.
+///
+/// `fallocate` on the ext family, `dd` everywhere else — see
+/// [`fallocate_is_swappable`] for why a fallocated file is not swappable on XFS
+/// or F2FS. `dd` is slower (it writes the whole file) but produces real,
+/// written-out extents on every filesystem.
+fn create_regular_swap_file(
+    cmd: &CommandRunner,
+    path: &str,
+    size_mib: u64,
+    fs_type: &str,
+) -> Result<()> {
+    if fallocate_is_swappable(fs_type) {
+        info!("Creating swap file at {} via fallocate ({})", path, fs_type);
+        cmd.run("fallocate", &["-l", &format!("{}M", size_mib), path])
+            .map_err(|e| DeploytixError::CommandFailed {
+                command: "fallocate".to_string(),
+                stderr: e.to_string(),
+            })?;
+        return Ok(());
+    }
 
-    cmd.run("fallocate", &["-l", &format!("{}M", size_mib), path])
-        .map_err(|e| DeploytixError::CommandFailed {
-            command: "fallocate".to_string(),
-            stderr: e.to_string(),
-        })?;
+    info!(
+        "Creating swap file at {} via dd ({} needs written-out extents; \
+         a fallocated file is not swappable there)",
+        path,
+        if fs_type.is_empty() {
+            "unknown filesystem"
+        } else {
+            fs_type
+        }
+    );
+    cmd.run(
+        "dd",
+        &[
+            "if=/dev/zero",
+            &format!("of={}", path),
+            "bs=1M",
+            &format!("count={}", size_mib),
+        ],
+    )
+    .map_err(|e| DeploytixError::CommandFailed {
+        command: "dd".to_string(),
+        stderr: e.to_string(),
+    })?;
 
     Ok(())
 }
@@ -709,6 +760,31 @@ mod tests {
     }
 
     // ── swap_file_fstab_entry ────────────────────────────────────────────────
+
+    // ── swap file allocation strategy ────────────────────────────────────────
+
+    /// `swapon` rejects a file with unwritten extents. fallocate produces those
+    /// on XFS (and F2FS wants a pinned, contiguous file), so only the ext family
+    /// may take the fast path; everything else, unknown included, must be
+    /// written out with dd.
+    #[test]
+    fn only_ext_filesystems_may_use_fallocate_for_swap() {
+        assert!(fallocate_is_swappable("ext2/ext3"));
+        assert!(fallocate_is_swappable("ext4"));
+
+        assert!(!fallocate_is_swappable("xfs"));
+        assert!(!fallocate_is_swappable("f2fs"));
+        assert!(!fallocate_is_swappable("zfs"));
+        // stat could not be run; writing the file out is always correct.
+        assert!(!fallocate_is_swappable(""));
+    }
+
+    /// btrfs never reaches `create_regular_swap_file` at all -- it has its own
+    /// path, because a swap file there additionally needs COW off.
+    #[test]
+    fn btrfs_is_not_handled_by_the_regular_allocator() {
+        assert!(!fallocate_is_swappable("btrfs"));
+    }
 
     #[test]
     fn swap_file_fstab_entry_uses_correct_swap_file_path() {

@@ -148,6 +148,14 @@ intercepts *interactive* `pacman` upgrade/install/remove and points you at
   slot and run `deploytix rollback`.
 - **Storage.** Two full root images (thin-provisioned, so physical use tracks
   actual data).
+- **Do not run two updates in one session (known bug).** `run_update` picks its
+  target as `other_slot(state.active)`, but `active` means "boots next", not
+  "running now" — nothing here reads `deploytix.slot=` from the cmdline. After
+  one update stages the other slot, a second update before rebooting selects the
+  **running** slot, mounts its root LV read-write and rsyncs over it. That
+  discards the first update *and* invalidates the running system's dm-verity
+  tree. Reboot between updates until this is fixed; see
+  `docs/IMMUTABLE_SET_COMPOSITION.md`.
 
 ---
 
