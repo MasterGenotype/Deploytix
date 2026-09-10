@@ -133,9 +133,14 @@ intercepts *interactive* `pacman` upgrade/install/remove and points you at
   partition, so a rollback restores userspace but boots the most recently
   installed kernel. The `verity-ab` hook is version-independent, so this is safe;
   only kernel *contents* are not per-slot.
-- **Shared package DB.** `/var/lib/pacman` is on the shared `/var`, so a rollback
-  restores the slot's `/usr` files but not the package database — the DB reflects
-  the newest update. (Same trade-off as the btrfs backend.)
+- **Per-slot package DB.** The pacman database is deliberately *not* shared: it
+  lives at `/usr/lib/sysimage/pacman` inside each slot's sealed root and is
+  bind-mounted back onto `/var/lib/pacman`, so a slot flip restores the database
+  along with the files it describes. `DBPath` stays at its default; the bind is
+  the whole mechanism. Existing installs are migrated by the next
+  `deploytix update`, which seeds the target slot's copy from the shared one
+  without touching the running slot's. (Same design as the btrfs backend — see
+  `src/immutable/pacman_db.rs`.)
 - **`/etc` overlay is shared, not per-slot.** Runtime `/etc` edits live in the
   persistent `etc_overlay` upper and apply to whichever slot is active; they are
   not versioned with a slot.

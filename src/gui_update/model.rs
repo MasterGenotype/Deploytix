@@ -227,6 +227,7 @@ mod tests {
             duration_secs: 5,
             backend: HBackend::Btrfs,
             target: target.to_string(),
+            composed_from: None,
             request: Request::Packages(vec!["vim".into()]),
             outcome: Outcome::Succeeded,
             changes: PackageChanges::default(),

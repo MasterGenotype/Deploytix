@@ -238,6 +238,9 @@ fn immutable_writable_paths(root_fs_uuid: &str) -> String {
     for (source, target) in crate::immutable::WRITABLE_BIND_PATHS {
         s.push_str(&format!("{source}  {target}  none  bind  0  0\n"));
     }
+    // The pacman database goes the other way: out of the shared /var and into
+    // the snapshotted /usr, so that it rolls back with the files it describes.
+    s.push_str(&crate::immutable::pacman_db::fstab_entry());
     s.push('\n');
     s
 }
@@ -636,6 +639,11 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
                 vg_name, vol.name, vol.mount_point, fstype, fsopts, pass
             );
         }
+        println!(
+            "    {}  {}  none  bind,nofail  0  0",
+            crate::immutable::pacman_db::DB_DIR,
+            crate::immutable::pacman_db::DB_MOUNT
+        );
         return Ok(());
     }
 
@@ -822,6 +830,13 @@ pub fn generate_fstab_lvm_ab(params: &LvmAbFstabParams) -> Result<()> {
         ));
     }
 
+    // The pacman database is the exception to that sharing: it lives inside the
+    // slot's verity-sealed root and is bound back onto /var/lib/pacman, so a
+    // slot flip takes the database with it. Written after the /var entry above,
+    // which has to be mounted first for the bind target to exist.
+    content.push_str(&crate::immutable::pacman_db::fstab_entry());
+    content.push('\n');
+
     // Swap (mirrors the LVM thin path).
     match params.swap_type {
         SwapType::Partition => {
@@ -965,6 +980,26 @@ mod tests {
                 "missing bind {source} -> {target}"
             );
         }
+    }
+
+    /// The pacman database goes the other way from the writable binds: out of
+    /// the shared `/var` and into the snapshotted `/usr`. Without this entry a
+    /// rollback restores the files and leaves the database describing the set
+    /// that was rolled away from.
+    #[test]
+    fn the_pacman_database_is_bound_out_of_the_image_on_both_backends() {
+        use crate::immutable::pacman_db::{DB_DIR, DB_MOUNT};
+
+        let btrfs = immutable_writable_paths("9f72ea22-39ab-4a60-8ce0-38a8219c376a");
+        assert!(
+            btrfs.contains(&format!("{DB_DIR}  {DB_MOUNT}  none  bind,nofail")),
+            "btrfs fstab is missing the pacman-db bind:\n{btrfs}"
+        );
+
+        // The A/B generator needs real block devices, so assert on the shared
+        // entry it splices in rather than running it.
+        let entry = crate::immutable::pacman_db::fstab_entry();
+        assert!(entry.contains(&format!("{DB_DIR}  {DB_MOUNT}")));
     }
 
     // ── fsck_pass ────────────────────────────────────────────────────────────

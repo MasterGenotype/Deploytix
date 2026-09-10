@@ -37,19 +37,20 @@
 //! same way mkinitcpio does. A list of names would miss `linux-zen`, an `-lts`
 //! kernel, or anything built locally.
 //!
-//! # Known limitation: the pacman database
+//! # The pacman database
 //!
-//! The pacman database is on the shared `/var`. A removal updates it for every
-//! set at once, while deleting files from the new set only. Roll a removal back
-//! and the files come back while the database still says the package is gone.
+//! The database used to be on the shared `/var`, so a removal updated it for
+//! every set at once while deleting files from the new set only: roll the
+//! removal back and the files came back while the database still said the
+//! package was gone. It now lives inside the set's `/usr` and is bind-mounted
+//! onto `/var/lib/pacman` (see [`crate::immutable::pacman_db`]), so it rolls
+//! back with the files, and a failed removal is unwound by discarding the set.
 //!
-//! Updates already have the same problem in the other direction: roll one back
-//! and the database reports versions the files no longer match. It comes from
-//! `/var` being shared, not from this command, and is described in
-//! `docs/IMMUTABLE_SYSTEM.md`.
-//!
-//! What this module does guarantee is that a removal which fails partway leaves
-//! the database as it found it. See [`db_backup_cmd`].
+//! [`db_backup_cmd`] and its companions remain for the one case that is still
+//! possible: a set whose migration could not be completed, where pacman writes
+//! the shared database directly. There the copy is what keeps a removal that
+//! fails partway from leaving the running system disagreeing with its own
+//! package manager.
 
 use crate::immutable::history;
 use crate::immutable::update::{ensure_immutable, run_in_new_set, UpdateOptions};
@@ -456,9 +457,20 @@ pub fn run_remove(cmd: &CommandRunner, packages: &[String], opts: &RemoveOptions
                 }
             }
 
-            // The pacman DB is on the shared /var, so a failure after this point
-            // would otherwise leave it disagreeing with the running system.
-            cmd.run("sh", &["-c", &db_backup_cmd(set_id)])?;
+            // A set with its own database (the normal case since
+            // `pacman_db`) needs no unwinding: the database lives inside the
+            // set, so discarding the set discards it too, and the shared
+            // /var/lib/pacman the running system uses is never written.
+            //
+            // The copy below is for the other case — a set that could not be
+            // migrated, whose pacman writes straight into the shared /var. A
+            // failure after this point would otherwise leave that database
+            // saying the package is gone while the running system still has
+            // every file of it.
+            let own_db = crate::immutable::pacman_db::is_migrated(target);
+            if !own_db {
+                cmd.run("sh", &["-c", &db_backup_cmd(set_id)])?;
+            }
 
             let before = history::query_packages(cmd, target);
             let outcome = (|| -> Result<()> {
@@ -471,14 +483,16 @@ pub fn run_remove(cmd: &CommandRunner, packages: &[String], opts: &RemoveOptions
             })();
 
             if let Err(e) = outcome {
-                warn!("[immutable] Removal failed; restoring the pacman database");
-                if let Err(re) = cmd.run("sh", &["-c", &db_restore_cmd(set_id)]) {
-                    warn!(
-                        "[immutable] Could not restore the pacman database: {}. \
+                if !own_db {
+                    warn!("[immutable] Removal failed; restoring the pacman database");
+                    if let Err(re) = cmd.run("sh", &["-c", &db_restore_cmd(set_id)]) {
+                        warn!(
+                            "[immutable] Could not restore the pacman database: {}. \
                      A copy is at {}",
-                        re,
-                        db_backup_path(set_id)
-                    );
+                            re,
+                            db_backup_path(set_id)
+                        );
+                    }
                 }
                 return Err(e);
             }
@@ -490,14 +504,18 @@ pub fn run_remove(cmd: &CommandRunner, packages: &[String], opts: &RemoveOptions
             // that quietly did nothing would look identical to a successful one
             // right up until the reboot.
             if !cmd.is_dry_run() && changes.removed.is_empty() {
-                let _ = cmd.run("sh", &["-c", &db_restore_cmd(set_id)]);
+                if !own_db {
+                    let _ = cmd.run("sh", &["-c", &db_restore_cmd(set_id)]);
+                }
                 return Err(DeploytixError::ConfigError(format!(
                     "pacman reported success but removed nothing; requested: {}",
                     names.join(" ")
                 )));
             }
 
-            let _ = cmd.run("sh", &["-c", &db_discard_cmd(set_id)]);
+            if !own_db {
+                let _ = cmd.run("sh", &["-c", &db_discard_cmd(set_id)]);
+            }
             info!("[immutable] Removed with `pacman {}`", flags);
             Ok(changes)
         },

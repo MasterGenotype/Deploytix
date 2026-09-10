@@ -37,9 +37,14 @@
 //! but boots with the most recently installed kernel. The `mountcrypt` hook is
 //! version-independent, so this is safe; only kernel *contents* are not rolled
 //! back. This is documented in `docs/IMMUTABLE_SYSTEM.md`.
+//!
+//! The pacman database used to be shared the same way, with worse consequences
+//! — a rollback restored files the database no longer described. It now lives
+//! inside `@usr` and is bound back onto `/var/lib/pacman`; see
+//! [`crate::immutable::pacman_db`].
 
 use crate::immutable::snapshot::{self, ImmutableDevices};
-use crate::immutable::{boot, detect_devices, etc, history};
+use crate::immutable::{boot, detect_devices, etc, history, pacman_db};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
 use tracing::{info, warn};
@@ -389,6 +394,11 @@ where
         // Belt and braces: a set staged before the live repair (or one whose
         // repair failed) must not be activated with a shadowing fstab.
         etc::repair_fstab(cmd, &target);
+        // Give the set its own pacman database (migrating an older install on
+        // the way), so what this transaction records rolls back with what it
+        // installs. Must run after the /var rbind above, which is what the
+        // bind covers, and before pacman writes a single entry.
+        pacman_db::ensure_in_target(cmd, &target);
         body(cmd, &target, &id)
     })();
 
@@ -464,9 +474,9 @@ pub fn run_update(
         // Local .pkg.tar.zst files are copied into the shared /var so the
         // chroot can reach them by absolute path and install with `pacman -U`.
         let staged = stage_local_pkgs(cmd, &local_files)?;
-        // Bracket the transaction with two `pacman -Q` reads. The pacman DB is
-        // on the shared /var (rbound into the chroot), so it is not snapshotted
-        // and these two reads are the only way to know what this set changed.
+        // Bracket the transaction with two `pacman -Q` reads against the set's
+        // own database (see `pacman_db`), which is what makes the diff describe
+        // this set rather than whatever the shared /var last recorded.
         let before = history::query_packages(cmd, target);
         info!("[immutable] Running pacman in {}", target);
         for pac in pacman_cmds(&staged, &repo_names) {

@@ -23,12 +23,18 @@
 //!
 //! `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so a read-only
 //! `@usr` covers them for free.
+//!
+//! The pacman database is the one piece of `/var` that must *not* be shared:
+//! a set whose files roll back while its package database does not describes a
+//! system that no longer exists. It therefore lives inside `@usr` and is
+//! bind-mounted back onto `/var/lib/pacman` — see [`pacman_db`].
 
 pub mod boot;
 pub mod etc;
 pub mod history;
 pub mod lockdown;
 pub mod lvm_ab;
+pub mod pacman_db;
 pub mod remove;
 pub mod rollback;
 pub mod snapshot;

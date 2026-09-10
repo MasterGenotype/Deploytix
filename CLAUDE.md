@@ -152,6 +152,16 @@ Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
 interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`
 image builds and deploys).
 
+**Per-image pacman database.** `/var` is shared across every set/slot, so a
+database living at `/var/lib/pacman` described the newest state while the files
+rolled back — `pacman -Qkk` then reported missing files for packages it claimed
+were installed. The database is therefore stored at `/usr/lib/sysimage/pacman`
+(inside `@usr` on btrfs, inside the root LV on LVM A/B) and bind-mounted back
+onto `/var/lib/pacman` via an fstab `bind,nofail` entry, so it rolls back with
+the system. `DBPath` stays at its default — the bind is the whole mechanism.
+Older installs are migrated inside the next transaction without touching the
+running system's copy. `src/immutable/pacman_db.rs`.
+
 **Composing updates within a session.** Both backends distinguish what is
 *running* (from `/proc/cmdline`: `rootflags=subvol=` or `deploytix.slot=`) from
 what is *staged* for the next boot (the boot pointer), via
