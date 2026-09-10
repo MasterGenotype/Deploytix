@@ -2,8 +2,8 @@
 //!
 //! A portable CLI tool for deploying Artix Linux to removable media and disks.
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
+use deploytix::utils::error::Result;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -14,9 +14,9 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 // genuinely used, instead of being flagged as dead code in the binary's
 // private copy of the module tree.
 use deploytix::config::DeploymentConfig;
-use deploytix::pkgdeps::cli as deps_cli;
 use deploytix::utils::error::DeploytixError;
 use deploytix::{cleanup, config, desktop, disk, install, resources};
+use pkgdeps::cli as deps_cli;
 
 #[derive(clap::Args, Debug, Clone, Default)]
 struct DepsCommonArgs {
@@ -67,6 +67,22 @@ impl DepsCommonArgs {
             aur: self.aur,
         }
     }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum RehearseCommand {
+    /// Rehearse a transactional update, then discard what it staged
+    Update {
+        /// Extra packages to install on top of a full sync/upgrade
+        #[arg(trailing_var_arg = true)]
+        packages: Vec<String>,
+    },
+    /// Rehearse a transactional removal, then discard what it staged
+    Remove {
+        /// Packages to remove
+        #[arg(required = true, trailing_var_arg = true)]
+        packages: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -219,10 +235,15 @@ enum Commands {
         wipe: bool,
     },
 
-    /// Run a rehearsal installation: execute the full install on disk,
-    /// record every command, then wipe the disk to restore pristine state
+    /// Rehearse an operation for real, recording every command, then undo it:
+    /// an install is wiped from the disk, an update or removal is staged and
+    /// then discarded
     Rehearse {
-        /// Path to configuration file
+        /// What to rehearse (default: install)
+        #[command(subcommand)]
+        operation: Option<RehearseCommand>,
+
+        /// Path to configuration file (install only)
         #[arg(short, long, default_value = "deploytix.toml")]
         config: String,
 
@@ -396,8 +417,12 @@ fn main() -> Result<()> {
         Some(Commands::Cleanup { device, wipe }) => {
             cmd_cleanup(device, wipe)?;
         }
-        Some(Commands::Rehearse { config, log_file }) => {
-            cmd_rehearse(&config, &log_file)?;
+        Some(Commands::Rehearse {
+            operation,
+            config,
+            log_file,
+        }) => {
+            cmd_rehearse(operation, &config, &log_file)?;
         }
         Some(Commands::Deps { action }) => {
             cmd_deps(action)?;
@@ -490,7 +515,7 @@ fn cmd_install(
 
     // Check for root privileges
     if !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
 
     // Load or create configuration
@@ -524,38 +549,25 @@ fn cmd_install(
 
 /// `deploytix update` — transactional system update.
 fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> Result<()> {
-    use deploytix::immutable::update::{run_update, UpdateOptions};
-    use deploytix::immutable::{lvm_ab, lvm_ab::detect as is_lvm_ab};
+    use deploytix::immutable::backend;
+    use deploytix::immutable::update::UpdateOptions;
     use deploytix::utils::command::CommandRunner;
 
     if !dry_run && !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
     let cmd = CommandRunner::new(dry_run);
     // An update is a full `pacman` transaction in a chroot — as long and as
     // input-free as an install, so it gets the same idle inhibitors.
     let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Updating Artix Linux"));
-    // Backend dispatch: LVM A/B systems carry the slot-state file on /boot; the
-    // btrfs backend is signalled by the `.deploytix-pair` marker at `/`.
-    if is_lvm_ab() {
-        lvm_ab::run_update(
-            &cmd,
-            &packages,
-            &UpdateOptions {
-                keep_sets: keep,
-                reboot,
-            },
-        )?;
-    } else {
-        run_update(
-            &cmd,
-            &packages,
-            &UpdateOptions {
-                keep_sets: keep,
-                reboot,
-            },
-        )?;
-    }
+    backend::active().update(
+        &cmd,
+        &packages,
+        &UpdateOptions {
+            keep_sets: keep,
+            reboot,
+        },
+    )?;
     Ok(())
 }
 
@@ -599,11 +611,9 @@ fn cmd_aur(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> R
 
 /// `deploytix remove` — transactional package removal.
 ///
-/// btrfs-backend only. The LVM A/B backend can express the same operation
-/// (rsync the active root into the inactive slot, `pacman -R` in a chroot,
-/// `veritysetup format` a fresh hash, repoint), but it is not implemented, and
-/// silently running the btrfs path on an A/B system would edit a root that is
-/// not the one that boots. Refuse instead.
+/// Whether the live backend can do this at all is the backend's own answer
+/// (`remove_refusal`), not something this layer knows: today the A/B backend
+/// turns it down.
 fn cmd_remove(
     packages: Vec<String>,
     cascade: bool,
@@ -613,28 +623,23 @@ fn cmd_remove(
     reboot: bool,
     dry_run: bool,
 ) -> Result<()> {
-    use deploytix::immutable::lvm_ab::detect as is_lvm_ab;
-    use deploytix::immutable::remove::{run_remove, RemoveOptions};
+    use deploytix::immutable::backend;
+    use deploytix::immutable::remove::RemoveOptions;
     use deploytix::utils::command::CommandRunner;
 
     if !dry_run && !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
-    if is_lvm_ab() {
-        return Err(DeploytixError::ConfigError(
-            "`deploytix remove` is not implemented for the LVM A/B backend. \
-             Remove packages by staging a full `deploytix update` into the inactive \
-             slot instead."
-                .to_string(),
-        )
-        .into());
+    let backend = backend::active();
+    if let Some(reason) = backend.remove_refusal() {
+        return Err(DeploytixError::ConfigError(reason.to_string()));
     }
 
     let cmd = CommandRunner::new(dry_run);
     // A removal is a pacman transaction in a chroot plus an initramfs
     // regeneration — the same shape as an update, so the same idle inhibitors.
     let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Removing packages"));
-    run_remove(
+    backend.remove(
         &cmd,
         &packages,
         &RemoveOptions {
@@ -651,35 +656,23 @@ fn cmd_remove(
 /// `deploytix rollback` — return to a previous snapshot set (btrfs) or the other
 /// slot (LVM A/B).
 fn cmd_rollback(target: Option<String>, list: bool, reboot: bool, dry_run: bool) -> Result<()> {
-    use deploytix::immutable::rollback::{print_targets, run_rollback};
-    use deploytix::immutable::{lvm_ab, lvm_ab::detect as is_lvm_ab};
+    use deploytix::immutable::backend;
     use deploytix::utils::command::CommandRunner;
 
     let cmd = CommandRunner::new(dry_run);
-    // Acquired after the `--list` early-outs below would have fired, so a
-    // read-only listing never touches the host's power management.
-    let mut _awake = None;
-    if is_lvm_ab() {
-        if list {
-            lvm_ab::print_slots(&cmd)?;
-            return Ok(());
-        }
-        if !dry_run && !nix::unistd::geteuid().is_root() {
-            return Err(DeploytixError::NotRoot.into());
-        }
-        _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
-        lvm_ab::run_rollback(&cmd, target.as_deref(), reboot)?;
-        return Ok(());
-    }
+    let backend = backend::active();
+
+    // Listing is read-only: it returns before the root check and before any
+    // idle inhibitor touches the host's power management.
     if list {
-        print_targets(&cmd)?;
+        backend.print_rollback_targets(&cmd)?;
         return Ok(());
     }
     if !dry_run && !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
-    _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
-    run_rollback(&cmd, target.as_deref(), reboot)?;
+    let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Rolling back Artix Linux"));
+    backend.rollback(&cmd, target.as_deref(), reboot)?;
     Ok(())
 }
 
@@ -813,7 +806,7 @@ fn cmd_inspect(device: &str, home_keyfile: Option<&str>) -> Result<()> {
             Ok(()) => println!("✓ {} unlocks {}", credential.describe(), part.node),
             Err(e) => {
                 eprintln!("✗ {} does not unlock {}", credential.describe(), part.node);
-                return Err(e.into());
+                return Err(e);
             }
         }
     }
@@ -848,24 +841,48 @@ fn cmd_generate_config(output: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_rehearse(config_path: &str, log_file: &str) -> Result<()> {
-    use deploytix::rehearsal::run_rehearsal;
+fn cmd_rehearse(
+    operation: Option<RehearseCommand>,
+    config_path: &str,
+    log_file: &str,
+) -> Result<()> {
+    use deploytix::rehearsal::{run_rehearsal, RehearsalOp};
 
-    // Rehearsal writes to real disk — must be root
+    // Rehearsal acts on the real system — must be root
     if !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
 
-    let config = DeploymentConfig::from_file(config_path)?;
-    config.validate()?;
+    let op = match operation {
+        None => {
+            let config = DeploymentConfig::from_file(config_path)?;
+            config.validate()?;
+            eprintln!(
+                "⚠  REHEARSAL MODE: this will write to {} for real, then WIPE the disk.",
+                config.disk.device
+            );
+            eprintln!("   All data on the target device will be destroyed.\n");
+            RehearsalOp::Install(Box::new(config))
+        }
+        Some(RehearseCommand::Update { packages }) => {
+            eprintln!(
+                "⚠  REHEARSAL MODE: this stages a real update against this system, \
+                 then discards it."
+            );
+            eprintln!("   Nothing is activated, but the transaction runs for real.\n");
+            RehearsalOp::Update(packages)
+        }
+        Some(RehearseCommand::Remove { packages }) => {
+            eprintln!(
+                "⚠  REHEARSAL MODE: this stages a real removal against this system, \
+                 then discards it."
+            );
+            eprintln!("   Nothing is activated, but the transaction runs for real.\n");
+            RehearsalOp::Remove(packages)
+        }
+    };
 
-    eprintln!(
-        "⚠  REHEARSAL MODE: this will write to {} for real, then WIPE the disk.",
-        config.disk.device
-    );
-    eprintln!("   All data on the target device will be destroyed.\n");
-
-    let report = run_rehearsal(&config);
+    let report = run_rehearsal(op);
     report.print_table();
 
     // Write detailed log
@@ -885,7 +902,7 @@ fn cmd_cleanup(device: Option<String>, wipe: bool) -> Result<()> {
     use cleanup::Cleaner;
 
     if !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
 
     let cleaner = Cleaner::new(false);
@@ -910,10 +927,10 @@ fn cmd_generate_desktop_file(
             "xfce" => DesktopEnvironment::Xfce,
             "none" => DesktopEnvironment::None,
             _ => {
-                return Err(anyhow::anyhow!(
+                return Err(DeploytixError::ConfigError(format!(
                     "Unknown desktop environment: {}. Valid options: kde, gnome, xfce, none",
                     de_str
-                ))
+                )))
             }
         }
     } else {
@@ -940,21 +957,41 @@ fn cmd_generate_desktop_file(
     Ok(())
 }
 
+/// The metadata source for a `deploytix deps` invocation.
+///
+/// `pkgdeps` builds the local source (pacman, or an offline fixture); stacking
+/// the AUR on top happens here, because knowing that the AUR exists is this
+/// layer's business, not the dependency resolver's.
+fn deps_source(args: &deps_cli::DepsArgs) -> Result<Box<dyn pkgdeps::source::MetadataSource>> {
+    use deploytix::aur::rpc::CurlGet;
+    use deploytix::aur::source::{AurSource, CompositeSource};
+
+    let local = deps_cli::build_source(args)?;
+    if deps_cli::wants_aur(args) {
+        Ok(Box::new(CompositeSource::new(
+            local,
+            AurSource::new(CurlGet),
+        )))
+    } else {
+        Ok(local)
+    }
+}
+
 fn cmd_deps(action: DepsCommand) -> Result<()> {
     match action {
         DepsCommand::Resolve { package, common } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_resolve(source.as_ref(), &package, &args)?;
         }
         DepsCommand::Tree { package, common } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_tree(source.as_ref(), &package, &args)?;
         }
         DepsCommand::Reverse { package, common } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_reverse(source.as_ref(), &package, &args)?;
         }
         DepsCommand::Graph {
@@ -963,7 +1000,7 @@ fn cmd_deps(action: DepsCommand) -> Result<()> {
             common,
         } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_graph(source.as_ref(), &package, output.as_deref(), &args)?;
         }
         DepsCommand::PlanInstall {
@@ -972,17 +1009,17 @@ fn cmd_deps(action: DepsCommand) -> Result<()> {
             common,
         } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_plan_install(source.as_ref(), &package, clean_root, &args)?;
         }
         DepsCommand::Metadata { package, common } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_metadata(source.as_ref(), &package, &args)?;
         }
         DepsCommand::Compare { a, b, common } => {
             let args = common.into_args();
-            let source = deps_cli::build_source(&args)?;
+            let source = deps_source(&args)?;
             deps_cli::cmd_compare(source.as_ref(), &a, &b, &args)?;
         }
     }

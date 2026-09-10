@@ -1,5 +1,7 @@
 //! Cleanup and uninstall functionality (Undeploytix)
 
+pub mod guards;
+
 use crate::disk::detection::list_block_devices;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};

@@ -112,8 +112,8 @@ jobs:
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libgl-dev
       - run: cargo fmt -- --check
-      - run: cargo clippy --all-features -- -D warnings
-      - run: cargo test --all-features
+      - run: cargo clippy --workspace --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
 
   build-cli:
     name: Build CLI binary

@@ -10,7 +10,7 @@
 //!
 //! # Two questions, two sources
 //!
-//! [`crate::pkgdeps::source::MetadataSource::install_plan`] answers "what would
+//! [`pkgdeps::source::MetadataSource::install_plan`] answers "what would
 //! this transaction actually do", via `pacman -S --print`: already-installed
 //! packages are omitted, conflicts appear as removals, and sizes come from
 //! pacman rather than being summed by hand.
@@ -26,10 +26,10 @@
 //! Everything here is read-only. No transaction, no root, nothing to undo.
 
 use crate::aur::rpc::AUR_REPO;
-use crate::pkgdeps::model::InstallPlan;
-use crate::pkgdeps::resolver::{resolve_closure, ResolveOpts};
-use crate::pkgdeps::source::MetadataSource;
 use crate::utils::error::Result;
+use pkgdeps::model::InstallPlan;
+use pkgdeps::resolver::{resolve_closure, ResolveOpts};
+use pkgdeps::source::MetadataSource;
 
 /// What resolving a set of package names turned up.
 #[derive(Debug, Clone, Default)]
@@ -130,7 +130,7 @@ pub fn human_size(bytes: u64) -> String {
 /// Resolve `targets` against `source`.
 ///
 /// Split from [`resolve`] so the whole thing is testable against
-/// [`crate::pkgdeps::source::MockSource`] with no pacman on the machine.
+/// [`pkgdeps::source::MockSource`] with no pacman on the machine.
 pub fn resolve_with<S: MetadataSource + ?Sized>(source: &S, targets: &[String]) -> Preview {
     let mut preview = Preview {
         targets: targets.to_vec(),
@@ -233,8 +233,8 @@ pub fn resolve(targets: &[String]) -> Result<Preview> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkgdeps::model::{Dep, Package, PlannedPackage};
-    use crate::pkgdeps::source::MockSource;
+    use pkgdeps::model::{Dep, Package, PlannedPackage};
+    use pkgdeps::source::MockSource;
 
     fn pkg(name: &str, deps: &[&str]) -> Package {
         let mut p = Package::new(name, "1.0", "extra");

@@ -148,7 +148,7 @@ Five structural mismatches, each of which drives a section of the design.
 | # | Wiki assumption | Deploytix reality |
 |---|-----------------|-------------------|
 | 1 | systemd units ship with the package and are enabled with `systemctl` | Four init systems, none of them systemd. The AUR package's units are dead weight; Deploytix must author service definitions for runit, OpenRC, s6 and dinit, as it already does for HHD, Decky and evdevhook2 |
-| 2 | `/etc/default/grub` and `/etc/xen/grub.conf` are edited by hand, then `grub-mkconfig` is re-run whenever you like | `/etc/default/grub` is **generated wholesale** by `configure_grub_defaults*()` (`src/configure/bootloader.rs`), and on SecureBoot+encryption the config that actually boots is embedded in a signed EFI binary — a bare `grub-mkconfig` writes a file nothing reads |
+| 2 | `/etc/default/grub` and `/etc/xen/grub.conf` are edited by hand, then `grub-mkconfig` is re-run whenever you like | `/etc/default/grub` is **generated wholesale** by `configure_grub_defaults*()` (`src/configure/boot/bootloader.rs`), and on SecureBoot+encryption the config that actually boots is embedded in a signed EFI binary — a bare `grub-mkconfig` writes a file nothing reads |
 | 3 | The system is mutable; you install Xen whenever | `/` and `/usr` are read-only. `pacman -Syu` physically cannot run. Xen must be installed *during* the deploy, or transactionally through `deploytix update` |
 | 4 | grub.cfg is regenerated freely | The LVM A/B backend **never** runs `grub-mkconfig` after install — `grub-probe` cannot canonicalize a dm-verity root. Boot changes are `sed` rewrites of two tokens (`src/immutable/lvm_ab.rs:activate_slot`) |
 | 5 | Boot chain has one link (GRUB → Linux) | Boot chain gains a link (GRUB → Xen → dom0 Linux), and that new link sits *outside* whatever SecureBoot verification the existing chain has |
@@ -240,7 +240,7 @@ wiki cites.
 
 ### III.3 GRUB module set — a concrete, verified gap
 
-`GRUB_STANDALONE_MODULES` in `src/configure/bootloader.rs:17` lists 60-odd
+`GRUB_STANDALONE_MODULES` in `src/configure/boot/bootloader.rs:17` lists 60-odd
 modules. It contains `linux`, `chain`, `cryptodisk`, `luks2`, the gcry ciphers —
 and **no `multiboot2`**. On a SecureBoot + encryption install, `grub-mkstandalone`
 builds `BOOTX64.EFI` from exactly that list, so a Xen menu entry in the embedded
@@ -514,7 +514,7 @@ ships SysV-style `xencommons`, `xendomains` and `xen-watchdog` scripts in
 
 Follow the established pattern exactly — `write_hhd_service()` /
 `write_decky_service()` / `write_evdevhook2_service()` in
-`src/configure/packages.rs` — one `match config.system.init` with four arms.
+`src/install/packages.rs` — one `match config.system.init` with four arms.
 
 ### V.1 Service graph
 
@@ -821,7 +821,7 @@ Ordered so each work package is independently reviewable and testable.
   unit tests for each rule.
 
 ### WP2 — GRUB module set and cmdline *(smallest change, largest failure mode)*
-- `src/configure/bootloader.rs`: add `multiboot2` to `GRUB_STANDALONE_MODULES`.
+- `src/configure/boot/bootloader.rs`: add `multiboot2` to `GRUB_STANDALONE_MODULES`.
 - New `xen_hypervisor_cmdline(&DeploymentConfig) -> String`.
 - Append the `GRUB_CMDLINE_XEN` block in all three `configure_grub_defaults*`.
 - Add `boot/xen*.gz` and `boot/xen*.efi` to `95-grub-reinstall.hook` targets.
@@ -830,7 +830,7 @@ Ordered so each work package is independently reviewable and testable.
   expressions still match when the cmdline lives on a `module2` line** (III.2).
 
 ### WP3 — Package installation
-- `src/configure/packages.rs`: `install_xen()` — multilib enablement,
+- `src/install/packages.rs`: `install_xen()` — multilib enablement,
   `multilib-devel`, `yay -S xen xen-docs`, `seabios`/`edk2-ovmf` when
   `guest_firmware`, package-artifact caching to `/var/cache/deploytix/xen/`.
 - **[verify] and likely patch**: the AUR PKGBUILD's systemd assumptions. Xen's
@@ -961,12 +961,12 @@ the `xen-init-dom0` ordering is most likely to break.
 | File | Change |
 |---|---|
 | `src/config/deployment.rs` | schema, defaults, wizard, validation |
-| `src/configure/bootloader.rs` | `multiboot2` module, Xen cmdline, reinstall-hook targets |
-| `src/configure/packages.rs` | `install_xen()`, `write_xen_services()` |
-| `src/configure/services.rs` | service list + package-lookup exemption |
-| `src/configure/mkinitcpio.rs` | `xen-pciback` when passthrough is configured |
-| `src/configure/network.rs` | bridge profile / NAT |
-| `src/configure/secureboot.rs` | sign `xen*.efi`, hook target, enrollment caveat |
+| `src/configure/boot/bootloader.rs` | `multiboot2` module, Xen cmdline, reinstall-hook targets |
+| `src/install/packages.rs` | `install_xen()`, `write_xen_services()` |
+| `src/configure/system/services.rs` | service list + package-lookup exemption |
+| `src/configure/system/mkinitcpio.rs` | `xen-pciback` when passthrough is configured |
+| `src/configure/system/network.rs` | bridge profile / NAT |
+| `src/configure/crypto/secureboot.rs` | sign `xen*.efi`, hook target, enrollment caveat |
 | `src/install/fstab.rs` | xenfs entry |
 | `src/install/installer.rs` | Phase 5.9 |
 | `src/immutable/lvm_ab.rs` | only if mitigation (3) of IV.4 is needed |

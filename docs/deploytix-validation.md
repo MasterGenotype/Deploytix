@@ -140,18 +140,18 @@ Run with the baseline config and `device` pointing at the test disk.
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T3a** | Multi-LUKS setup | Set `encryption = true`, `use_lvm_thin = false`; run install through the encryption stage | `/dev/mapper/Crypt-Root`, `Crypt-Usr`, `Crypt-Var`, `Crypt-Home` all present; `cryptsetup status Crypt-Root` shows `cipher: aes-xts-plain64`, `keysize: 512 bits`, type `LUKS2` | Inspect `setup_multi_volume_encryption` in `src/configure/encryption.rs:511-594` |
-| **T3b** | Mapper name disambiguation | Manually pre-create `/dev/mapper/Crypt-Root` with a dummy LUKS container, then run install | Installer logs `Mapper name 'Crypt-Root' already in use, disambiguating` and uses `Crypt-Root-1` | Inspect `resolve_mapper_name` in `src/configure/encryption.rs:42-56` |
-| **T3c** | LUKS1 boot encryption | Set `boot_encryption = true`; observe install | `/dev/mapper/Crypt-Boot` present; `cryptsetup status Crypt-Boot` shows `type: LUKS1`, `hash: sha512`, no `pbkdf` line (LUKS1 uses pbkdf2 implicitly) | Inspect `setup_boot_encryption` and `luks_format_v1` in `src/configure/encryption.rs:269-380` |
-| **T3d** | dm-integrity | Set `integrity = true, encryption = true`; observe install | `cryptsetup status Crypt-Root` shows `integrity: hmac(sha256)`, `sector size: 4096 bytes` | Inspect `luks_format_integrity` in `src/configure/encryption.rs:140-211`; LUKS2 only |
-| **T3e** | Password-via-stdin | grep the install log for any literal occurrence of the encryption password | Password never appears on any command line in stdout/stderr/tracing | Inspect stdin pipe usage in `src/configure/encryption.rs:185-199` |
+| **T3a** | Multi-LUKS setup | Set `encryption = true`, `use_lvm_thin = false`; run install through the encryption stage | `/dev/mapper/Crypt-Root`, `Crypt-Usr`, `Crypt-Var`, `Crypt-Home` all present; `cryptsetup status Crypt-Root` shows `cipher: aes-xts-plain64`, `keysize: 512 bits`, type `LUKS2` | Inspect `setup_multi_volume_encryption` in `src/configure/crypto/encryption.rs:511-594` |
+| **T3b** | Mapper name disambiguation | Manually pre-create `/dev/mapper/Crypt-Root` with a dummy LUKS container, then run install | Installer logs `Mapper name 'Crypt-Root' already in use, disambiguating` and uses `Crypt-Root-1` | Inspect `resolve_mapper_name` in `src/configure/crypto/encryption.rs:42-56` |
+| **T3c** | LUKS1 boot encryption | Set `boot_encryption = true`; observe install | `/dev/mapper/Crypt-Boot` present; `cryptsetup status Crypt-Boot` shows `type: LUKS1`, `hash: sha512`, no `pbkdf` line (LUKS1 uses pbkdf2 implicitly) | Inspect `setup_boot_encryption` and `luks_format_v1` in `src/configure/crypto/encryption.rs:269-380` |
+| **T3d** | dm-integrity | Set `integrity = true, encryption = true`; observe install | `cryptsetup status Crypt-Root` shows `integrity: hmac(sha256)`, `sector size: 4096 bytes` | Inspect `luks_format_integrity` in `src/configure/crypto/encryption.rs:140-211`; LUKS2 only |
+| **T3e** | Password-via-stdin | grep the install log for any literal occurrence of the encryption password | Password never appears on any command line in stdout/stderr/tracing | Inspect stdin pipe usage in `src/configure/crypto/encryption.rs:185-199` |
 
 ### T4 — LVM thin (only if `use_lvm_thin = true`)
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
 | **T4a** | VG + thin pool | After phase 2.1, run `vgs && lvs` from the host | VG `vg0`, thin pool `thinpool` at 95% of VG, thin volumes `root`/`usr`/`var`/`home` exist | Inspect `setup_lvm_thin` and `src/disk/lvm.rs` |
-| **T4b** | LVM-on-LUKS layering | `use_lvm_thin = true, encryption = true`; observe install | `/dev/mapper/Crypt-LVM` present; LVM PV is on top of the mapper, not the raw partition | Inspect single-LUKS path in `src/configure/encryption.rs:419-505` |
+| **T4b** | LVM-on-LUKS layering | `use_lvm_thin = true, encryption = true`; observe install | `/dev/mapper/Crypt-LVM` present; LVM PV is on top of the mapper, not the raw partition | Inspect single-LUKS path in `src/configure/crypto/encryption.rs:419-505` |
 | **T4c** | LVM thin + boot encryption | All three flags true; verify | Both `Crypt-LVM` (LUKS2) and `Crypt-Boot` (LUKS1) present; crypttab has both entries | Inspect `generate_crypttab_lvm_thin` |
 
 ### T5 — Filesystem creation & mounting
@@ -182,14 +182,14 @@ Run with the baseline config and `device` pointing at the test disk.
 | **T7b** | btrfs fstab subvol options | btrfs config; observe fstab | `subvol=@,defaults,noatime,compress=zstd` for `/`; `subvol=@boot,…` for `/boot` | Inspect `generate_fstab_with_subvolumes` in `src/install/fstab.rs:200-332` |
 | **T7c** | Multi-LUKS fstab | encryption + non-zfs config | UUID for fstab is filesystem UUID of the **mapped device** (`/dev/mapper/Crypt-Root` etc.), not the underlying partition | Inspect `generate_fstab_multi_volume` in `src/install/fstab.rs:350-489` |
 | **T7d** | crypttab options | `cat /install/etc/crypttab` after install | Multi-LUKS data: `luks,discard` (no integrity) or `luks` (with integrity); LUKS1 boot: always `luks,discard` | Inspect `crypttab_options` in `src/install/crypttab.rs:14-20` and unit tests at `:213-222` |
-| **T7e** | Keyfile permissions | `find /install/etc/cryptsetup-keys.d -type f -printf '%m %p\n'` | All files mode `000`; directory mode `700` | Inspect `setup_keyfiles_for_volumes` in `src/configure/keyfiles.rs:118-161` |
+| **T7e** | Keyfile permissions | `find /install/etc/cryptsetup-keys.d -type f -printf '%m %p\n'` | All files mode `000`; directory mode `700` | Inspect `setup_keyfiles_for_volumes` in `src/configure/crypto/keyfiles.rs:118-161` |
 
 ### T8 — Swap configuration
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T8a** | ZRAM service (runit) | `swap_type = "zramonly", init = "runit"`; after install, `ls /install/etc/runit/sv/zram` | `run` and `finish` scripts present; mode 755; `runsvdir/default/zram` symlink present | Inspect `setup_zram_runit` in `src/configure/swap.rs:54-108` |
-| **T8b** | ZRAM service (other inits) | Repeat T8a for openrc / s6 / dinit | init-specific service file present at the right path | Inspect parallel `setup_zram_*` functions in `src/configure/swap.rs` |
+| **T8a** | ZRAM service (runit) | `swap_type = "zramonly", init = "runit"`; after install, `ls /install/etc/runit/sv/zram` | `run` and `finish` scripts present; mode 755; `runsvdir/default/zram` symlink present | Inspect `setup_zram_runit` in `src/configure/system/swap.rs:54-108` |
+| **T8b** | ZRAM service (other inits) | Repeat T8a for openrc / s6 / dinit | init-specific service file present at the right path | Inspect parallel `setup_zram_*` functions in `src/configure/system/swap.rs` |
 | **T8c** | Swap file fstab entry | `swap_type = "filezram", filesystem = "btrfs"`; observe fstab | Entry for `/swap/swapfile`; ZRAM service also installed | Inspect `append_swap_file_entry` and `swap_file_fstab_entry` |
 | **T8d** | Swap file rejection on xfs | `swap_type = "filezram", filesystem = "xfs"`; run `deploytix validate` | Validation fails with `Swap file requires btrfs or ext4 filesystem` | Inspect `src/config/deployment.rs:1152-1159` |
 
@@ -198,41 +198,41 @@ Run with the baseline config and `device` pointing at the test disk.
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
 | **T9a** | Pacman keyring init | After `configure_system`, `artix-chroot /install pacman-key --list-keys \| head -5` | Keys present; output non-empty | Sequence in `src/install/installer.rs:775-787` |
-| **T9b** | Locale configuration | `cat /install/etc/locale.conf /install/etc/vconsole.conf` | Match `system.locale` and `system.keymap` | Inspect `src/configure/locale.rs` |
-| **T9c** | dinit keymap service | `init = "dinit"`; after install, `ls /install/etc/dinit.d/keymap` | Service file present | Inspect `create_dinit_keymap_service` in `src/configure/locale.rs` |
-| **T9d** | User creation | `grep "^tester:" /install/etc/passwd` | User present; `/etc/sudoers.d/wheel` enables sudo for wheel group | Inspect `src/configure/users.rs` |
+| **T9b** | Locale configuration | `cat /install/etc/locale.conf /install/etc/vconsole.conf` | Match `system.locale` and `system.keymap` | Inspect `src/configure/system/locale.rs` |
+| **T9c** | dinit keymap service | `init = "dinit"`; after install, `ls /install/etc/dinit.d/keymap` | Service file present | Inspect `create_dinit_keymap_service` in `src/configure/system/locale.rs` |
+| **T9d** | User creation | `grep "^tester:" /install/etc/passwd` | User present; `/etc/sudoers.d/wheel` enables sudo for wheel group | Inspect `src/configure/system/users.rs` |
 
 ### T10 — mkinitcpio + custom hooks
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T10a** | HOOKS construction (no encryption, btrfs) | `grep ^HOOKS= /install/etc/mkinitcpio.conf` | Contains `keyboard keymap consolefont … btrfs filesystems` (no `lvm2`, no `encrypt`, no custom hooks) | Inspect `construct_hooks` in `src/configure/mkinitcpio.rs:72-170` |
-| **T10b** | HOOKS for multi-LUKS | encryption + non-LVM-thin; observe HOOKS | Contains `lvm2 crypttab-unlock mountcrypt` and **does NOT** contain `filesystems` | Inspect lines `:97-101` of `src/configure/mkinitcpio.rs` |
-| **T10c** | HOOKS for LVM-thin + LUKS | both flags true; observe HOOKS | Contains `lvm2 encrypt … filesystems usr`; with `boot_encryption` also `crypttab-unlock` | Inspect `:103-135` of `src/configure/mkinitcpio.rs` |
-| **T10d** | Custom hook installation | encryption true; check `ls /install/usr/lib/initcpio/{hooks,install}/{crypttab-unlock,mountcrypt}` | All four files present, mode 755 | Inspect `install_custom_hooks` in `src/configure/hooks.rs:19-64` |
-| **T10e** | FILES array includes keyfiles | encryption true; `grep ^FILES= /install/etc/mkinitcpio.conf` | Contains `/etc/crypttab`, `/etc/cryptsetup-keys.d/cryptroot.key`, …`cryptusr.key`, …`cryptvar.key`, …`crypthome.key` (and `cryptboot.key` if `boot_encryption`) | Inspect `construct_files` in `src/configure/mkinitcpio.rs:181-200` |
+| **T10a** | HOOKS construction (no encryption, btrfs) | `grep ^HOOKS= /install/etc/mkinitcpio.conf` | Contains `keyboard keymap consolefont … btrfs filesystems` (no `lvm2`, no `encrypt`, no custom hooks) | Inspect `construct_hooks` in `src/configure/system/mkinitcpio.rs:72-170` |
+| **T10b** | HOOKS for multi-LUKS | encryption + non-LVM-thin; observe HOOKS | Contains `lvm2 crypttab-unlock mountcrypt` and **does NOT** contain `filesystems` | Inspect lines `:97-101` of `src/configure/system/mkinitcpio.rs` |
+| **T10c** | HOOKS for LVM-thin + LUKS | both flags true; observe HOOKS | Contains `lvm2 encrypt … filesystems usr`; with `boot_encryption` also `crypttab-unlock` | Inspect `:103-135` of `src/configure/system/mkinitcpio.rs` |
+| **T10d** | Custom hook installation | encryption true; check `ls /install/usr/lib/initcpio/{hooks,install}/{crypttab-unlock,mountcrypt}` | All four files present, mode 755 | Inspect `install_custom_hooks` in `src/configure/system/hooks.rs:19-64` |
+| **T10e** | FILES array includes keyfiles | encryption true; `grep ^FILES= /install/etc/mkinitcpio.conf` | Contains `/etc/crypttab`, `/etc/cryptsetup-keys.d/cryptroot.key`, …`cryptusr.key`, …`cryptvar.key`, …`crypthome.key` (and `cryptboot.key` if `boot_encryption`) | Inspect `construct_files` in `src/configure/system/mkinitcpio.rs:181-200` |
 
 ### T11 — Bootloader
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T11a** | GRUB EFI install (plain) | After install, `ls /install/boot/efi/EFI/Artix/grubx64.efi` | File exists | Inspect `install_grub` in `src/configure/bootloader.rs:71-127` |
+| **T11a** | GRUB EFI install (plain) | After install, `ls /install/boot/efi/EFI/Artix/grubx64.efi` | File exists | Inspect `install_grub` in `src/configure/boot/bootloader.rs:71-127` |
 | **T11b** | GRUB cmdline (plain) | `grep GRUB_CMDLINE_LINUX /install/etc/default/grub` | Contains `root=UUID=…` referencing the data filesystem UUID | Inspect `configure_grub_defaults` |
-| **T11c** | GRUB cmdline (multi-LUKS) | encrypted config | `cryptdevice=UUID=…:Crypt-Root` and `root=/dev/mapper/Crypt-Root` (or btrfs subvolume equivalent) | Inspect `install_grub_with_layout` in `src/configure/bootloader.rs:130+` |
+| **T11c** | GRUB cmdline (multi-LUKS) | encrypted config | `cryptdevice=UUID=…:Crypt-Root` and `root=/dev/mapper/Crypt-Root` (or btrfs subvolume equivalent) | Inspect `install_grub_with_layout` in `src/configure/boot/bootloader.rs:130+` |
 | **T11d** | GRUB cmdline (LVM-thin) | LVM-thin + LUKS config | `cryptdevice=UUID=…:Crypt-LVM` and `root=/dev/vg0/root` | Inspect `configure_grub_defaults_lvm_thin` |
-| **T11e** | GRUB cryptodisk modules | `objdump -d /install/boot/efi/EFI/Artix/grubx64.efi 2>/dev/null \| strings \| grep -E 'cryptodisk\|luks2'` (or check `/install/etc/default/grub` for `GRUB_ENABLE_CRYPTODISK=y`) | `cryptodisk`, `luks`, `luks2`, `gcry_*` modules embedded | Inspect `GRUB_STANDALONE_MODULES` constant in `src/configure/bootloader.rs:17-23` |
-| **T11f** | Pacman GRUB-reinstall hook | encrypted config; check `ls /install/etc/pacman.d/hooks/99-grub-reinstall.hook` | File present | Inspect `create_grub_reinstall_hook` in `src/configure/bootloader.rs` |
+| **T11e** | GRUB cryptodisk modules | `objdump -d /install/boot/efi/EFI/Artix/grubx64.efi 2>/dev/null \| strings \| grep -E 'cryptodisk\|luks2'` (or check `/install/etc/default/grub` for `GRUB_ENABLE_CRYPTODISK=y`) | `cryptodisk`, `luks`, `luks2`, `gcry_*` modules embedded | Inspect `GRUB_STANDALONE_MODULES` constant in `src/configure/boot/bootloader.rs:17-23` |
+| **T11f** | Pacman GRUB-reinstall hook | encrypted config; check `ls /install/etc/pacman.d/hooks/99-grub-reinstall.hook` | File present | Inspect `create_grub_reinstall_hook` in `src/configure/boot/bootloader.rs` |
 
 ### T12 — Network + greetd + services
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T12a** | iwd config | `backend = "iwd"`; observe `/install/etc/iwd/main.conf` | Contains `EnableNetworkConfiguration=true` | Inspect `src/configure/network.rs` |
-| **T12b** | NetworkManager + iwd | `backend = "networkmanager"`; observe `/install/etc/NetworkManager/conf.d/wifi_backend.conf` | Backend set to iwd | Inspect `src/configure/network.rs` |
-| **T12c** | greetd config | DE selected; `cat /install/etc/greetd/config.toml` | Has `[terminal]`, `[default_session]`, default user matches `user.name` | Inspect `src/configure/greetd.rs` |
-| **T12d** | Service enabled (runit) | `init = "runit"`; check `ls -l /install/etc/runit/runsvdir/default/` | Symlinks for selected services (seatd, iwd or NetworkManager+iwd, greetd if DE) pointing to `/etc/runit/sv/<svc>` | Inspect `enable_runit_service` in `src/configure/services.rs:178-206` |
-| **T12e** | Service enabled (s6) | `init = "s6"`; run `artix-chroot /install s6 set list` (or inspect the default bundle) | Selected services (`seatd`, `iwd` or `NetworkManager`+`iwd`, `greetd` if DE) enabled, committed, and installed as the boot database (`s6 set commit` + `s6 live install --init`) | Inspect `sync_s6_repository` / `enable_s6_service` / `commit_service_database` in `src/configure/services.rs` |
-| **T12f** | elogind blacklist | DE + any init; `pacman -Q --root=/install elogind-runit 2>&1` (or per-init equivalent) | Returns `error: package 'elogind-runit' was not found` (only base elogind installed) | Inspect `build_service_packages` in `src/configure/services.rs:93-116` and the explicit skip at `:33-35` |
+| **T12a** | iwd config | `backend = "iwd"`; observe `/install/etc/iwd/main.conf` | Contains `EnableNetworkConfiguration=true` | Inspect `src/configure/system/network.rs` |
+| **T12b** | NetworkManager + iwd | `backend = "networkmanager"`; observe `/install/etc/NetworkManager/conf.d/wifi_backend.conf` | Backend set to iwd | Inspect `src/configure/system/network.rs` |
+| **T12c** | greetd config | DE selected; `cat /install/etc/greetd/config.toml` | Has `[terminal]`, `[default_session]`, default user matches `user.name` | Inspect `src/configure/gaming/greetd.rs` |
+| **T12d** | Service enabled (runit) | `init = "runit"`; check `ls -l /install/etc/runit/runsvdir/default/` | Symlinks for selected services (seatd, iwd or NetworkManager+iwd, greetd if DE) pointing to `/etc/runit/sv/<svc>` | Inspect `enable_runit_service` in `src/configure/system/services.rs:178-206` |
+| **T12e** | Service enabled (s6) | `init = "s6"`; run `artix-chroot /install s6 set list` (or inspect the default bundle) | Selected services (`seatd`, `iwd` or `NetworkManager`+`iwd`, `greetd` if DE) enabled, committed, and installed as the boot database (`s6 set commit` + `s6 live install --init`) | Inspect `sync_s6_repository` / `enable_s6_service` / `commit_service_database` in `src/configure/system/services.rs` |
+| **T12f** | elogind blacklist | DE + any init; `pacman -Q --root=/install elogind-runit 2>&1` (or per-init equivalent) | Returns `error: package 'elogind-runit' was not found` (only base elogind installed) | Inspect `build_service_packages` in `src/configure/system/services.rs:93-116` and the explicit skip at `:33-35` |
 
 ### T13 — Optional package collections
 
@@ -240,10 +240,10 @@ Run each package test with that flag enabled and all others disabled.
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T13a** | GPU drivers | `gpu_drivers = ["amd"]`; verify `pacman -Q --root=/install xf86-video-amdgpu vulkan-radeon` | Both packages installed | Inspect `install_gpu_drivers` in `src/configure/packages.rs` |
+| **T13a** | GPU drivers | `gpu_drivers = ["amd"]`; verify `pacman -Q --root=/install xf86-video-amdgpu vulkan-radeon` | Both packages installed | Inspect `install_gpu_drivers` in `src/install/packages.rs` |
 | **T13b** | Wine | `install_wine = true`; verify `pacman -Q --root=/install wine` | Installed | Inspect `install_wine_packages` |
 | **T13c** | Gaming | `install_gaming = true`; verify `pacman -Q --root=/install steam gamescope-git` | Both present (gamescope-git from custom repo) | Inspect `install_gaming_packages` |
-| **T13d** | Session switching | `install_gaming = true, install_session_switching = true, environment = "kde"`; verify scripts in `/install/usr/local/bin/` | `deploytix-session-manager.sh`, `return-to-gamemode.sh`, `session-select.sh`, `steam-gamescope-session.sh` all present | Inspect `setup_session_switching` in `src/configure/session_switching.rs` |
+| **T13d** | Session switching | `install_gaming = true, install_session_switching = true, environment = "kde"`; verify scripts in `/install/usr/local/bin/` | `deploytix-session-manager.sh`, `return-to-gamemode.sh`, `session-select.sh`, `steam-gamescope-session.sh` all present | Inspect `setup_session_switching` in `src/configure/gaming/session_switching.rs` |
 | **T13e** | yay AUR | `install_yay = true`; verify `pacman -Q --root=/install yay` | Installed (built from source) | Inspect `install_yay` |
 | **T13f** | btrfs tools | `install_btrfs_tools = true, install_yay = true, filesystem = "btrfs"`; verify | `snapper`, `btrfs-assistant` installed | Inspect `install_btrfs_tools` |
 | **T13g** | HHD | `install_hhd = true, install_yay = true`; verify | `hhd` package + init-specific service file at `/etc/{runit/sv,init.d,s6/adminsv,dinit.d}/hhd` | Inspect `install_hhd` |
@@ -298,10 +298,10 @@ Run each package test with that flag enabled and all others disabled.
 
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
-| **T18a** | Resolve | `deploytix deps resolve linux-zen` | Prints closure; non-empty | Inspect `cmd_resolve` in `src/pkgdeps/cli.rs` |
+| **T18a** | Resolve | `deploytix deps resolve linux-zen` | Prints closure; non-empty | Inspect `cmd_resolve` in `crates/pkgdeps/src/cli.rs` |
 | **T18b** | Tree | `deploytix deps tree linux-zen` | Tree output; root node `linux-zen` | Inspect `cmd_tree` |
-| **T18c** | Graph DOT | `deploytix deps graph linux-zen` | Valid Graphviz DOT (parsable by `dot -Tpng`) | Inspect `src/pkgdeps/graph.rs` |
-| **T18d** | Offline mode | `deploytix deps resolve foo --offline tests/fixtures/sample.json` | Reads from JSON without invoking pacman | Inspect `MockSource` in `src/pkgdeps/source.rs` |
+| **T18c** | Graph DOT | `deploytix deps graph linux-zen` | Valid Graphviz DOT (parsable by `dot -Tpng`) | Inspect `crates/pkgdeps/src/graph.rs` |
+| **T18d** | Offline mode | `deploytix deps resolve foo --offline tests/fixtures/sample.json` | Reads from JSON without invoking pacman | Inspect `MockSource` in `crates/pkgdeps/src/source.rs` |
 | **T18e** | Integration tests | `cargo test --all-features --test pkgdeps_integration` | All tests pass | Inspect `tests/pkgdeps_integration.rs` |
 
 ## Fix-Specific Validation Procedures
@@ -311,7 +311,7 @@ Run each package test with that flag enabled and all others disabled.
 - **Before/after**: dump layout summary for matrix configs (encryption=F/T × use_lvm_thin=F/T × filesystem=btrfs/ext4/zfs); diff old vs. new.
 - **Regression**: T1a, T1b, T1c, T1d, T2a, T5a–T5e.
 
-### Fix-2: Changes to `construct_hooks` (`src/configure/mkinitcpio.rs`)
+### Fix-2: Changes to `construct_hooks` (`src/configure/system/mkinitcpio.rs`)
 
 - **Before/after**: produce HOOKS string for each row of the layout-by-flag matrix (overview document); diff.
 - **Regression**: T10a, T10b, T10c, T10d, T10e, T14d, T14e, T14f.
@@ -322,7 +322,7 @@ Run each package test with that flag enabled and all others disabled.
 - **Before/after**: state of `/tmp/deploytix-pacman.conf` and `/tmp/deploytix-local-repo/` after install on (a) live ISO, (b) clean Artix host with pre-built packages, (c) clean Artix host without pre-built packages.
 - **Regression**: T6a, T6b, T6c, T6e, T13c (gaming uses gamescope-git from custom repo).
 
-### Fix-4: Changes to `enable_service` family (`src/configure/services.rs`)
+### Fix-4: Changes to `enable_service` family (`src/configure/system/services.rs`)
 
 - **Before/after**: ls of `/install/etc/<init>/...` for each init, filtered to only services in `build_service_list` output.
 - **Regression**: T12d, T12e, T12f for the affected init; T13g/T13h/T13i for HHD/Decky/evdevhook2 enable paths.
@@ -338,7 +338,7 @@ Run each package test with that flag enabled and all others disabled.
 - **Regression**: T0a, T0b, T0c.
 - **Note**: pure rules cannot be unit-tested in isolation today (`src/config/deployment.rs:1414-1423`). Fix-2 in the troubleshooting guide proposes splitting them out.
 
-### Fix-7: Changes to GRUB cmdline construction (`src/configure/bootloader.rs`)
+### Fix-7: Changes to GRUB cmdline construction (`src/configure/boot/bootloader.rs`)
 
 - **Before/after**: dump `/install/etc/default/grub` for matrix configs; diff.
 - **Regression**: T11a–T11f, then T14d–T14e (real boot test) for any non-trivial change. *Do not skip the boot test.*
@@ -356,21 +356,21 @@ Run each package test with that flag enabled and all others disabled.
 | `src/install/chroot.rs` | T5a–T5e, T14b |
 | `src/install/fstab.rs` | T7a–T7c, T14d |
 | `src/install/crypttab.rs` | T7d, T14e |
-| `src/configure/encryption.rs`, `src/configure/keyfiles.rs` | T3a–T3e, T7d, T7e, T14e |
-| `src/configure/mkinitcpio.rs`, `src/configure/hooks.rs` | T10a–T10e, T14a, T14d, T14e, T14f |
-| `src/configure/bootloader.rs` | T11a–T11f, T14d, T14e |
-| `src/configure/services.rs`, `src/configure/greetd.rs` | T12a–T12f |
-| `src/configure/network.rs` | T12a, T12b, T14g |
-| `src/configure/packages.rs` | T13a–T13k (corresponding subset) |
-| `src/configure/swap.rs` | T8a–T8d |
-| `src/configure/locale.rs` | T9b, T9c |
-| `src/configure/users.rs` | T9d |
-| `src/configure/secureboot.rs` | dedicated SecureBoot run on UEFI hardware |
+| `src/configure/crypto/encryption.rs`, `src/configure/crypto/keyfiles.rs` | T3a–T3e, T7d, T7e, T14e |
+| `src/configure/system/mkinitcpio.rs`, `src/configure/system/hooks.rs` | T10a–T10e, T14a, T14d, T14e, T14f |
+| `src/configure/boot/bootloader.rs` | T11a–T11f, T14d, T14e |
+| `src/configure/system/services.rs`, `src/configure/gaming/greetd.rs` | T12a–T12f |
+| `src/configure/system/network.rs` | T12a, T12b, T14g |
+| `src/install/packages.rs` | T13a–T13k (corresponding subset) |
+| `src/configure/system/swap.rs` | T8a–T8d |
+| `src/configure/system/locale.rs` | T9b, T9c |
+| `src/configure/system/users.rs` | T9d |
+| `src/configure/crypto/secureboot.rs` | dedicated SecureBoot run on UEFI hardware |
 | `src/cleanup/mod.rs`, `src/utils/signal.rs` | T16a–T16d |
 | `src/rehearsal/*` | T15a–T15d |
 | `src/gui/*`, `src/gui_main.rs` | T17a–T17g |
 | `src/resources/audio.rs`, `src/resources/alsa_noop.c`, `build.rs` | T17g (and: confirm `cargo build --release` still produces a binary that links libalsa_noop.a) |
-| `src/pkgdeps/*` | T18a–T18e |
+| `crates/pkgdeps/src/*` | T18a–T18e |
 | `Cargo.toml`, `.cargo/config.toml`, `Makefile` | full T0–T15 (release build) + `make portable` smoke test |
 
 ## Test Logging Template

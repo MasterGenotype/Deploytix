@@ -101,7 +101,7 @@ holes`. **F2FS** is stricter still: a swap file must be contiguous and pinned.
 So `filesystem = "xfs"` with `swap_type = "file_zram"` produced a swap file that
 could never be activated — and, again, silently, because ZRAM covered for it.
 
-**Fix** (`src/configure/swap.rs`): `check_is_btrfs()` was generalised to
+**Fix** (`src/configure/system/swap.rs`): `check_is_btrfs()` was generalised to
 `fs_type_of()`, and allocation now branches on the filesystem —
 `fallocate` on ext only, `dd if=/dev/zero` everywhere else, including unknown
 types. `dd` is slower because it writes the file out, which is precisely what

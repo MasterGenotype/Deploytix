@@ -24,6 +24,7 @@
 //! `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so a read-only
 //! `@usr` covers them for free.
 
+pub mod backend;
 pub mod boot;
 pub mod etc;
 pub mod history;
@@ -100,6 +101,42 @@ impl SessionState {
 /// The LVM A/B backend has always omitted them for the same reason; see the
 /// header comment in `generate_fstab_lvm_ab`.
 pub const INITRAMFS_OWNED_MOUNTPOINTS: &[&str] = &["/", "/usr", "/etc"];
+
+/// Mount points a snapshot set shares with the live system instead of
+/// snapshotting, in the order [`crate::immutable::update::mount_set_cmd`]
+/// rbinds them into a set's chroot.
+///
+/// This is the mount model's blind spot. Everything a transaction does to `/`,
+/// `/usr` or `/etc` happens inside a throwaway snapshot and is undone by
+/// rolling back; everything it does *here* lands on the running system, and on
+/// every rollback target, immediately.
+pub const SHARED_LIVE_MOUNTS: &[&str] = &["/var", "/home", "/boot"];
+
+/// The shared mounts a rollback cannot repair and the system needs in order to
+/// boot at all.
+///
+/// `/var` and `/home` are shared too, but they hold data a package legitimately
+/// owns and a broken one does not stop the machine from starting. `/boot` holds
+/// the kernel and initramfs every set boots from: delete a file there and no
+/// snapshot brings it back.
+///
+/// This lives here, beside the mount model it is a property of, rather than
+/// next to the removal code that currently consults it. Update is safe today
+/// only because it adds files to these mounts and never deletes any; if that
+/// changes, the hazard is the mount's, and so is the knowledge.
+pub const UNRECOVERABLE_SHARED_MOUNTS: &[&str] = &["/boot"];
+
+/// The unrecoverable shared mount `path` falls under, if any.
+///
+/// `path` is absolute. A file *at* a mount point (rather than inside it) is not
+/// matched — a package owning `/boot` itself owns a directory, not its
+/// contents.
+pub fn unrecoverable_shared_mount(path: &str) -> Option<&'static str> {
+    UNRECOVERABLE_SHARED_MOUNTS
+        .iter()
+        .copied()
+        .find(|mount| path.starts_with(&format!("{mount}/")))
+}
 
 /// Directories created on the writable `@var` to back the read-only root's
 /// writable paths, each paired with the mount point it is bind-mounted to.

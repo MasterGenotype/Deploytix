@@ -96,9 +96,14 @@ pub fn mount_set_cmd(devices: &ImmutableDevices, id: &str) -> String {
          mkdir -p \"$t/usr\" \"$t/etc\"; \
          mount -t btrfs -o subvol={usr},rw,noatime,compress=zstd {usr_fs} \"$t/usr\"; \
          mount -t btrfs -o subvol={etc},rw,noatime,compress=zstd {root_fs} \"$t/etc\"; \
-         for d in var home boot; do mkdir -p \"$t/$d\"; mount --rbind \"/$d\" \"$t/$d\"; done; \
+         for d in {shared}; do mkdir -p \"$t/$d\"; mount --rbind \"/$d\" \"$t/$d\"; done; \
          {writable_binds}true",
         target = target,
+        shared = crate::immutable::SHARED_LIVE_MOUNTS
+            .iter()
+            .map(|m| m.trim_start_matches('/'))
+            .collect::<Vec<_>>()
+            .join(" "),
         root = snapshot::set_root_subvol(id),
         etc = snapshot::set_etc_subvol(id),
         usr = snapshot::set_usr_subvol(id),

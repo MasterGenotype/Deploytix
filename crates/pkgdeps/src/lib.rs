@@ -10,21 +10,21 @@
 //! * [`source`] — the [`source::MetadataSource`] trait and an in-memory
 //!   [`source::MockSource`] used by tests and `--offline` mode.
 //! * [`pacman`] — production backend that shells out to
-//!   `pacman` / `pactree` / `expac` through a [`crate::utils::command::CommandRunner`].
+//!   `pacman` / `pactree` / `expac`.
 //! * [`resolver`] — recursive closure, virtual provider resolution,
 //!   conflicts, and reverse-dep walking.
 //! * [`graph`] — Graphviz DOT output equivalent to `pactree -s -g`.
 //! * [`cli`] — the `deploytix deps …` subcommand handlers.
+//! * [`error`] — this crate's own [`error::Error`]; the installer converts it
+//!   at the boundary rather than this crate importing the installer's.
 
 pub mod cli;
+pub mod error;
 pub mod graph;
 pub mod model;
 pub mod pacman;
 pub mod resolver;
 pub mod source;
 
-// Re-export only types referenced via the `pkgdeps` module root by
-// external consumers (currently the integration test suite uses
-// `deploytix::pkgdeps::DepClosure`). Other types are reachable through
-// their submodule paths and don't need a flat re-export.
+pub use error::{Error, Result};
 pub use model::DepClosure;

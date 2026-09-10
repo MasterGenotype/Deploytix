@@ -1,11 +1,11 @@
 //! Integration tests for the `pkgdeps` module: drive the public API end-to-end
 //! with a `MockSource` standing in for pacman.
 
-use deploytix::pkgdeps::cli as deps_cli;
-use deploytix::pkgdeps::graph::{to_dot, DotOpts};
-use deploytix::pkgdeps::model::{Dep, EdgeKind, Package};
-use deploytix::pkgdeps::resolver::{resolve_closure, resolve_reverse, ResolveOpts};
-use deploytix::pkgdeps::source::{MetadataSource, MockSource};
+use pkgdeps::cli as deps_cli;
+use pkgdeps::graph::{to_dot, DotOpts};
+use pkgdeps::model::{Dep, EdgeKind, Package};
+use pkgdeps::resolver::{resolve_closure, resolve_reverse, ResolveOpts};
+use pkgdeps::source::{MetadataSource, MockSource};
 use std::path::PathBuf;
 
 fn artix_universe() -> MockSource {
@@ -198,7 +198,7 @@ fn json_output_schema_round_trips() {
     )
     .unwrap();
     let json = serde_json::to_string(&closure).unwrap();
-    let round: deploytix::pkgdeps::DepClosure = serde_json::from_str(&json).unwrap();
+    let round: pkgdeps::DepClosure = serde_json::from_str(&json).unwrap();
     assert_eq!(round.roots, closure.roots);
     assert_eq!(round.nodes.len(), closure.nodes.len());
     assert_eq!(round.edges.len(), closure.edges.len());

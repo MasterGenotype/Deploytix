@@ -425,7 +425,7 @@ impl ExtraPackagesConfig {
 ///
 /// The URL is a constant rather than user input, which is what makes it safe
 /// to interpolate into the `curl` command in
-/// [`crate::configure::packages::warp_terminal_script`]. It is single-quoted
+/// [`crate::install::packages::warp_terminal_script`]. It is single-quoted
 /// there, and `warp_url_is_safe_to_shell_quote` keeps it that way.
 pub const WARP_TERMINAL_URL: &str = "https://app.warp.dev/download?package=pacman";
 
@@ -455,7 +455,7 @@ pub const TKG_FALLBACK_BUILD: &str = "7.2.3-273";
 ///
 /// These are built from constants and a closed enum — never from user input —
 /// which is what keeps them safe to single-quote into the shell script in
-/// [`crate::configure::packages::tkg_kernel_script`].
+/// [`crate::install::packages::tkg_kernel_script`].
 pub fn tkg_fallback_urls(sched: TkgScheduler) -> (String, String) {
     let base = format!(
         "https://github.com/Frogging-Family/linux-tkg/releases/download/{TKG_FALLBACK_TAG}"
@@ -624,44 +624,6 @@ impl std::fmt::Display for InitSystem {
 }
 
 #[allow(dead_code)]
-impl InitSystem {
-    /// Get the base package name for this init system
-    pub fn base_package(&self) -> &str {
-        match self {
-            Self::Runit => "runit",
-            Self::OpenRC => "openrc",
-            Self::S6 => "s6-base",
-            Self::Dinit => "dinit",
-        }
-    }
-
-    /// Get the service directory path
-    pub fn service_dir(&self) -> &str {
-        match self {
-            Self::Runit => "/etc/runit/sv",
-            Self::OpenRC => "/etc/init.d",
-            Self::S6 => "/etc/s6/sv",
-            Self::Dinit => "/etc/dinit.d",
-        }
-    }
-
-    /// Get the enabled service directory path
-    ///
-    /// For s6 this is the default bundle's contents directory.  Do not
-    /// write to it directly: since Artix moved to the upstream s6-frontend,
-    /// services are enabled with `s6 set enable <name>` and persisted with
-    /// `s6 set commit` + `s6 live install --init` (see
-    /// `configure::services::{enable_s6_service, commit_service_database}`).
-    pub fn enabled_dir(&self) -> &str {
-        match self {
-            Self::Runit => "/run/runit/service",
-            Self::OpenRC => "/etc/runlevels/default",
-            Self::S6 => "/etc/s6/adminsv/default/contents.d",
-            Self::Dinit => "/etc/dinit.d/boot.d",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Bootloader {
@@ -2271,35 +2233,6 @@ mod tests {
             !force_off.is_encrypted(true),
             "explicit false overrides global true"
         );
-    }
-
-    // ── InitSystem methods ───────────────────────────────────────────────────
-
-    #[test]
-    fn init_system_base_package_returns_correct_package() {
-        assert_eq!(InitSystem::Runit.base_package(), "runit");
-        assert_eq!(InitSystem::OpenRC.base_package(), "openrc");
-        assert_eq!(InitSystem::S6.base_package(), "s6-base");
-        assert_eq!(InitSystem::Dinit.base_package(), "dinit");
-    }
-
-    #[test]
-    fn init_system_service_dir_returns_correct_path() {
-        assert_eq!(InitSystem::Runit.service_dir(), "/etc/runit/sv");
-        assert_eq!(InitSystem::OpenRC.service_dir(), "/etc/init.d");
-        assert_eq!(InitSystem::S6.service_dir(), "/etc/s6/sv");
-        assert_eq!(InitSystem::Dinit.service_dir(), "/etc/dinit.d");
-    }
-
-    #[test]
-    fn init_system_enabled_dir_returns_correct_path() {
-        assert_eq!(InitSystem::Runit.enabled_dir(), "/run/runit/service");
-        assert_eq!(InitSystem::OpenRC.enabled_dir(), "/etc/runlevels/default");
-        assert_eq!(
-            InitSystem::S6.enabled_dir(),
-            "/etc/s6/adminsv/default/contents.d"
-        );
-        assert_eq!(InitSystem::Dinit.enabled_dir(), "/etc/dinit.d/boot.d");
     }
 
     // NOTE: DeploymentConfig::validate() cannot currently be unit-tested in

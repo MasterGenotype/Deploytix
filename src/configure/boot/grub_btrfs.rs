@@ -14,8 +14,8 @@
 
 use crate::config::{DeploymentConfig, InitSystem};
 use crate::configure::bootloader::{uses_standalone_grub, REINSTALL_GRUB_PATH};
-use crate::configure::packages::pacman_install_chroot_reviewed_status;
 use crate::disk::formatting::get_partition_uuid;
+use crate::install::packages::pacman_install_chroot_reviewed_status;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use std::fs;

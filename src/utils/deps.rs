@@ -56,13 +56,9 @@ fn binary_to_package() -> HashMap<&'static str, &'static [&'static str]> {
     map
 }
 
-/// Check if a binary exists in PATH
+/// Check if a binary exists on the host being targeted.
 fn binary_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::utils::host::current().has_binary(name)
 }
 
 /// Determine required binaries based on configuration

@@ -322,8 +322,8 @@ bypasses it.
 | Interactive direct-pacman nudge (profile.d) | `src/immutable/lockdown.rs` |
 | fstab generation (omits the initramfs-owned `/`, `/usr`, `/etc`) | `src/install/fstab.rs` |
 | Legacy-fstab repair (`sanitize_fstab`) | `src/immutable/etc.rs` |
-| Read-only mounts + marker resolution in initramfs | `src/configure/hooks.rs` |
+| Read-only mounts + marker resolution in initramfs | `src/configure/system/hooks.rs` |
 | Writable-path bind sources (`/var/roothome`, `/var/opt`, `/var/srv`) | `src/immutable/mod.rs` |
 | Disk-backed `/tmp` (`@tmp` + tmpfiles drop-in) | `src/immutable/tmp.rs`, `docs/TMP_DISK_BACKED.md` |
-| grub-btrfs config, ESP snapshot list, install-time regeneration | `src/configure/grub_btrfs.rs` |
+| grub-btrfs config, ESP snapshot list, install-time regeneration | `src/configure/boot/grub_btrfs.rs` |
 | CLI subcommands | `src/main.rs` |

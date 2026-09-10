@@ -109,7 +109,7 @@ overlay graph driver; `-w` pointed at a volume on a real filesystem fixes it too
 2. **Creates a local pacman repository** — copies packages to `/var/lib/artools/repos/deploytix/` and runs `repo-add`
 3. **Configures pacman** — installs a custom `iso-x86_64.conf` in `~/.config/artools/pacman.conf.d/` with a `[deploytix]` repo pointing to the local repository
 4. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`
-5. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo`; at runtime the Rust installer detects this repo and generates a temporary pacman.conf for basestrap
+5. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo`; at runtime the Rust installer detects this repo and generates a temporary pacman.conf for basestrap, then copies the repo into the installed system at the same path (and adds a `[deploytix]` section to its `pacman.conf`) so that machine can install the next one
 6. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
 7. **Overrides the live GRUB templates** — the ISO auto-selects the appropriate default boot entry after a 1 second timeout instead of waiting indefinitely at the GRUB menu
 

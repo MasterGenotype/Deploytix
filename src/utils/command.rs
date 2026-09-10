@@ -1,6 +1,7 @@
 //! Command execution utilities
 
 use crate::utils::error::{DeploytixError, Result};
+use crate::utils::host::{self, HostAdapter};
 use crate::utils::interactive::{PacmanDecision, PacmanInvocation, PolicyHandle};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
@@ -183,6 +184,10 @@ pub struct CommandRunner {
     dry_run: bool,
     recorder: Option<Sender<OperationRecord>>,
     policy: Option<PolicyHandle>,
+    /// Where chroot commands land.  Always the local machine today; the field
+    /// exists so that "which host" is a value rather than an assumption baked
+    /// into every call site.
+    host: &'static dyn HostAdapter,
 }
 
 impl CommandRunner {
@@ -191,7 +196,19 @@ impl CommandRunner {
             dry_run,
             recorder: None,
             policy: None,
+            host: host::current(),
         }
+    }
+
+    /// Target a different host.  See [`crate::utils::host`].
+    pub fn with_host(mut self, host: &'static dyn HostAdapter) -> Self {
+        self.host = host;
+        self
+    }
+
+    /// The host this runner targets.
+    pub fn host(&self) -> &'static dyn HostAdapter {
+        self.host
     }
 
     /// Attach a recording channel.  Every command execution will send an
@@ -276,7 +293,7 @@ impl CommandRunner {
         } else {
             let cmd_str = format!("chroot {} bash -c '{}'", chroot_path, command);
             let start = Instant::now();
-            match run_in_artix_chroot(chroot_path, command) {
+            match self.host.chroot_cmd(chroot_path, command) {
                 Ok(output) => {
                     self.record(&cmd_str, &output, start.elapsed());
                     Ok(Some(output))

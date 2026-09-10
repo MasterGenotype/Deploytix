@@ -190,3 +190,80 @@ impl Drop for DiskWipeGuard {
         }
     }
 }
+
+/// RAII undo for a rehearsed transaction (an update or a removal).
+///
+/// A transaction against a live immutable system has nothing to wipe: it
+/// builds a new snapshot set, or fills the inactive slot, and repoints boot at
+/// it. Wiping the disk here would destroy the very system being rehearsed
+/// against. The undo is instead exactly what `deploytix rollback` with no
+/// argument does — discard what is staged and return to what is running — so
+/// the guard asks the live backend to do that.
+pub struct StagedTransactionGuard {
+    armed: bool,
+}
+
+impl StagedTransactionGuard {
+    pub fn new() -> Self {
+        info!("StagedTransactionGuard: armed (staged change will be discarded on drop)");
+        Self { armed: true }
+    }
+
+    /// Discard whatever the rehearsal staged. Returns whether the system is
+    /// back to running what it will boot — including when the rehearsal never
+    /// got as far as staging anything.
+    pub fn discard_now(&mut self) -> bool {
+        if !self.armed {
+            return true;
+        }
+        let ok = Self::discard();
+        if ok {
+            self.armed = false;
+        }
+        ok
+    }
+
+    fn discard() -> bool {
+        use crate::immutable::backend;
+        use crate::utils::command::CommandRunner;
+
+        let cmd = CommandRunner::new(false);
+        let backend = backend::active();
+        match backend.staged_change(&cmd) {
+            Ok(None) => {
+                info!("StagedTransactionGuard: nothing was staged; nothing to discard");
+                true
+            }
+            Ok(Some(staged)) => {
+                info!("StagedTransactionGuard: discarding staged {}", staged);
+                match backend.rollback(&cmd, None, false) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(
+                            "StagedTransactionGuard: could not discard {}: {}",
+                            staged, e
+                        );
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "StagedTransactionGuard: could not tell what is staged: {}. \
+                     The system may still be pointed at the rehearsed change.",
+                    e
+                );
+                false
+            }
+        }
+    }
+}
+
+impl Drop for StagedTransactionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            warn!("StagedTransactionGuard: drop triggered — discarding staged change");
+            Self::discard();
+        }
+    }
+}

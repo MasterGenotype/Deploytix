@@ -4,9 +4,9 @@
 //! The resolver is intentionally pure-Rust on top of [`MetadataSource`]
 //! so it works against either the real `PacmanSource` or `MockSource`.
 
-use super::model::{Dep, DepClosure, DepEdge, EdgeKind, Package, ProviderChoice};
-use super::source::MetadataSource;
-use crate::utils::error::Result;
+use crate::error::Result;
+use crate::model::{Dep, DepClosure, DepEdge, EdgeKind, Package, ProviderChoice};
+use crate::source::MetadataSource;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -281,8 +281,8 @@ pub fn diff_packages(a: &Package, b: &Package) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkgdeps::model::Dep;
-    use crate::pkgdeps::source::MockSource;
+    use crate::model::Dep;
+    use crate::source::MockSource;
 
     fn pkg(name: &str, version: &str, deps: &[&str]) -> Package {
         let mut p = Package::new(name, version, "system");

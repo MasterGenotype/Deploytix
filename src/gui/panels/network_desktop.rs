@@ -138,22 +138,11 @@ pub(crate) fn show_sections(
         egui::ComboBox::from_id_salt("desktop")
             .selected_text(format!("{}", packages.desktop_env))
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut packages.desktop_env,
-                    DesktopEnvironment::None,
-                    "None (headless/server)",
-                );
-                ui.selectable_value(
-                    &mut packages.desktop_env,
-                    DesktopEnvironment::Kde,
-                    "KDE Plasma",
-                );
-                ui.selectable_value(
-                    &mut packages.desktop_env,
-                    DesktopEnvironment::Gnome,
-                    "GNOME",
-                );
-                ui.selectable_value(&mut packages.desktop_env, DesktopEnvironment::Xfce, "XFCE");
+                // Driven by the registry, so a newly added desktop appears
+                // here without anyone remembering to update a list.
+                for module in crate::desktop::ALL {
+                    ui.selectable_value(&mut packages.desktop_env, module.id.clone(), module.label);
+                }
             });
 
         if packages.desktop_env != DesktopEnvironment::None {

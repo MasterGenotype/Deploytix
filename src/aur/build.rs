@@ -18,7 +18,7 @@
 //! Note what the bug is *not*: `makepkg`'s default `BUILDDIR` is the directory
 //! holding the PKGBUILD, so a helper that clones into the user's cache already
 //! builds on disk. The exposure is anything that names `/tmp` explicitly —
-//! [`crate::configure::packages::install_yay`] built in `/tmp/yay-build` before
+//! [`crate::install::packages::install_yay`] built in `/tmp/yay-build` before
 //! this module existed, and PKGBUILDs and vendor tools do the same.
 //!
 //! # What this does

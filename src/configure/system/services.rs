@@ -3,8 +3,6 @@
 use crate::config::{DeploymentConfig, DesktopEnvironment, InitSystem, NetworkBackend};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
-use std::fs;
-use std::path::Path;
 use tracing::{info, warn};
 
 /// Enable necessary services based on configuration
@@ -28,7 +26,7 @@ pub fn enable_services(
     // and the greetd definition was written into /etc/s6/adminsv earlier in
     // the configure phase.  Rebuild the reference database so the enables
     // below can see every definition (s6-only; no-op otherwise).
-    sync_s6_repository(cmd, &config.system.init, install_root)?;
+    sync_service_repository(cmd, &config.system.init, install_root)?;
 
     for service in services {
         // The init-specific elogind service package is blacklisted in
@@ -120,10 +118,10 @@ fn build_service_packages(services: &[String], init: &InitSystem) -> Vec<String>
         if base == "lightdm" {
             packages.push("lightdm-gtk-greeter".to_string());
         }
-        // No greetd-s6 package exists in Artix repos; we write the service
-        // directory ourselves in configure_greetd().  All other services
-        // (including elogind-s6) have proper Artix packages.
-        if *init == InitSystem::S6 && base == "greetd" {
+        // Some services have no `{base}-{init}` package for a given init —
+        // the init's own module says which, so asking pacman for one that
+        // does not exist cannot fail the whole transaction.
+        if crate::init::module(init).no_service_package.contains(&base) {
             continue;
         }
         // elogind-<init> conflicts with seatd-<init>: the two service packages
@@ -163,7 +161,7 @@ fn install_service_packages(
     }
 
     let install_cmd = format!("pacman -S --noconfirm --needed {}", pkg_list);
-    crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd).map_err(
+    crate::install::packages::pacman_install_chroot(cmd, install_root, &install_cmd).map_err(
         |e| {
             warn!("Failed to install service packages: {}", e);
             e
@@ -191,199 +189,41 @@ pub(crate) fn enable_service(
         return Ok(());
     }
 
-    match init {
-        InitSystem::Runit => enable_runit_service(service, install_root),
-        InitSystem::OpenRC => enable_openrc_service(cmd, service, install_root),
-        InitSystem::S6 => enable_s6_service(cmd, service, install_root),
-        InitSystem::Dinit => enable_dinit_service(service, install_root),
-    }
+    (crate::init::module(init).enable)(cmd, service, install_root)
 }
 
-/// Rebuild the s6-frontend reference database from the service stores.
+/// Rebuild the init's service database after definitions changed on disk.
 ///
-/// `s6 repository sync` must run every time the service definition stores
-/// change (services added, removed, or replaced) — otherwise a following
-/// `s6 set enable` cannot see the new definition and fails or silently
-/// leaves the service out of the set.  Deploytix changes the stores in two
-/// ways: pacman installs `-s6` packages into `/etc/s6/sv`, and custom
-/// definitions (greetd, zram, hhd, plugin_loader, evdevhook2) are written
-/// by hand into `/etc/s6/adminsv`.  Call this after any such change,
-/// before the corresponding `s6 set enable`.
-///
-/// No-op for the other init systems so call sites don't need to guard.
-pub(crate) fn sync_s6_repository(
+/// Deploytix writes service definitions by hand (greetd, zram, hhd,
+/// plugin_loader, evdevhook2) as well as installing packaged ones, and an init
+/// that keeps an index has to be told. Call this after any such change, before
+/// the corresponding enable. A no-op for inits with nothing to index, so call
+/// sites do not need to guard.
+pub(crate) fn sync_service_repository(
     cmd: &CommandRunner,
     init: &InitSystem,
     install_root: &str,
 ) -> Result<()> {
-    if *init != InitSystem::S6 {
-        return Ok(());
+    match crate::init::module(init).sync_repository {
+        Some(sync) => sync(cmd, install_root),
+        None => Ok(()),
     }
-
-    info!("Syncing s6 repository (s6 repository sync)");
-    cmd.run_in_chroot(install_root, "s6 repository sync")?;
-
-    Ok(())
 }
 
-/// Persist pending s6 service changes as the boot database.
+/// Persist staged service changes as the boot database.
 ///
-/// With the s6-frontend tooling, `s6 set enable <service>` stages a change
-/// to the default bundle and `s6 set commit` compiles the set — but the
-/// compiled database still has to be installed as the boot database, or
-/// the installed system boots with whatever the packages shipped instead
-/// of the services staged here.  `s6 live install --init` copies the
-/// compiled database of the current set to the boot location without
-/// touching live s6-rc state (the chroot has none); that is exactly the
-/// first-installation case the `--init` flag exists for.
-///
-/// Call this once after all services have been enabled — the installer
-/// does so in the finalize phase.
-///
-/// No-op for the other init systems, whose enable operations (symlinks,
+/// Call once after all services have been enabled — the installer does so in
+/// the finalize phase. A no-op for inits whose enable operations (symlinks,
 /// `rc-update`) are immediately persistent.
 pub(crate) fn commit_service_database(
     cmd: &CommandRunner,
     init: &InitSystem,
     install_root: &str,
 ) -> Result<()> {
-    if *init != InitSystem::S6 {
-        return Ok(());
+    match crate::init::module(init).commit_database {
+        Some(commit) => commit(cmd, install_root),
+        None => Ok(()),
     }
-
-    info!("Committing s6 service database (s6 set commit)");
-    cmd.run_in_chroot(install_root, "s6 set commit")?;
-
-    info!("Installing committed set as the boot database (s6 live install --init)");
-    cmd.run_in_chroot(install_root, "s6 live install --init")?;
-
-    Ok(())
-}
-
-/// Enable a runit service by creating symlink from runsvdir/default to sv/
-fn enable_runit_service(service: &str, install_root: &str) -> Result<()> {
-    // Path to check if service exists (within install_root)
-    let service_dir_check = format!("{}/etc/runit/sv/{}", install_root, service);
-    // Symlink target - path relative to installed system root (not install_root)
-    let service_dir_target = format!("/etc/runit/sv/{}", service);
-    // Directory where symlinks are created
-    let enabled_dir = format!("{}/etc/runit/runsvdir/default", install_root);
-    let link_path = format!("{}/{}", enabled_dir, service);
-
-    // Check if service exists in installed system
-    if !Path::new(&service_dir_check).exists() {
-        warn!(
-            "Service {} not found at {}, skipping",
-            service, service_dir_check
-        );
-        return Ok(());
-    }
-
-    // Create enabled directory if needed
-    fs::create_dir_all(&enabled_dir)?;
-
-    // Create symlink pointing to path relative to installed system root
-    if !Path::new(&link_path).exists() {
-        std::os::unix::fs::symlink(&service_dir_target, &link_path)?;
-        info!("Created symlink {} -> {}", link_path, service_dir_target);
-    }
-
-    Ok(())
-}
-
-/// Enable an OpenRC service
-fn enable_openrc_service(cmd: &CommandRunner, service: &str, install_root: &str) -> Result<()> {
-    let service_path = format!("{}/etc/init.d/{}", install_root, service);
-
-    if !Path::new(&service_path).exists() {
-        warn!(
-            "Service {} not found at {}, skipping",
-            service, service_path
-        );
-        return Ok(());
-    }
-
-    cmd.run_in_chroot(install_root, &format!("rc-update add {} default", service))?;
-    info!("Enabled OpenRC service {}", service);
-
-    Ok(())
-}
-
-/// Locate the s6 service definition for `service` on the target system.
-///
-/// Definitions from official `-s6` packages live in `/etc/s6/sv`; custom
-/// services written by deploytix live in `/etc/s6/adminsv` (the directory
-/// reserved for admin-defined s6-rc services).  Since the move to
-/// s6-frontend, Artix packages ship service directories under the plain
-/// service name; the legacy in-house `{name}-srv` layout is still checked
-/// as a fallback for transition-era packages.
-///
-/// Returns the name to pass to `s6 set enable`, or `None` when no
-/// definition exists.
-fn resolve_s6_service_name(service: &str, install_root: &str) -> Option<String> {
-    let legacy = format!("{}-srv", service);
-    for name in [service, legacy.as_str()] {
-        for base in ["etc/s6/sv", "etc/s6/adminsv"] {
-            if Path::new(&format!("{}/{}/{}", install_root, base, name)).exists() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Enable an s6 service via the s6-frontend CLI.
-///
-/// Artix manages s6 with upstream's s6-frontend: `s6 set enable <service>`
-/// adds the service to the default bundle, replacing the old in-house
-/// scheme of touching empty files in `/etc/s6/adminsv/default/contents.d/`.
-/// The staged change is made persistent by a single `s6 set commit` in the
-/// finalize phase (see [`commit_service_database`]).
-///
-/// Service definitions come from official `-s6` packages (e.g. `seatd-s6`,
-/// `iwd-s6`) or are written by deploytix into `/etc/s6/adminsv`.  If no
-/// definition is found the corresponding package was not installed and we
-/// skip with a warning.
-fn enable_s6_service(cmd: &CommandRunner, service: &str, install_root: &str) -> Result<()> {
-    let Some(s6_service_name) = resolve_s6_service_name(service, install_root) else {
-        warn!(
-            "Service {} not found under /etc/s6/sv or /etc/s6/adminsv \
-             (is the corresponding -s6 package installed?), skipping",
-            service
-        );
-        return Ok(());
-    };
-
-    cmd.run_in_chroot(install_root, &format!("s6 set enable {}", s6_service_name))?;
-    info!("Enabled s6 service {}", service);
-
-    Ok(())
-}
-
-/// Enable a dinit service
-fn enable_dinit_service(service: &str, install_root: &str) -> Result<()> {
-    let service_file_check = format!("{}/etc/dinit.d/{}", install_root, service);
-    // Symlink target - path relative to installed system root
-    let service_file_target = format!("/etc/dinit.d/{}", service);
-    let enabled_dir = format!("{}/etc/dinit.d/boot.d", install_root);
-    let link_path = format!("{}/{}", enabled_dir, service);
-
-    if !Path::new(&service_file_check).exists() {
-        warn!(
-            "Service {} not found at {}, skipping",
-            service, service_file_check
-        );
-        return Ok(());
-    }
-
-    fs::create_dir_all(&enabled_dir)?;
-
-    if !Path::new(&link_path).exists() {
-        std::os::unix::fs::symlink(&service_file_target, &link_path)?;
-        info!("Created symlink {} -> {}", link_path, service_file_target);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

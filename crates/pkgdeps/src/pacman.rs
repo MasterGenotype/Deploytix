@@ -14,9 +14,9 @@
 //! * `pacman -S --print --print-format '%r/%n %v'` is the transaction
 //!   resolver — equivalent to `pacman -S` minus the actual download.
 
-use super::model::{Dep, InstallPlan, Package, PlannedPackage};
-use super::source::MetadataSource;
-use crate::utils::error::{DeploytixError, Result};
+use crate::error::{Error, Result};
+use crate::model::{Dep, InstallPlan, Package, PlannedPackage};
+use crate::source::MetadataSource;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use tracing::debug;
@@ -76,13 +76,13 @@ impl CmdExec for SystemExec {
         debug!("pkgdeps exec: {} {}", program, args.join(" "));
         let output = Command::new(program).args(args).output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                DeploytixError::CommandNotFound(program.to_string())
+                Error::CommandNotFound(program.to_string())
             } else {
-                DeploytixError::Io(e)
+                Error::Io(e)
             }
         })?;
         if !output.status.success() {
-            return Err(DeploytixError::CommandFailed {
+            return Err(Error::CommandFailed {
                 command: format!("{} {}", program, args.join(" ")),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
@@ -261,7 +261,7 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
         // `pacman -Si` searches sync DBs only.
         let out = match self.pacman(&["-Si", name]) {
             Ok(s) => s,
-            Err(DeploytixError::CommandFailed { stderr, .. })
+            Err(Error::CommandFailed { stderr, .. })
                 if stderr.contains("was not found") || stderr.contains("target not found") =>
             {
                 return Ok(None);
@@ -302,7 +302,7 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
             Ok(out) => Ok(scan_si_for_provider(&out, virtual_name, |pkg| {
                 self.is_installed(pkg).unwrap_or(false)
             })),
-            Err(DeploytixError::CommandFailed { .. }) => Ok(None),
+            Err(Error::CommandFailed { .. }) => Ok(None),
             Err(_) => Ok(None),
         }
     }
@@ -375,7 +375,7 @@ impl<E: CmdExec> MetadataSource for PacmanSource<E> {
             .run("pacman", &["-Qq".to_string(), name.to_string()])
         {
             Ok(_) => Ok(true),
-            Err(DeploytixError::CommandFailed { .. }) => Ok(false),
+            Err(Error::CommandFailed { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -490,7 +490,7 @@ pub fn parse_pacman_si(text: &str) -> Result<Package> {
     let name = folded
         .get("Name")
         .cloned()
-        .ok_or_else(|| DeploytixError::ConfigError("pacman -Si: missing Name".into()))?;
+        .ok_or_else(|| Error::Invalid("pacman -Si: missing Name".into()))?;
     let version = folded.get("Version").cloned().unwrap_or_default();
     let repo = folded.get("Repository").cloned().unwrap_or_default();
 
@@ -654,7 +654,7 @@ mod tests {
     /// Uses `Mutex` rather than `RefCell` because [`CmdExec`] requires
     /// `Sync` (the production source is shared across threads).
     struct CannedExec {
-        responses: Mutex<HashMap<String, std::result::Result<String, DeploytixError>>>,
+        responses: Mutex<HashMap<String, std::result::Result<String, Error>>>,
     }
 
     impl CmdExec for CannedExec {
@@ -671,19 +671,19 @@ mod tests {
             });
             if let Some(k) = lookup {
                 map.remove(&k)
-                    .unwrap_or_else(|| Err(DeploytixError::CommandNotFound(program.into())))
+                    .unwrap_or_else(|| Err(Error::CommandNotFound(program.into())))
             } else {
-                Err(DeploytixError::CommandNotFound(program.into()))
+                Err(Error::CommandNotFound(program.into()))
             }
         }
     }
 
-    fn canned(pairs: &[(&str, std::result::Result<&str, DeploytixError>)]) -> CannedExec {
+    fn canned(pairs: &[(&str, std::result::Result<&str, Error>)]) -> CannedExec {
         let mut map = HashMap::new();
         for (k, v) in pairs {
-            let v: std::result::Result<String, DeploytixError> = match v {
+            let v: std::result::Result<String, Error> = match v {
                 Ok(s) => Ok((*s).to_string()),
-                Err(_e) => Err(DeploytixError::CommandFailed {
+                Err(_e) => Err(Error::CommandFailed {
                     command: k.to_string(),
                     stderr: "error: target not found".into(),
                 }),
@@ -819,18 +819,18 @@ Optional For    : gamma
     /// when a single provider lookup makes several pacman/expac calls.
     /// `Mutex` (not `RefCell`) because [`CmdExec`] is `Send + Sync`.
     struct RecordingExec {
-        responses: Vec<(String, std::result::Result<String, DeploytixError>)>,
+        responses: Vec<(String, std::result::Result<String, Error>)>,
         calls: Mutex<Vec<String>>,
     }
 
     impl RecordingExec {
-        fn new(pairs: Vec<(&str, std::result::Result<&str, DeploytixError>)>) -> Self {
+        fn new(pairs: Vec<(&str, std::result::Result<&str, Error>)>) -> Self {
             let responses = pairs
                 .into_iter()
                 .map(|(k, v)| {
-                    let val: std::result::Result<String, DeploytixError> = match v {
+                    let val: std::result::Result<String, Error> = match v {
                         Ok(s) => Ok(s.to_string()),
-                        Err(_) => Err(DeploytixError::CommandFailed {
+                        Err(_) => Err(Error::CommandFailed {
                             command: k.to_string(),
                             stderr: "error: target not found".into(),
                         }),
@@ -856,7 +856,7 @@ Optional For    : gamma
             // Prefer exact match, then longest prefix match — keeps
             // disambiguation deterministic when one stored key is a
             // prefix of another (e.g. "pacman -Si" vs "pacman -Si sh").
-            let mut best: Option<&(String, std::result::Result<String, DeploytixError>)> = None;
+            let mut best: Option<&(String, std::result::Result<String, Error>)> = None;
             for entry in &self.responses {
                 if entry.0 == key {
                     best = Some(entry);
@@ -874,16 +874,14 @@ Optional For    : gamma
             if let Some((_, val)) = best {
                 return match val {
                     Ok(s) => Ok(s.clone()),
-                    Err(DeploytixError::CommandFailed { command, stderr }) => {
-                        Err(DeploytixError::CommandFailed {
-                            command: command.clone(),
-                            stderr: stderr.clone(),
-                        })
-                    }
-                    Err(_) => Err(DeploytixError::CommandNotFound(program.into())),
+                    Err(Error::CommandFailed { command, stderr }) => Err(Error::CommandFailed {
+                        command: command.clone(),
+                        stderr: stderr.clone(),
+                    }),
+                    Err(_) => Err(Error::CommandNotFound(program.into())),
                 };
             }
-            Err(DeploytixError::CommandNotFound(program.into()))
+            Err(Error::CommandNotFound(program.into()))
         }
     }
 
@@ -899,7 +897,7 @@ Optional For    : gamma
         let exec = RecordingExec::new(vec![
             (
                 "pacman -Si sh",
-                Err(DeploytixError::CommandFailed {
+                Err(Error::CommandFailed {
                     command: "pacman -Si sh".into(),
                     stderr: "error: package 'sh' was not found".into(),
                 }),
@@ -911,7 +909,7 @@ Optional For    : gamma
             // is_installed checks (called by choose_provider).
             (
                 "pacman -Qq bash",
-                Err(DeploytixError::CommandFailed {
+                Err(Error::CommandFailed {
                     command: "pacman -Qq bash".into(),
                     stderr: "error: package 'bash' was not found".into(),
                 }),
@@ -940,7 +938,7 @@ Optional For    : gamma
         let exec = RecordingExec::new(vec![
             (
                 "pacman -Si sh",
-                Err(DeploytixError::CommandFailed {
+                Err(Error::CommandFailed {
                     command: "pacman -Si sh".into(),
                     stderr: "error: package 'sh' was not found".into(),
                 }),
@@ -950,7 +948,7 @@ Optional For    : gamma
             // pick dash even though bash sorts first alphabetically.
             (
                 "pacman -Qq bash",
-                Err(DeploytixError::CommandFailed {
+                Err(Error::CommandFailed {
                     command: "pacman -Qq bash".into(),
                     stderr: "error: package 'bash' was not found".into(),
                 }),
@@ -971,7 +969,7 @@ Optional For    : gamma
         let exec = RecordingExec::new(vec![
             (
                 "pacman -Si libcrypto.so",
-                Err(DeploytixError::CommandFailed {
+                Err(Error::CommandFailed {
                     command: "pacman -Si libcrypto.so".into(),
                     stderr: "error: package 'libcrypto.so' was not found".into(),
                 }),

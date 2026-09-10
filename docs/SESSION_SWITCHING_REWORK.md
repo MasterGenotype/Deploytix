@@ -432,7 +432,7 @@ direction has no equivalent race to avoid.
 ## File Inventory
 
 All session switching resources live in `src/resources/session_switching/` and are
-compiled into the binary via `include_str!` in `src/configure/session_switching.rs`.
+compiled into the binary via `include_str!` in `src/configure/gaming/session_switching.rs`.
 
 | File | Deployed to | Purpose |
 |------|-------------|---------|

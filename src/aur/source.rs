@@ -33,9 +33,11 @@
 //! reason about.
 
 use crate::aur::rpc::{AurRpc, HttpGet, AUR_REPO};
-use crate::pkgdeps::model::{InstallPlan, Package};
-use crate::pkgdeps::source::MetadataSource;
-use crate::utils::error::Result;
+use pkgdeps::model::{InstallPlan, Package};
+use pkgdeps::source::MetadataSource;
+// The metadata-source contract is `pkgdeps`', so its impls speak that crate's
+// Result. Everything else here (the HTTP layer) keeps the installer's.
+use pkgdeps::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -281,10 +283,10 @@ impl<P: MetadataSource, A: MetadataSource> MetadataSource for CompositeSource<P,
 
 /// A composite over the live pacman databases and the real AUR.
 pub fn system_source() -> CompositeSource<
-    crate::pkgdeps::pacman::PacmanSource<crate::pkgdeps::pacman::SystemExec>,
+    pkgdeps::pacman::PacmanSource<pkgdeps::pacman::SystemExec>,
     AurSource<crate::aur::rpc::CurlGet>,
 > {
-    use crate::pkgdeps::pacman::{PacmanConfig, PacmanSource};
+    use pkgdeps::pacman::{PacmanConfig, PacmanSource};
     CompositeSource::new(
         PacmanSource::system(PacmanConfig::default()),
         AurSource::new(crate::aur::rpc::CurlGet),
@@ -295,10 +297,10 @@ pub fn system_source() -> CompositeSource<
 mod tests {
     use super::*;
     use crate::aur::rpc::HttpGet;
-    use crate::pkgdeps::model::Dep;
-    use crate::pkgdeps::resolver::{resolve_closure, ResolveOpts};
-    use crate::pkgdeps::source::MockSource;
-    use crate::utils::error::DeploytixError;
+    use crate::utils::error::{DeploytixError, Result as HttpResult};
+    use pkgdeps::model::Dep;
+    use pkgdeps::resolver::{resolve_closure, ResolveOpts};
+    use pkgdeps::source::MockSource;
     use std::sync::Mutex as StdMutex;
 
     struct Canned {
@@ -322,7 +324,7 @@ mod tests {
     }
 
     impl HttpGet for Canned {
-        fn get(&self, url: &str) -> Result<String> {
+        fn get(&self, url: &str) -> HttpResult<String> {
             self.calls.lock().unwrap().push(url.to_string());
             for (fragment, body) in &self.by_url {
                 if url.contains(fragment.as_str()) {
@@ -335,7 +337,7 @@ mod tests {
 
     struct Offline;
     impl HttpGet for Offline {
-        fn get(&self, _url: &str) -> Result<String> {
+        fn get(&self, _url: &str) -> HttpResult<String> {
             Err(DeploytixError::CommandFailed {
                 command: "curl".into(),
                 stderr: "network unreachable".into(),

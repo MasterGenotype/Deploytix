@@ -1,21 +1,20 @@
-//! System configuration modules
+//! System configuration modules.
+//!
+//! Four unrelated jobs live here, grouped into a directory each: `crypto`
+//! (encryption, keys, verity, SecureBoot), `system` (identity, accounts,
+//! network, services, initramfs), `boot` (GRUB) and `gaming` (the graphical
+//! session and handheld quirks).
+//!
+//! The individual modules are re-exported flat, so call sites elsewhere name
+//! `configure::services` rather than `configure::system::services`. The
+//! grouping is for whoever is reading the folder, not for the callers.
 
-pub mod bootloader;
-pub mod display_manager;
-pub mod encryption;
-pub mod gamescope_update;
-pub mod greetd;
-pub mod grub_btrfs;
-pub mod handheld_quirks;
-pub mod hooks;
-pub mod keyfiles;
-pub mod locale;
-pub mod mkinitcpio;
-pub mod network;
-pub mod packages;
-pub mod secureboot;
-pub mod services;
-pub mod session_switching;
-pub mod swap;
-pub mod users;
-pub mod verity;
+pub mod boot;
+pub mod crypto;
+pub mod gaming;
+pub mod system;
+
+pub use boot::{bootloader, grub_btrfs};
+pub use crypto::{encryption, keyfiles, secureboot, verity};
+pub use gaming::{display_manager, gamescope_update, greetd, handheld_quirks, session_switching};
+pub use system::{hooks, locale, mkinitcpio, network, services, swap, users};

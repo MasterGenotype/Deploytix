@@ -1,39 +1,31 @@
-//! GNOME desktop environment installer
+//! GNOME.
 
-use crate::config::DeploymentConfig;
-use crate::utils::command::CommandRunner;
-use crate::utils::error::Result;
-use std::fs;
-use tracing::info;
+use super::{DesktopModule, DesktopSession};
+use crate::config::DesktopEnvironment;
 
 /// GNOME packages (display manager handled centrally via desktop.display_manager)
 const GNOME_PACKAGES: &[&str] = &["gnome", "gnome-extra"];
 
-/// Install GNOME desktop environment
-pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
-    info!("Installing GNOME desktop environment");
-
-    if cmd.is_dry_run() {
-        println!(
-            "  [dry-run] Would install GNOME packages: {:?}",
-            GNOME_PACKAGES
-        );
-        return Ok(());
-    }
-
-    // Install packages
-    let pkg_list = GNOME_PACKAGES.join(" ");
-    let install_cmd = format!("pacman -S --noconfirm {}", pkg_list);
-    crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
-
-    // Create .xinitrc for startx fallback
-    let username = &config.user.name;
-    let xinitrc_path = format!("{}/home/{}/.xinitrc", install_root, username);
-    fs::write(&xinitrc_path, "exec gnome-session\n")?;
-
-    info!("GNOME installation complete");
-    Ok(())
-}
+pub const MODULE: DesktopModule = DesktopModule {
+    id: DesktopEnvironment::Gnome,
+    label: "GNOME",
+    packages: GNOME_PACKAGES,
+    service_packages: &[],
+    xinitrc_command: Some("gnome-session"),
+    session: Some(DesktopSession {
+        command: "gnome-session",
+        fallbacks: &["startplasma-wayland", "startxfce4"],
+        procs: &[
+            "x:gnome-session",
+            "x:gnome-session-binary",
+            "x:gnome-shell",
+            "x:gsd-media-keys",
+            "f:xdg-desktop-portal-gnome",
+        ],
+    }),
+    sddm_conf: None,
+    desktop_file: desktop_file_content,
+};
 
 /// Generate GNOME-specific desktop file content
 pub fn desktop_file_content(bindir: &str) -> String {

@@ -659,9 +659,18 @@ _cleanup_dirty_pkgbuilds() {
         "${GAMESCOPE_PKG_DIR}/PKGBUILD"
     do
         bak="${pb}.iso-bak"
-        [[ -f "$bak" ]] && mv "$bak" "$pb"
+        if [[ -f "$bak" ]]; then
+            mv "$bak" "$pb"
+        fi
     done
-    [[ -d "${PKG_STAGE_DIR}" ]] && rm -rf "${PKG_STAGE_DIR}"
+    # Must not end on a failed `[[ -d ]] && rm -rf` list: the status of the last
+    # command in an EXIT handler becomes the script's exit status, so a missing
+    # staging dir would report failure on the two paths where it is *expected*
+    # to be missing — every dry run, and every successful build, where
+    # cleanup_built_packages has already removed it. An `if` yields 0 instead.
+    if [[ -d "${PKG_STAGE_DIR}" ]]; then
+        rm -rf "${PKG_STAGE_DIR}"
+    fi
 }
 
 # ── Step B: Build packages ────────────────────────────────────────────────────

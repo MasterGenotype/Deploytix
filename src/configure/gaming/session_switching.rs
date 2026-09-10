@@ -10,32 +10,35 @@ use tracing::info;
 
 // Embedded script resources (compiled into the binary)
 const SESSION_MANAGER: &str =
-    include_str!("../resources/session_switching/deploytix-session-manager.sh");
-const SESSION_SELECT: &str = include_str!("../resources/session_switching/session-select.sh");
+    include_str!("../../resources/session_switching/deploytix-session-manager.sh");
+const SESSION_SELECT: &str = include_str!("../../resources/session_switching/session-select.sh");
 const RETURN_TO_GAMEMODE: &str =
-    include_str!("../resources/session_switching/return-to-gamemode.sh");
+    include_str!("../../resources/session_switching/return-to-gamemode.sh");
 const STEAM_GAMESCOPE_SESSION: &str =
-    include_str!("../resources/session_switching/steam-gamescope-session.sh");
+    include_str!("../../resources/session_switching/steam-gamescope-session.sh");
 const DESKTOP_SESSION_TEMPLATE: &str =
-    include_str!("../resources/session_switching/desktop-session.sh");
+    include_str!("../../resources/session_switching/desktop-session.sh");
 const GAMESCOPE_SESSION_DESKTOP: &str =
-    include_str!("../resources/session_switching/gamescope-session.desktop");
+    include_str!("../../resources/session_switching/gamescope-session.desktop");
 const STEAMOS_SELECT_BRANCH: &str =
-    include_str!("../resources/session_switching/steamos-select-branch.sh");
-const STEAMOS_UPDATE: &str = include_str!("../resources/session_switching/steamos-update.sh");
+    include_str!("../../resources/session_switching/steamos-select-branch.sh");
+const STEAMOS_UPDATE: &str = include_str!("../../resources/session_switching/steamos-update.sh");
 const JUPITER_BIOSUPDATE: &str =
-    include_str!("../resources/session_switching/jupiter-biosupdate.sh");
+    include_str!("../../resources/session_switching/jupiter-biosupdate.sh");
 const NETWORKMANAGER_POLKIT_RULES: &str =
-    include_str!("../resources/session_switching/50-deploytix-networkmanager.rules");
-const GREETD_IPC: &str = include_str!("../resources/session_switching/greetd-ipc.py");
+    include_str!("../../resources/session_switching/50-deploytix-networkmanager.rules");
+const GREETD_IPC: &str = include_str!("../../resources/session_switching/greetd-ipc.py");
 const RESTART_GREETD: &str =
-    include_str!("../resources/session_switching/deploytix-restart-greetd.sh");
-const STEAM_LOGIN_CHECK: &str = include_str!("../resources/session_switching/steam-login-check.sh");
-const STEAM_FIRST_LOGIN: &str = include_str!("../resources/session_switching/steam-first-login.sh");
+    include_str!("../../resources/session_switching/deploytix-restart-greetd.sh");
+const STEAM_LOGIN_CHECK: &str =
+    include_str!("../../resources/session_switching/steam-login-check.sh");
+const STEAM_FIRST_LOGIN: &str =
+    include_str!("../../resources/session_switching/steam-first-login.sh");
 const STEAM_FIRST_LOGIN_DESKTOP: &str =
-    include_str!("../resources/session_switching/deploytix-steam-first-login.desktop");
-const GREETD_PAM: &str = include_str!("../resources/session_switching/greetd.pam");
-const GREETD_GREETER_PAM: &str = include_str!("../resources/session_switching/greetd-greeter.pam");
+    include_str!("../../resources/session_switching/deploytix-steam-first-login.desktop");
+const GREETD_PAM: &str = include_str!("../../resources/session_switching/greetd.pam");
+const GREETD_GREETER_PAM: &str =
+    include_str!("../../resources/session_switching/greetd-greeter.pam");
 
 /// File to deploy with its destination path (relative to install root) and permissions
 struct DeployFile {
@@ -147,18 +150,6 @@ const DEPLOY_FILES: &[DeployFile] = &[
     },
 ];
 
-/// Per-desktop-environment facts needed to render `desktop-session`.
-struct DesktopSpec {
-    /// Primary session command installed for this desktop environment.
-    command: &'static str,
-    /// Alternates tried, in order, when `command` is not on PATH — a system
-    /// whose desktop was swapped after install still gets a usable session.
-    fallbacks: &'static [&'static str],
-    /// Teardown targets as `<x|f>:<pattern>` (`x` = exact process name,
-    /// `f` = full command line), matching the template's `_de_kill`.
-    procs: &'static [&'static str],
-}
-
 /// Processes torn down regardless of desktop environment.
 const COMMON_TEARDOWN: &[&str] = &[
     "f:Xwayland :",
@@ -167,60 +158,13 @@ const COMMON_TEARDOWN: &[&str] = &[
     "x:wireplumber",
 ];
 
-/// Resolve the desktop-session facts for a desktop environment.
-///
-/// `DesktopEnvironment::None` has no session to wrap and returns `None`;
-/// session switching already requires a desktop environment (enforced in
-/// `DeploymentConfig::validate`), so that case simply deploys nothing.
-fn desktop_spec(de: &DesktopEnvironment) -> Option<DesktopSpec> {
-    match de {
-        DesktopEnvironment::Kde => Some(DesktopSpec {
-            command: "startplasma-wayland",
-            fallbacks: &["gnome-session", "startxfce4"],
-            procs: &[
-                "x:startplasma-wayland",
-                "x:plasma_session",
-                "x:kwin_wayland",
-                "x:kwin_wayland_wrapper",
-                "x:kded6",
-                "f:kactivitymanagerd",
-                "f:xdg-desktop-portal-kde",
-            ],
-        }),
-        DesktopEnvironment::Gnome => Some(DesktopSpec {
-            command: "gnome-session",
-            fallbacks: &["startplasma-wayland", "startxfce4"],
-            procs: &[
-                "x:gnome-session",
-                "x:gnome-session-binary",
-                "x:gnome-shell",
-                "x:gsd-media-keys",
-                "f:xdg-desktop-portal-gnome",
-            ],
-        }),
-        DesktopEnvironment::Xfce => Some(DesktopSpec {
-            command: "startxfce4",
-            fallbacks: &["startplasma-wayland", "gnome-session"],
-            procs: &[
-                "x:startxfce4",
-                "x:xfce4-session",
-                "x:xfwm4",
-                "x:xfdesktop",
-                "x:xfce4-panel",
-                "f:xdg-desktop-portal-xfce",
-            ],
-        }),
-        DesktopEnvironment::None => None,
-    }
-}
-
 /// Render `/usr/local/bin/desktop-session` for the configured desktop.
 ///
 /// Pure and deterministic: the same [`DesktopEnvironment`] always yields the
 /// same bytes, so re-running the installer over an existing system rewrites
 /// an identical file instead of accumulating drift.
 fn render_desktop_session(de: &DesktopEnvironment) -> Option<String> {
-    let spec = desktop_spec(de)?;
+    let spec = crate::desktop::module(de).session.as_ref()?;
 
     // Unquoted in the template's `for` list, so emit shell-quoted words.
     let fallbacks = spec
@@ -293,7 +237,7 @@ const GENERATED_FILES: &[GeneratedFile] = &[
 /// This avoids the elogind seat-revocation issue with `Class=greeter`.
 ///
 /// The gamescope compositor itself is built from the Bazzite-maintained
-/// source in `configure::packages::install_gaming_packages`.
+/// source in `install::packages::install_gaming_packages`.
 pub fn setup_session_switching(
     _cmd: &CommandRunner,
     config: &DeploymentConfig,

@@ -1,5 +1,6 @@
 //! Main installation orchestrator
 
+use crate::cleanup::guards::{Resource, ResourceStack};
 use crate::config::{DeploymentConfig, Filesystem, SwapType};
 use crate::configure;
 use crate::configure::encryption::{
@@ -25,6 +26,7 @@ use crate::install::fstab::{
     append_swap_file_entry, generate_fstab_lvm_ab, generate_fstab_lvm_thin,
     generate_fstab_multi_volume, LvmAbFstabParams, LvmThinFstabParams, MultiVolumeFstabParams,
 };
+use crate::install::packages;
 use crate::install::{
     generate_fstab, mount_boot_btrfs_subvolume, mount_partitions, mount_partitions_zfs,
     run_basestrap, unmount_all,
@@ -97,6 +99,9 @@ pub struct Installer {
     /// Set when this run is a recovery install adopting an existing /home.
     /// Resolved in `prepare()`, before anything is written to the disk.
     recovery: Option<RecoveryPlan>,
+    /// Resources this run has opened. Released on drop if the install never
+    /// got as far as releasing them itself — see `crate::cleanup::guards`.
+    guards: ResourceStack,
 }
 
 /// What a recovery install resolved about the existing disk, established in
@@ -123,6 +128,89 @@ impl RecoveryPlan {
     }
 }
 
+/// Which storage backend an install is using.
+///
+/// Resolved once per run from the config and consulted by every step that
+/// cares, rather than re-deriving "which backend" separately at setup,
+/// format, mount, fstab and crypttab time.  The variants are ordered by the
+/// precedence the config implies: the immutable A/B backend also sets
+/// `use_lvm_thin`, and multi-volume LUKS only applies when no volume manager
+/// is in play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Storage {
+    /// LVM immutable A/B slots with dm-verity roots.
+    LvmAb,
+    /// LVM thin provisioning.
+    LvmThin,
+    /// A LUKS container per volume, on plain partitions.
+    MultiLuks,
+    /// ZFS pools and datasets.
+    Zfs,
+    /// Plain partitions: no encryption, no volume manager.
+    Plain,
+}
+
+/// What a pipeline step does.
+///
+/// A plain tag rather than a boxed closure: nearly every step needs
+/// `&mut self`, which a `Vec<Box<dyn FnMut(&mut Installer)>>` cannot hold
+/// without a fight with the borrow checker.  Dispatch happens in
+/// `run_step()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    Partition,
+    StorageSetup,
+    StorageFormat,
+    StorageMount,
+    BaseSystem,
+    LocalRepo,
+    TkgKernel,
+    Fstab,
+    Crypttab,
+    Swap,
+    ConfigureSystem,
+    CustomHooks,
+    SecureBoot,
+    GpuDrivers,
+    Desktop,
+    Wine,
+    Gaming,
+    GamescopeUpdate,
+    SessionSwitching,
+    Yay,
+    ZenBrowser,
+    IwdFrontend,
+    BtrfsTools,
+    GrubBtrfs,
+    ImmutableLockdown,
+    Autostart,
+    SysctlGaming,
+    SysctlNetwork,
+    HandheldQuirks,
+    Hhd,
+    DeckyLoader,
+    Evdevhook2,
+    Extras,
+    Finalize,
+}
+
+/// One entry in the install pipeline: what to run, what to tell the user
+/// while it runs, and what fraction of the progress bar it is worth relative
+/// to the other steps in the same run.
+struct Step {
+    kind: StepKind,
+    status: &'static str,
+    weight: u32,
+}
+
+fn step(kind: StepKind, status: &'static str, weight: u32) -> Step {
+    Step {
+        kind,
+        status,
+        weight,
+    }
+}
+
 impl Installer {
     pub fn new(config: DeploymentConfig, dry_run: bool) -> Self {
         Self {
@@ -138,6 +226,7 @@ impl Installer {
             skip_confirm: false,
             progress_cb: None,
             recovery: None,
+            guards: ResourceStack::new(dry_run),
         }
     }
 
@@ -236,313 +325,490 @@ impl Installer {
         result
     }
 
-    /// Run all installation phases after preparation.
-    /// Separated from `run()` so that `emergency_cleanup()` can be called on failure.
+    /// Which storage backend this run is using.
     ///
-    /// The pipeline is feature-driven rather than layout-driven:
-    /// each step checks its own feature flag and is a no-op if disabled.
-    fn run_phases(&mut self) -> Result<()> {
-        let uses_lvm_thin = self.config.disk.use_lvm_thin;
-        let uses_encryption = self.config.disk.encryption;
-        let uses_multi_luks = uses_encryption && !uses_lvm_thin;
-
-        // Phase 2: Partition disk
-        self.report_progress(0.10, "Partitioning disk...");
-        self.partition_disk()?;
-
-        let uses_immutable_ab = self.config.immutable_lvm_ab();
-
-        // Phase 2.5: Encryption layer (if enabled)
-        if uses_immutable_ab {
-            self.report_progress(0.15, "Setting up LVM immutable A/B provisioning...");
-            self.setup_lvm_thin()?; // creates PV/VG/pool/LUKS/boot; A/B volume set
-            self.report_progress(0.22, "Formatting A/B slot volumes...");
-            self.format_lvm_ab_volumes()?;
-            self.report_progress(0.28, "Mounting slot A for installation...");
-            self.mount_lvm_ab_volumes()?;
-        } else if uses_lvm_thin {
-            self.report_progress(0.15, "Setting up LVM thin provisioning...");
-            self.setup_lvm_thin()?;
-            self.report_progress(0.22, "Formatting LVM volumes...");
-            self.format_lvm_volumes()?;
-            self.report_progress(0.28, "Mounting LVM volumes...");
-            self.mount_lvm_volumes()?;
-        } else if uses_multi_luks {
-            self.report_progress(0.15, "Setting up encryption...");
-            self.setup_multi_volume_encryption()?;
-            self.report_progress(0.22, "Formatting encrypted partitions...");
-            self.format_multi_volume_partitions()?;
-            self.report_progress(0.28, "Mounting encrypted partitions...");
-            self.mount_multi_volume_partitions()?;
-        } else if self.config.disk.filesystem == crate::config::Filesystem::Zfs {
-            // ZFS: format non-ZFS partitions (EFI, swap, boot if non-ZFS),
-            // then create pools/datasets and mount everything.
-            self.report_progress(0.20, "Formatting partitions and creating ZFS pools...");
-            self.format_partitions()?;
-            self.report_progress(0.25, "Creating ZFS datasets and mounting...");
-            self.mount_partitions_zfs()?;
+    /// The branch order matters and mirrors what the config means: the
+    /// immutable A/B backend also sets `use_lvm_thin`, so it has to be asked
+    /// about first, and multi-volume LUKS only applies when no volume
+    /// manager is in play.
+    fn storage(&self) -> Storage {
+        if self.config.immutable_lvm_ab() {
+            Storage::LvmAb
+        } else if self.config.disk.use_lvm_thin {
+            Storage::LvmThin
+        } else if self.config.disk.encryption {
+            Storage::MultiLuks
+        } else if self.config.disk.filesystem == Filesystem::Zfs {
+            Storage::Zfs
         } else {
-            self.report_progress(0.20, "Formatting partitions...");
-            self.format_partitions()?;
-            self.report_progress(0.28, "Mounting partitions...");
-            self.mount_partitions()?;
+            Storage::Plain
+        }
+    }
+
+    /// The steps this config calls for, in the order they must run.
+    ///
+    /// This is the pipeline: every conditional in the install is a decision
+    /// about whether a step is in this list, and the progress bar is the sum
+    /// of the weights of the steps that made it in.  Weights are relative to
+    /// each other, not percentages — a run that skips the gaming stack
+    /// simply has a smaller total to divide by.
+    fn pipeline(&self) -> Vec<Step> {
+        let cfg = &self.config;
+        let storage = self.storage();
+        let mut steps = Vec::new();
+
+        steps.push(step(StepKind::Partition, "Partitioning disk...", 5));
+
+        // The setup step creates the volume manager or the LUKS containers.
+        // Plain and ZFS layouts have nothing to set up: they go straight
+        // from partitioning to formatting.
+        let setup_status = match storage {
+            Storage::LvmAb => Some("Setting up LVM immutable A/B provisioning..."),
+            Storage::LvmThin => Some("Setting up LVM thin provisioning..."),
+            Storage::MultiLuks => Some("Setting up encryption..."),
+            Storage::Zfs | Storage::Plain => None,
+        };
+        if let Some(status) = setup_status {
+            steps.push(step(StepKind::StorageSetup, status, 7));
         }
 
-        // Phase 3: Base system
-        self.report_progress(0.30, "Installing base system (this may take a while)...");
-        self.install_base_system()?;
+        steps.push(step(
+            StepKind::StorageFormat,
+            match storage {
+                Storage::LvmAb => "Formatting A/B slot volumes...",
+                Storage::LvmThin => "Formatting LVM volumes...",
+                Storage::MultiLuks => "Formatting encrypted partitions...",
+                Storage::Zfs => "Formatting partitions and creating ZFS pools...",
+                Storage::Plain => "Formatting partitions...",
+            },
+            6,
+        ));
+        steps.push(step(
+            StepKind::StorageMount,
+            match storage {
+                Storage::LvmAb => "Mounting slot A for installation...",
+                Storage::LvmThin => "Mounting LVM volumes...",
+                Storage::MultiLuks => "Mounting encrypted partitions...",
+                Storage::Zfs => "Creating ZFS datasets and mounting...",
+                Storage::Plain => "Mounting partitions...",
+            },
+            2,
+        ));
 
-        // Phase 3.2: linux-tkg kernel, if it is standing in for linux-zen.
-        //
-        // The position is load-bearing, and is why this is not a phase-5.95
-        // extra like Warp Terminal.  It has to land before configure_system()
-        // at 0.65, which is where `mkinitcpio -P` picks up the kernel's own
-        // preset and, more importantly, where grub-mkconfig runs for the only
-        // time: finalize() re-runs mkinitcpio but never grub-mkconfig, and the
-        // pacman hook that would otherwise catch a late kernel
-        // (create_grub_reinstall_hook) is only installed on encrypted or
-        // LVM-thin layouts.  Installed any later on a plain layout, the kernel
-        // would get an initramfs and no boot entry.
+        steps.push(step(
+            StepKind::BaseSystem,
+            "Installing base system (this may take a while)...",
+            22,
+        ));
+
+        // Hand the local [deploytix] repo to the system being installed, so it
+        // can install another machine later. Placed here because basestrap has
+        // just created the target's pacman.conf and every in-chroot pacman
+        // invocation from this point on should be able to see the repo.
+        steps.push(step(
+            StepKind::LocalRepo,
+            "Installing the local package repository...",
+            1,
+        ));
+
+        // The linux-tkg kernel's position is load-bearing, and is why this is
+        // not a post-install extra like Warp Terminal.  It has to land before
+        // ConfigureSystem, which is where `mkinitcpio -P` picks up the
+        // kernel's own preset and, more importantly, where grub-mkconfig runs
+        // for the only time: Finalize re-runs mkinitcpio but never
+        // grub-mkconfig, and the pacman hook that would otherwise catch a
+        // late kernel (create_grub_reinstall_hook) is only installed on
+        // encrypted or LVM-thin layouts.  Installed any later on a plain
+        // layout, the kernel would get an initramfs and no boot entry.
         //
         // The package's own post-install hook runs mkinitcpio here against a
         // mkinitcpio.conf deploytix has not customised yet; that image is
-        // discarded by the `mkinitcpio -P` runs at 0.65 and in finalize().
-        if self.config.packages.install_tkg_kernel {
-            self.report_progress(0.52, "Installing linux-tkg kernel...");
-            configure::packages::install_tkg_kernel(&self.cmd, &self.config, INSTALL_ROOT)?;
+        // discarded by the `mkinitcpio -P` runs in ConfigureSystem and
+        // Finalize.
+        if cfg.packages.install_tkg_kernel {
+            steps.push(step(
+                StepKind::TkgKernel,
+                "Installing linux-tkg kernel...",
+                3,
+            ));
         }
 
-        // Phase 3.5: Generate fstab
-        self.report_progress(0.55, "Generating fstab...");
-        if uses_immutable_ab {
-            self.generate_fstab_lvm_ab()?;
-        } else if uses_lvm_thin {
-            self.generate_fstab_lvm_thin()?;
-        } else if uses_multi_luks {
-            self.generate_fstab_multi_volume()?;
-        } else {
-            self.generate_fstab()?;
+        steps.push(step(StepKind::Fstab, "Generating fstab...", 5));
+
+        let crypttab_status = match storage {
+            Storage::MultiLuks => Some("Setting up keyfiles and crypttab..."),
+            Storage::LvmThin | Storage::LvmAb => Some("Setting up LVM crypttab..."),
+            Storage::Zfs | Storage::Plain => None,
+        };
+        if let Some(status) = crypttab_status {
+            steps.push(step(StepKind::Crypttab, status, 2));
         }
 
-        // The swap file is created for every layout that asks for one (phase
-        // 3.7 runs `configure_swap` on any non-partition swap type), so its
-        // fstab entry belongs to every layout too. It used to be appended only
-        // in the plain branch above, which meant an encrypted, LVM-thin or
-        // immutable A/B install built and `mkswap`ed a multi-gigabyte file that
-        // nothing ever swapped on -- and, with hibernation enabled, wrote a
-        // `resume=`/`resume_offset=` pointing into it.
-        if self.config.disk.swap_type == SwapType::FileZram {
-            append_swap_file_entry(&self.config, INSTALL_ROOT)?;
+        if cfg.disk.swap_type != SwapType::Partition {
+            steps.push(step(StepKind::Swap, "Configuring swap...", 3));
         }
 
-        // Phase 3.6: Crypttab and keyfiles (for encrypted systems)
-        if uses_multi_luks {
-            self.report_progress(0.60, "Setting up keyfiles and crypttab...");
-            self.setup_keyfiles()?;
-            self.generate_crypttab_multi_volume()?;
-        } else if uses_lvm_thin {
-            self.report_progress(0.60, "Setting up LVM crypttab...");
-            if self.config.disk.boot_encryption {
-                self.setup_lvm_thin_keyfiles()?;
+        steps.push(step(StepKind::ConfigureSystem, "Configuring system...", 10));
+
+        // Encrypted layouts need their unlock hooks; the LVM immutable A/B
+        // backend needs the verity-ab hook even when it is unencrypted.
+        if cfg.disk.encryption || storage == Storage::LvmAb {
+            steps.push(step(StepKind::CustomHooks, "Installing custom hooks...", 3));
+        }
+
+        if cfg.system.secureboot {
+            steps.push(step(StepKind::SecureBoot, "Setting up SecureBoot...", 1));
+        }
+
+        // GPU drivers go in before the desktop environment.
+        if !cfg.packages.gpu_drivers.is_empty() {
+            steps.push(step(StepKind::GpuDrivers, "Installing GPU drivers...", 1));
+        }
+
+        steps.push(step(
+            StepKind::Desktop,
+            "Installing desktop environment...",
+            3,
+        ));
+
+        if cfg.packages.install_wine {
+            steps.push(step(
+                StepKind::Wine,
+                "Installing Wine compatibility packages...",
+                2,
+            ));
+        }
+
+        if cfg.packages.install_gaming {
+            steps.push(step(StepKind::Gaming, "Installing gaming packages...", 2));
+            steps.push(step(
+                StepKind::GamescopeUpdate,
+                "Installing gamescope update utility...",
+                1,
+            ));
+        }
+
+        if cfg.packages.install_session_switching {
+            steps.push(step(
+                StepKind::SessionSwitching,
+                "Installing session switching scripts...",
+                1,
+            ));
+        }
+
+        // yay needs the user account, so it follows the gaming stack; the two
+        // AUR packages below need yay.
+        if cfg.packages.install_yay {
+            steps.push(step(
+                StepKind::Yay,
+                "Building and installing yay AUR helper...",
+                1,
+            ));
+
+            if cfg.packages.install_zen_browser {
+                steps.push(step(
+                    StepKind::ZenBrowser,
+                    "Installing Zen Browser (AUR)...",
+                    1,
+                ));
             }
-            self.generate_crypttab_lvm_thin()?;
+
+            if cfg.network.backend == crate::config::NetworkBackend::Iwd {
+                steps.push(step(
+                    StepKind::IwdFrontend,
+                    "Installing iwd GUI frontend (AUR)...",
+                    1,
+                ));
+            }
         }
 
-        // Phase 3.7: Swap configuration (ZRAM / swap file)
-        if self.config.disk.swap_type != SwapType::Partition {
-            self.report_progress(0.62, "Configuring swap...");
-            self.configure_swap()?;
-        }
-
-        // Phase 4: System configuration
-        self.report_progress(0.65, "Configuring system...");
-        self.configure_system()?;
-
-        // Phase 4.5: Custom hooks (encrypted systems, and the LVM immutable A/B
-        // backend which needs the verity-ab hook even when unencrypted)
-        if uses_encryption || uses_immutable_ab {
-            self.report_progress(0.75, "Installing custom hooks...");
-            self.install_custom_hooks()?;
-        }
-
-        // Phase 4.6: SecureBoot setup (if enabled)
-        if self.config.system.secureboot {
-            self.report_progress(0.78, "Setting up SecureBoot...");
-            self.setup_secureboot()?;
-        }
-
-        // Phase 4.7: GPU drivers (before desktop environment)
-        if !self.config.packages.gpu_drivers.is_empty() {
-            self.report_progress(0.79, "Installing GPU drivers...");
-            self.install_gpu_drivers()?;
-        }
-
-        // Phase 5: Desktop environment (if selected)
-        self.report_progress(0.80, "Installing desktop environment...");
-        self.install_desktop()?;
-
-        // Phase 5.1: Wine packages (after desktop, before gaming)
-        if self.config.packages.install_wine {
-            self.report_progress(0.83, "Installing Wine compatibility packages...");
-            self.install_wine_packages()?;
-        }
-
-        // Phase 5.2: Gaming packages (after wine)
-        if self.config.packages.install_gaming {
-            self.report_progress(0.85, "Installing gaming packages...");
-            self.install_gaming_packages()?;
-        }
-
-        // Phase 5.22: Gamescope update utility (after gaming packages)
-        if self.config.packages.install_gaming {
-            self.report_progress(0.855, "Installing gamescope update utility...");
-            self.install_gamescope_update()?;
-        }
-
-        // Phase 5.25: Session switching scripts (after gaming packages)
-        if self.config.packages.install_session_switching {
-            self.report_progress(0.86, "Installing session switching scripts...");
-            self.install_session_switching()?;
-        }
-
-        // Phase 5.3: yay AUR helper (after gaming, needs user account)
-        if self.config.packages.install_yay {
-            self.report_progress(0.87, "Building and installing yay AUR helper...");
-            self.install_yay()?;
-        }
-
-        // Phase 5.35: Zen Browser via yay (optional; after yay)
-        if self.config.packages.install_zen_browser && self.config.packages.install_yay {
-            self.report_progress(0.875, "Installing Zen Browser (AUR)...");
-            self.install_zen_browser()?;
-        }
-
-        // Phase 5.37: iwd GUI frontend via yay (after yay; only when iwd backend selected)
-        if self.config.network.backend == crate::config::NetworkBackend::Iwd
-            && self.config.packages.install_yay
-        {
-            self.report_progress(0.877, "Installing iwd GUI frontend (AUR)...");
-            self.install_iwd_frontend()?;
-        }
-
-        // Phase 5.4: Btrfs snapshot tools via yay (after yay, requires btrfs)
-        if self.config.packages.install_btrfs_tools {
-            self.report_progress(
-                0.88,
+        if cfg.packages.install_btrfs_tools {
+            steps.push(step(
+                StepKind::BtrfsTools,
                 "Installing btrfs snapshot tools (snapper, btrfs-assistant)...",
-            );
-            self.install_btrfs_tools()?;
+                1,
+            ));
         }
 
-        // Phase 5.45: grub-btrfs — snapshot boot menu entries + snapper root
-        // config. Must run after the bootloader phase (the 91-patch hook is
+        // grub-btrfs must run after the bootloader step (the 91-patch hook is
         // then in place to patch the generator during this pacman
-        // transaction) and before finalize's `mkinitcpio -P` (which needs
-        // the package's grub-btrfs-overlayfs hook installed).
-        if self.config.packages.install_grub_btrfs {
-            self.report_progress(0.885, "Installing grub-btrfs (snapshot boot support)...");
-            self.install_grub_btrfs()?;
+        // transaction) and before Finalize's `mkinitcpio -P` (which needs the
+        // package's grub-btrfs-overlayfs hook installed).
+        if cfg.packages.install_grub_btrfs {
+            steps.push(step(
+                StepKind::GrubBtrfs,
+                "Installing grub-btrfs (snapshot boot support)...",
+                1,
+            ));
         }
 
-        // Phase 5.45: Immutable root — friendly interactive nudge toward
-        // `deploytix update` (enforcement is the read-only /usr mount; a pacman
-        // hook would break basestrap/pacman -r image builds and deploys).
-        if self.config.packages.immutable_root {
-            self.report_progress(0.888, "Installing immutable-root shell nudge...");
-            crate::immutable::lockdown::install(&self.cmd, INSTALL_ROOT)?;
-            // Boot-wipe policy for disk-backed /tmp (@tmp).
-            crate::immutable::tmp::install_tmpfiles(&self.cmd, INSTALL_ROOT)?;
+        // Immutable root — a friendly interactive nudge toward
+        // `deploytix update`.  Enforcement is the read-only /usr mount; a
+        // pacman hook would break basestrap/pacman -r image builds and
+        // deploys.
+        if cfg.packages.immutable_root {
+            steps.push(step(
+                StepKind::ImmutableLockdown,
+                "Installing immutable-root shell nudge...",
+                1,
+            ));
         }
 
-        // Phase 5.5: User autostart entries (unconditional, after user creation)
-        self.report_progress(0.89, "Installing user autostart entries...");
-        self.install_autostart_entries()?;
+        // Unconditional, and after user creation.
+        steps.push(step(
+            StepKind::Autostart,
+            "Installing user autostart entries...",
+            1,
+        ));
 
-        // Phase 5.6: Gaming sysctl performance tweaks
-        if self.config.packages.sysctl_gaming_tweaks {
-            self.report_progress(0.895, "Applying gaming sysctl performance settings...");
-            self.install_sysctl_gaming()?;
+        if cfg.packages.sysctl_gaming_tweaks {
+            steps.push(step(
+                StepKind::SysctlGaming,
+                "Applying gaming sysctl performance settings...",
+                1,
+            ));
         }
 
-        // Phase 5.65: Network performance sysctl tweaks
-        if self.config.packages.sysctl_network_performance {
-            self.report_progress(0.898, "Applying network performance sysctl settings...");
-            self.install_sysctl_network_performance()?;
+        if cfg.packages.sysctl_network_performance {
+            steps.push(step(
+                StepKind::SysctlNetwork,
+                "Applying network performance sysctl settings...",
+                1,
+            ));
         }
 
-        // Phase 5.68: Handheld controller quirks.
-        //
         // Ahead of HHD deliberately: the rules govern how the controllers
         // bind and whether their hidraw nodes are reachable, which is what
         // HHD builds its emulated pad on top of.
-        self.report_progress(0.905, "Applying handheld controller quirks...");
-        configure::handheld_quirks::install(&self.cmd, &self.config, INSTALL_ROOT)?;
+        steps.push(step(
+            StepKind::HandheldQuirks,
+            "Applying handheld controller quirks...",
+            1,
+        ));
 
-        // Phase 5.7: Handheld Daemon (HHD)
-        if self.config.packages.install_hhd {
-            self.report_progress(0.910, "Installing Handheld Daemon (HHD)...");
-            self.install_hhd()?;
-            // install_hhd() writes the service definition (for s6, into
-            // /etc/s6/adminsv) — sync the s6 repository so the enable can
-            // see it (no-op for other init systems).
-            configure::services::sync_s6_repository(
-                &self.cmd,
-                &self.config.system.init,
-                INSTALL_ROOT,
-            )?;
-            configure::services::enable_service(
-                &self.cmd,
-                &self.config.system.init,
-                "hhd",
-                INSTALL_ROOT,
-            )?;
+        if cfg.packages.install_hhd {
+            steps.push(step(
+                StepKind::Hhd,
+                "Installing Handheld Daemon (HHD)...",
+                1,
+            ));
         }
 
-        // Phase 5.8: Decky Loader
-        if self.config.packages.install_decky_loader {
-            self.report_progress(0.925, "Installing Decky Loader...");
-            self.install_decky_loader()?;
-            // Fresh plugin_loader definition — sync before enabling (s6-only).
-            configure::services::sync_s6_repository(
-                &self.cmd,
-                &self.config.system.init,
-                INSTALL_ROOT,
-            )?;
-            configure::services::enable_service(
-                &self.cmd,
-                &self.config.system.init,
-                "plugin_loader",
-                INSTALL_ROOT,
-            )?;
+        if cfg.packages.install_decky_loader {
+            steps.push(step(StepKind::DeckyLoader, "Installing Decky Loader...", 1));
         }
 
-        // Phase 5.85: evdevhook2 (Cemuhook UDP motion server)
-        if self.config.packages.install_evdevhook2 {
-            self.report_progress(0.935, "Installing evdevhook2...");
-            self.install_evdevhook2()?;
-            // Fresh evdevhook2 definition — sync before enabling (s6-only).
-            configure::services::sync_s6_repository(
-                &self.cmd,
-                &self.config.system.init,
-                INSTALL_ROOT,
-            )?;
-            configure::services::enable_service(
-                &self.cmd,
-                &self.config.system.init,
-                "evdevhook2",
-                INSTALL_ROOT,
-            )?;
+        if cfg.packages.install_evdevhook2 {
+            steps.push(step(StepKind::Evdevhook2, "Installing evdevhook2...", 1));
         }
 
-        // Phase 5.95: Post-install extras.  Always installs whatever is
-        // already in `config.packages.extra_packages` (e.g. from a saved
-        // config).  Additionally, when an interactive policy is attached,
-        // prompts the user for more.
-        self.run_extras_phase()?;
+        steps.push(step(StepKind::Extras, "Installing extra packages...", 2));
+        steps.push(step(StepKind::Finalize, "Finalizing installation...", 4));
 
-        // Phase 6: Finalization
-        self.report_progress(0.96, "Finalizing installation...");
-        self.finalize()?;
+        steps
+    }
+
+    /// Perform one step.
+    ///
+    /// Steps that depend on the storage backend ask `storage()` here, once,
+    /// rather than each having its own copy of the "which backend" ladder.
+    fn run_step(&mut self, kind: StepKind) -> Result<()> {
+        match kind {
+            StepKind::Partition => self.partition_disk(),
+
+            StepKind::StorageSetup => {
+                let result = match self.storage() {
+                    Storage::LvmAb | Storage::LvmThin => self.setup_lvm_thin(),
+                    Storage::MultiLuks => self.setup_multi_volume_encryption(),
+                    Storage::Zfs | Storage::Plain => Ok(()),
+                };
+                // Register whatever the step opened, including on the failure
+                // path: a setup that got halfway still left containers open.
+                self.track_open_resources();
+                result
+            }
+
+            StepKind::StorageFormat => match self.storage() {
+                Storage::LvmAb => self.format_lvm_ab_volumes(),
+                Storage::LvmThin => self.format_lvm_volumes(),
+                Storage::MultiLuks => self.format_multi_volume_partitions(),
+                // ZFS formats its non-ZFS partitions (EFI, swap, boot) here;
+                // the pools and datasets come with the mount step.
+                Storage::Zfs | Storage::Plain => self.format_partitions(),
+            },
+
+            StepKind::StorageMount => {
+                // Registered before the mounts happen, not after: a mount step
+                // that fails partway has still mounted something.
+                self.guards
+                    .register(Resource::MountTree(INSTALL_ROOT.to_string()));
+                match self.storage() {
+                    Storage::LvmAb => self.mount_lvm_ab_volumes(),
+                    Storage::LvmThin => self.mount_lvm_volumes(),
+                    Storage::MultiLuks => self.mount_multi_volume_partitions(),
+                    Storage::Zfs => self.mount_partitions_zfs(),
+                    Storage::Plain => self.mount_partitions(),
+                }
+            }
+
+            StepKind::BaseSystem => self.install_base_system(),
+
+            StepKind::LocalRepo => {
+                crate::install::install_local_repo_into_target(&self.cmd, INSTALL_ROOT)
+            }
+
+            StepKind::TkgKernel => {
+                packages::install_tkg_kernel(&self.cmd, &self.config, INSTALL_ROOT)
+            }
+
+            StepKind::Fstab => {
+                match self.storage() {
+                    Storage::LvmAb => self.generate_fstab_lvm_ab()?,
+                    Storage::LvmThin => self.generate_fstab_lvm_thin()?,
+                    Storage::MultiLuks => self.generate_fstab_multi_volume()?,
+                    Storage::Zfs | Storage::Plain => self.generate_fstab()?,
+                }
+
+                // The swap file is created for every layout that asks for one
+                // (the Swap step runs on any non-partition swap type), so its
+                // fstab entry belongs to every layout too.  It used to be
+                // appended only in the plain branch, which meant an
+                // encrypted, LVM-thin or immutable A/B install built and
+                // `mkswap`ed a multi-gigabyte file that nothing ever swapped
+                // on — and, with hibernation enabled, wrote a
+                // `resume=`/`resume_offset=` pointing into it.
+                if self.config.disk.swap_type == SwapType::FileZram {
+                    append_swap_file_entry(&self.config, INSTALL_ROOT)?;
+                }
+                Ok(())
+            }
+
+            StepKind::Crypttab => match self.storage() {
+                Storage::MultiLuks => {
+                    self.setup_keyfiles()?;
+                    self.generate_crypttab_multi_volume()
+                }
+                Storage::LvmThin | Storage::LvmAb => {
+                    if self.config.disk.boot_encryption {
+                        self.setup_lvm_thin_keyfiles()?;
+                    }
+                    self.generate_crypttab_lvm_thin()
+                }
+                Storage::Zfs | Storage::Plain => Ok(()),
+            },
+
+            StepKind::Swap => self.configure_swap(),
+            StepKind::ConfigureSystem => self.configure_system(),
+            StepKind::CustomHooks => self.install_custom_hooks(),
+            StepKind::SecureBoot => self.setup_secureboot(),
+            StepKind::GpuDrivers => self.install_gpu_drivers(),
+            StepKind::Desktop => self.install_desktop(),
+            StepKind::Wine => self.install_wine_packages(),
+            StepKind::Gaming => self.install_gaming_packages(),
+            StepKind::GamescopeUpdate => self.install_gamescope_update(),
+            StepKind::SessionSwitching => self.install_session_switching(),
+            StepKind::Yay => self.install_yay(),
+            StepKind::ZenBrowser => self.install_zen_browser(),
+            StepKind::IwdFrontend => self.install_iwd_frontend(),
+            StepKind::BtrfsTools => self.install_btrfs_tools(),
+            StepKind::GrubBtrfs => self.install_grub_btrfs(),
+
+            StepKind::ImmutableLockdown => {
+                crate::immutable::lockdown::install(&self.cmd, INSTALL_ROOT)?;
+                // Boot-wipe policy for disk-backed /tmp (@tmp).
+                crate::immutable::tmp::install_tmpfiles(&self.cmd, INSTALL_ROOT)
+            }
+
+            StepKind::Autostart => self.install_autostart_entries(),
+            StepKind::SysctlGaming => self.install_sysctl_gaming(),
+            StepKind::SysctlNetwork => self.install_sysctl_network_performance(),
+
+            StepKind::HandheldQuirks => {
+                configure::handheld_quirks::install(&self.cmd, &self.config, INSTALL_ROOT)
+            }
+
+            StepKind::Hhd => {
+                self.install_hhd()?;
+                self.enable_fresh_service("hhd")
+            }
+
+            StepKind::DeckyLoader => {
+                self.install_decky_loader()?;
+                self.enable_fresh_service("plugin_loader")
+            }
+
+            StepKind::Evdevhook2 => {
+                self.install_evdevhook2()?;
+                self.enable_fresh_service("evdevhook2")
+            }
+
+            StepKind::Extras => self.run_extras_phase(),
+            StepKind::Finalize => self.finalize(),
+        }
+    }
+
+    /// Track every LUKS container and volume group this run currently has
+    /// open, so that dropping the installer releases them.
+    ///
+    /// Reads the installer's own state rather than being told what to track:
+    /// the setup steps already record what they opened, and a second list
+    /// would only be a list that could disagree with the first.
+    fn track_open_resources(&mut self) {
+        let names: Vec<String> = self
+            .luks_containers
+            .iter()
+            .chain(self.luks_boot_container.iter())
+            .chain(self.luks_lvm_container.iter())
+            .map(|c| c.mapper_name.clone())
+            .collect();
+        for name in names {
+            self.guards.register(Resource::Luks(name));
+        }
+        if self.config.disk.use_lvm_thin {
+            self.guards
+                .register(Resource::VolumeGroup(self.config.disk.lvm_vg_name.clone()));
+        }
+    }
+
+    /// Enable a service whose definition this run just wrote.
+    ///
+    /// The s6 repository has to be synced first so the enable can see a
+    /// definition that did not exist when the base system was installed; for
+    /// every other init system the sync is a no-op.
+    fn enable_fresh_service(&self, name: &str) -> Result<()> {
+        configure::services::sync_service_repository(
+            &self.cmd,
+            &self.config.system.init,
+            INSTALL_ROOT,
+        )?;
+        configure::services::enable_service(&self.cmd, &self.config.system.init, name, INSTALL_ROOT)
+    }
+
+    /// Run all installation phases after preparation.
+    /// Separated from `run()` so that `emergency_cleanup()` can be called on failure.
+    ///
+    /// The pipeline is feature-driven rather than layout-driven: `pipeline()`
+    /// decides which steps this config calls for, and this loop runs them.
+    /// Progress is the running sum of the weights of the steps that made the
+    /// list, mapped into the range `prepare()` left over.
+    fn run_phases(&mut self) -> Result<()> {
+        let steps = self.pipeline();
+        let total: u32 = steps.iter().map(|s| s.weight).sum();
+
+        // `prepare()` owns the first tenth of the bar.
+        const PREPARE_SHARE: f32 = 0.10;
+
+        let mut done = 0u32;
+        for step in &steps {
+            let progress = PREPARE_SHARE + (1.0 - PREPARE_SHARE) * (done as f32 / total as f32);
+            self.report_progress(progress, step.status);
+            self.run_step(step.kind)?;
+            done += step.weight;
+        }
+
+        // Finalize unmounted the filesystems and closed the containers
+        // deliberately; there is nothing left for the guards to release.
+        self.guards.disarm();
 
         self.report_progress(1.0, "Installation complete");
         info!(
@@ -562,7 +828,7 @@ impl Installer {
     ///
     /// Uses `force_run()` so commands execute even when the interrupt flag
     /// is set.  All errors are logged but otherwise ignored.
-    fn emergency_cleanup(&self) {
+    fn emergency_cleanup(&mut self) {
         use tracing::warn;
 
         info!(
@@ -642,6 +908,11 @@ impl Installer {
                 }
             }
         }
+
+        // This rescan is strictly more thorough than the tracked resources
+        // (it also catches cryptsetup's own temporary mappings), so there is
+        // nothing left for the guards to do on drop.
+        self.guards.disarm();
 
         info!("Emergency cleanup complete");
     }
@@ -1242,27 +1513,7 @@ impl Installer {
 
     /// Install desktop environment
     fn install_desktop(&self) -> Result<()> {
-        use crate::config::DesktopEnvironment;
-
-        match &self.config.desktop.environment {
-            DesktopEnvironment::None => {
-                info!("[Phase 5/6] Skipping desktop environment (none selected)");
-            }
-            DesktopEnvironment::Kde => {
-                info!("[Phase 5/6] Installing KDE Plasma desktop environment");
-                desktop::kde::install(&self.cmd, &self.config, INSTALL_ROOT)?;
-            }
-            DesktopEnvironment::Gnome => {
-                info!("[Phase 5/6] Installing GNOME desktop environment");
-                desktop::gnome::install(&self.cmd, &self.config, INSTALL_ROOT)?;
-            }
-            DesktopEnvironment::Xfce => {
-                info!("[Phase 5/6] Installing XFCE desktop environment");
-                desktop::xfce::install(&self.cmd, &self.config, INSTALL_ROOT)?;
-            }
-        }
-
-        Ok(())
+        desktop::install(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     // ==================== OPTIONAL PACKAGE COLLECTION METHODS ====================
@@ -1270,19 +1521,19 @@ impl Installer {
     /// Install GPU driver packages
     fn install_gpu_drivers(&self) -> Result<()> {
         info!("Installing selected GPU driver packages");
-        configure::packages::install_gpu_drivers(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_gpu_drivers(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install Wine compatibility packages
     fn install_wine_packages(&self) -> Result<()> {
         info!("Installing Wine compatibility packages");
-        configure::packages::install_wine_packages(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_wine_packages(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install gaming packages
     fn install_gaming_packages(&self) -> Result<()> {
         info!("Installing gaming packages");
-        configure::packages::install_gaming_packages(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_gaming_packages(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install the gamescope update utility (canonical rebuild + AUR guard)
@@ -1300,25 +1551,25 @@ impl Installer {
     /// Install yay AUR helper from source
     fn install_yay(&self) -> Result<()> {
         info!("Building and installing yay AUR helper from source");
-        configure::packages::install_yay(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_yay(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install AUR packages via yay
     fn install_zen_browser(&self) -> Result<()> {
         info!("Installing Zen Browser via yay");
-        configure::packages::install_zen_browser(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_zen_browser(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install the chosen iwd GUI frontend (iwgtk / iwdgui / iwqt) via yay
     fn install_iwd_frontend(&self) -> Result<()> {
         info!("Installing iwd GUI frontend via yay");
-        configure::packages::install_iwd_frontend(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_iwd_frontend(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install btrfs snapshot tools (snapper, btrfs-assistant) via yay
     fn install_btrfs_tools(&self) -> Result<()> {
         info!("Installing btrfs snapshot tools via yay");
-        configure::packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_btrfs_tools(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// LUKS UUID of the container holding `/boot`, for the grub-btrfs compat
@@ -1415,7 +1666,11 @@ impl Installer {
         // The service definition was just written (for s6, into
         // /etc/s6/adminsv) — sync the s6 repository so the enable can see it
         // (no-op for other init systems), then enable for the target init.
-        configure::services::sync_s6_repository(&self.cmd, &self.config.system.init, INSTALL_ROOT)?;
+        configure::services::sync_service_repository(
+            &self.cmd,
+            &self.config.system.init,
+            INSTALL_ROOT,
+        )?;
         configure::services::enable_service(
             &self.cmd,
             &self.config.system.init,
@@ -1429,42 +1684,38 @@ impl Installer {
     /// Install user autostart entries (audio-startup, nm-applet)
     fn install_autostart_entries(&self) -> Result<()> {
         info!("Installing user autostart entries");
-        configure::packages::install_autostart_entries(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_autostart_entries(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Write /etc/sysctl.d/99-gaming.conf with gaming performance tweaks
     fn install_sysctl_gaming(&self) -> Result<()> {
         info!("Installing gaming sysctl tweaks");
-        configure::packages::install_sysctl_gaming(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_sysctl_gaming(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Write /etc/sysctl.d/99-network-performance.conf with network tuning
     fn install_sysctl_network_performance(&self) -> Result<()> {
         info!("Installing network performance sysctl tweaks");
-        configure::packages::install_sysctl_network_performance(
-            &self.cmd,
-            &self.config,
-            INSTALL_ROOT,
-        )
+        packages::install_sysctl_network_performance(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install Handheld Daemon (HHD) via yay + init-specific service file
     fn install_hhd(&self) -> Result<()> {
         info!("Installing Handheld Daemon (HHD)");
-        configure::packages::install_hhd(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_hhd(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install Decky Loader + init-specific service file
     fn install_decky_loader(&self) -> Result<()> {
         info!("Installing Decky Loader");
-        configure::packages::install_decky_loader(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_decky_loader(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Install evdevhook2 (Cemuhook UDP motion server) via yay + udev rule
     /// + init-specific service file
     fn install_evdevhook2(&self) -> Result<()> {
         info!("Installing evdevhook2 (Cemuhook UDP motion server)");
-        configure::packages::install_evdevhook2(&self.cmd, &self.config, INSTALL_ROOT)
+        packages::install_evdevhook2(&self.cmd, &self.config, INSTALL_ROOT)
     }
 
     /// Report an optional step that failed without aborting the run.
@@ -1498,9 +1749,7 @@ impl Installer {
                 0.94,
                 &format!("Installing {} extra pacman package(s)...", pre_pacman.len()),
             );
-            if let Err(e) =
-                configure::packages::install_extras_pacman(&self.cmd, INSTALL_ROOT, &pre_pacman)
-            {
+            if let Err(e) = packages::install_extras_pacman(&self.cmd, INSTALL_ROOT, &pre_pacman) {
                 self.report_failure(0.94, "extra pacman packages", &e.to_string());
             }
         }
@@ -1509,20 +1758,16 @@ impl Installer {
                 0.945,
                 &format!("Installing {} extra AUR package(s)...", pre_aur.len()),
             );
-            if let Err(e) = configure::packages::install_extras_aur(
-                &self.cmd,
-                &self.config,
-                INSTALL_ROOT,
-                &pre_aur,
-            ) {
+            if let Err(e) =
+                packages::install_extras_aur(&self.cmd, &self.config, INSTALL_ROOT, &pre_aur)
+            {
                 self.report_failure(0.945, "extra AUR packages", &e.to_string());
             }
         }
 
         if self.config.packages.install_warp_terminal {
             self.report_progress(0.948, "Installing Warp Terminal...");
-            match configure::packages::install_warp_terminal(&self.cmd, &self.config, INSTALL_ROOT)
-            {
+            match packages::install_warp_terminal(&self.cmd, &self.config, INSTALL_ROOT) {
                 Ok(_) => self.report_progress(0.949, "Warp Terminal installed"),
                 Err(e) => self.report_failure(0.949, "Warp Terminal", &e.to_string()),
             }
@@ -1534,11 +1779,9 @@ impl Installer {
             let can_use_yay = self.config.packages.install_yay;
             let (extras, save) = policy.prompt_extras(can_use_yay);
             if !extras.pacman.is_empty() {
-                if let Err(e) = configure::packages::install_extras_pacman(
-                    &self.cmd,
-                    INSTALL_ROOT,
-                    &extras.pacman,
-                ) {
+                if let Err(e) =
+                    packages::install_extras_pacman(&self.cmd, INSTALL_ROOT, &extras.pacman)
+                {
                     warn!("interactive pacman extras failed: {}", e);
                 }
                 self.config
@@ -1548,12 +1791,9 @@ impl Installer {
                     .extend(extras.pacman.iter().cloned());
             }
             if !extras.aur.is_empty() {
-                if let Err(e) = configure::packages::install_extras_aur(
-                    &self.cmd,
-                    &self.config,
-                    INSTALL_ROOT,
-                    &extras.aur,
-                ) {
+                if let Err(e) =
+                    packages::install_extras_aur(&self.cmd, &self.config, INSTALL_ROOT, &extras.aur)
+                {
                     warn!("interactive AUR extras failed: {}", e);
                 }
                 self.config
@@ -2748,6 +2988,117 @@ impl Installer {
 mod tests {
     use super::*;
     use crate::config::CustomPartitionEntry;
+
+    // ── the pipeline ─────────────────────────────────────────────────────
+
+    fn kinds(config: DeploymentConfig) -> Vec<StepKind> {
+        Installer::new(config, true)
+            .pipeline()
+            .iter()
+            .map(|s| s.kind)
+            .collect()
+    }
+
+    /// The pipeline with every optional feature switched off. This is the
+    /// order the install has always run in, written down: if a change to
+    /// `pipeline()` reorders or drops one of these, it shows up here rather
+    /// than on someone's disk.
+    #[test]
+    fn a_plain_install_runs_the_expected_steps_in_order() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.disk.encryption = false;
+        cfg.disk.use_lvm_thin = false;
+        cfg.disk.swap_type = SwapType::Partition;
+        cfg.system.secureboot = false;
+        cfg.packages = Default::default();
+
+        assert_eq!(
+            kinds(cfg),
+            vec![
+                StepKind::Partition,
+                StepKind::StorageFormat,
+                StepKind::StorageMount,
+                StepKind::BaseSystem,
+                StepKind::LocalRepo,
+                StepKind::Fstab,
+                StepKind::ConfigureSystem,
+                StepKind::Desktop,
+                StepKind::Autostart,
+                StepKind::HandheldQuirks,
+                StepKind::Extras,
+                StepKind::Finalize,
+            ]
+        );
+    }
+
+    /// Setup only exists for backends that have something to set up, and the
+    /// crypttab step follows the storage rather than the encryption flag —
+    /// an LVM layout writes one whether or not it is encrypted.
+    #[test]
+    fn the_storage_backend_decides_the_storage_steps() {
+        let mut plain = DeploymentConfig::sample();
+        plain.disk.encryption = false;
+        plain.disk.use_lvm_thin = false;
+        let steps = kinds(plain);
+        assert!(!steps.contains(&StepKind::StorageSetup));
+        assert!(!steps.contains(&StepKind::Crypttab));
+
+        let mut encrypted = DeploymentConfig::sample();
+        encrypted.disk.encryption = true;
+        encrypted.disk.use_lvm_thin = false;
+        let steps = kinds(encrypted);
+        assert!(steps.contains(&StepKind::StorageSetup));
+        assert!(steps.contains(&StepKind::Crypttab));
+        assert!(steps.contains(&StepKind::CustomHooks));
+
+        let mut lvm = DeploymentConfig::sample();
+        lvm.disk.encryption = false;
+        lvm.disk.use_lvm_thin = true;
+        let steps = kinds(lvm);
+        assert!(steps.contains(&StepKind::StorageSetup));
+        assert!(steps.contains(&StepKind::Crypttab));
+    }
+
+    /// Every step in the list is reachable, and the ones that depend on
+    /// another step being present are never listed without it.
+    #[test]
+    fn dependent_steps_never_appear_without_what_they_need() {
+        let mut cfg = DeploymentConfig::sample();
+        cfg.packages.install_yay = false;
+        cfg.packages.install_zen_browser = true;
+        cfg.network.backend = crate::config::NetworkBackend::Iwd;
+
+        let steps = kinds(cfg);
+        // Both AUR steps build through yay; without it, neither runs.
+        assert!(!steps.contains(&StepKind::ZenBrowser));
+        assert!(!steps.contains(&StepKind::IwdFrontend));
+    }
+
+    /// Progress must climb from the tenth `prepare()` leaves to exactly 1.0,
+    /// without a step ever reporting less than the one before it.
+    #[test]
+    fn progress_is_monotonic_across_the_whole_pipeline() {
+        let steps = Installer::new(DeploymentConfig::sample(), true).pipeline();
+        let total: u32 = steps.iter().map(|s| s.weight).sum();
+        assert!(total > 0);
+
+        let mut done = 0u32;
+        let mut last = 0.0f32;
+        for step in &steps {
+            let progress = 0.10 + 0.90 * (done as f32 / total as f32);
+            assert!(
+                progress >= last,
+                "{} went backwards: {} after {}",
+                step.status,
+                progress,
+                last
+            );
+            assert!((0.10..1.0).contains(&progress), "{progress} out of range");
+            last = progress;
+            done += step.weight;
+        }
+        assert_eq!(done, total);
+    }
 
     /// A config whose layout matches the scratch disk the ignored tests
     /// below expect: EFI, BOOT, then ROOT/USR/VAR/HOME as partitions 3-6.

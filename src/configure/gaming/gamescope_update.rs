@@ -44,13 +44,13 @@ use tracing::info;
 
 // Embedded resources (compiled into the binary)
 const UPDATE_SCRIPT: &str =
-    include_str!("../resources/gamescope_update/deploytix-update-gamescope.sh");
-const CANONICAL_PKGBUILD: &str = include_str!("../resources/gamescope_update/PKGBUILD");
+    include_str!("../../resources/gamescope_update/deploytix-update-gamescope.sh");
+const CANONICAL_PKGBUILD: &str = include_str!("../../resources/gamescope_update/PKGBUILD");
 const DESKTOP_ENTRY: &str =
-    include_str!("../resources/gamescope_update/deploytix-update-gamescope.desktop");
+    include_str!("../../resources/gamescope_update/deploytix-update-gamescope.desktop");
 const GUARD_HOOK: &str =
-    include_str!("../resources/gamescope_update/deploytix-gamescope-guard.hook");
-const GUARD_SCRIPT: &str = include_str!("../resources/gamescope_update/gamescope-guard.sh");
+    include_str!("../../resources/gamescope_update/deploytix-gamescope-guard.hook");
+const GUARD_SCRIPT: &str = include_str!("../../resources/gamescope_update/gamescope-guard.sh");
 
 /// File to deploy with its destination path (relative to install root) and permissions
 struct DeployFile {

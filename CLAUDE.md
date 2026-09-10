@@ -14,9 +14,9 @@ Deploytix is an automated Artix Linux deployment installer written in Rust. It p
 cargo build                              # Dev build
 cargo build --release                    # Release CLI binary
 cargo build --release --features gui     # Release CLI + both GUI binaries
-cargo clippy --all-features -- -D warnings  # Lint (warnings are errors)
-cargo fmt -- --check                     # Format check
-cargo test --all-features                # Run tests
+cargo clippy --workspace --all-features -- -D warnings  # Lint (warnings are errors)
+cargo fmt --all -- --check               # Format check
+cargo test --workspace --all-features    # Run tests
 ```
 
 **Makefile shortcuts:**
@@ -56,13 +56,15 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 | Module | Purpose |
 |--------|---------|
 | `config/` | TOML config parsing (`DeploymentConfig`), validation, interactive wizard |
+| `init/` | One insertable module per init system (runit, OpenRC, s6, dinit): base package, service dirs, enable, s6's database hooks |
 | `disk/` | Block device detection, partition layout computation (`ComputedLayout`), sfdisk scripting, formatting |
-| `install/` | Installer orchestrator, basestrap, chroot ops, fstab/crypttab generation |
-| `configure/` | In-chroot config: bootloader (GRUB), encryption, mkinitcpio hooks, locale, users, network, services, SecureBoot, handheld controller quirks |
-| `desktop/` | DE-specific package lists and setup (KDE, GNOME, XFCE, none) |
-| `cleanup/` | Unmount and optional disk wipe |
+| `install/` | Installer orchestrator, basestrap, chroot ops, fstab/crypttab generation, and `packages.rs` (installing software into the target: kernels, GPU drivers, gaming stack, AUR builds) |
+| `configure/` | In-chroot config, in four groups: `crypto/` (encryption, keyfiles, verity, SecureBoot), `system/` (locale, users, network, services, swap, mkinitcpio, hooks), `boot/` (GRUB, grub-btrfs), `gaming/` (session switching, handheld quirks, display manager, greetd). Re-exported flat, so call sites still say `configure::services` |
+| `desktop/` | One insertable module per DE (KDE, GNOME, XFCE, none): packages, session, `.xinitrc`, sddm stanza, `.desktop` file |
+| `cleanup/` | Unmount and optional disk wipe; `guards.rs` tracks resources an install opened so they are released on drop |
 | `gui/` | egui wizard panels (7-step), behind `--features gui` |
-| `utils/` | `CommandRunner` (dry-run aware), `DeploytixError`, prompts, signal handlers |
+| `utils/` | `CommandRunner` (dry-run aware), `HostAdapter` (the "which machine" seam), `DeploytixError`, prompts, signal handlers |
+| `crates/pkgdeps` | Separate workspace crate: dependency resolution, tree/reverse queries, graph output. Own error type, converted at the boundary by `impl From<pkgdeps::Error> for DeploytixError` |
 
 ### Key Patterns
 
@@ -80,7 +82,36 @@ allocation is filesystem-dependent — `btrfs filesystem mkswapfile` on btrfs,
 `fallocate` on ext, `dd` everywhere else, because `swapon` rejects the unwritten
 extents `fallocate` leaves on XFS and F2FS. See `docs/SWAP_AUDIT.md`.
 
-**Init System Abstraction**: `InitSystem` enum provides `base_package()`, `service_dir()`, `enabled_dir()`. Package naming follows Artix convention: `{package}-{init}` (e.g., `iwd-runit`).
+**Insertable modules**: things deploytix supports several of are described by a
+descriptor in their own file and found through one registry lookup, rather than
+by a `match` repeated across the tree. `desktop::module(de) -> &DesktopModule`,
+`init::module(init) -> &InitModule`, `immutable::backend::active() -> Box<dyn
+SnapshotBackend>`, `utils::host::current() -> &dyn HostAdapter`. The config enums
+(`DesktopEnvironment`, `InitSystem`) stay as the identity — they are the TOML
+surface — and only the behaviour moved behind the registry. Adding one is an
+enum variant, a file, and a line in the lookup. Package naming still follows the
+Artix convention `{package}-{init}` (e.g. `iwd-runit`), derived rather than
+enumerated. See `docs/REFACTOR_PLAN.md`.
+
+**Local `[deploytix]` repository**: `deploytix-git`, `deploytix-gui-git`,
+`gamescope-git` and `tkg-gui-git` are not in the Artix mirrors, so they come
+from a local repo at `/var/lib/deploytix-repo` (`SHARED_REPO_DIR` in
+`src/install/basestrap.rs`). The live ISO embeds one there; an install copies
+it into the target and adds a `[deploytix]` section to the target's
+`/etc/pacman.conf`, which is what lets a deploytix-installed machine install
+the next one — `deploytix-git`'s PKGBUILD builds from a checkout of this repo
+tree, so it cannot be rebuilt from nothing.
+
+`/var` is load-bearing here, not incidental: on an immutable root it is
+writable (unlike `/` and `/usr`), survives a reboot (unlike the boot-wiped
+`@tmp`), is not snapshotted so a rollback cannot take the repo with it, and is
+rbind-mounted into every snapshot set's chroot, so `file:///var/lib/deploytix-repo`
+resolves inside a `deploytix update` transaction as well as on the host.
+
+**Install pipeline as data**: `Installer::pipeline()` returns the ordered
+`Vec<Step>` this config calls for; `run_phases()` loops over it and derives
+progress from the step weights. Adding or reordering a step means editing that
+list, not the 300-line function it replaced.
 
 **Signal-Safe Cleanup**: SIGINT/SIGTERM handlers catch interruptions and automatically unmount filesystems and close LUKS containers.
 
@@ -137,7 +168,8 @@ snapshotted as atomic sets that roll back together. Updates build a new writable
 snapshot set + `pacman` in a chroot, activated on reboot. Boot-pointer changes
 regenerate grub.cfg inside a scratch chroot of the target set — never against the
 live overlay `/`, where `grub-probe` would fail. `src/immutable/` (snapshot sets,
-boot pointer, update/rollback, lockdown). See `docs/IMMUTABLE_SYSTEM.md`.
+boot pointer, update/rollback, lockdown, and `backend.rs` — the trait the
+`update`/`rollback`/`remove` commands dispatch through). See `docs/IMMUTABLE_SYSTEM.md`.
 
 **LVM A/B backend** (requires `use_lvm_thin`). A/B dual-slot with **dm-verity**
 read-only roots: two root LVs (`root_a`/`root_b`, each including `/usr`) alternate,
@@ -145,8 +177,8 @@ integrity-checked against a per-slot hash LV. `/etc` is a writable overlay;
 `/var`/`home` are shared. `deploytix update` rsyncs the active root into the
 inactive slot, `pacman`s it in a chroot, `veritysetup format`s a fresh hash, and
 repoints the boot pointer (a sed of `deploytix.slot=`/`deploytix.roothash=` in
-`grub.cfg` — no grub-mkconfig). `src/immutable/lvm_ab.rs`, `src/configure/verity.rs`,
-the `verity-ab` hook in `src/configure/hooks.rs`. See `docs/IMMUTABLE_LVM_AB.md`.
+`grub.cfg` — no grub-mkconfig). `src/immutable/lvm_ab.rs`, `src/configure/crypto/verity.rs`,
+the `verity-ab` hook in `src/configure/system/hooks.rs`. See `docs/IMMUTABLE_LVM_AB.md`.
 
 Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
 interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`

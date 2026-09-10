@@ -171,10 +171,10 @@ intercepts *interactive* `pacman` upgrade/install/remove and points you at
 |---------|----------|
 | Config flag + backend selection (`immutable_lvm_ab`) | `src/config/deployment.rs` |
 | A/B volume layout | `src/disk/lvm.rs` (`immutable_ab_thin_volumes`, `ab`) |
-| dm-verity helpers | `src/configure/verity.rs` |
-| `verity-ab` initramfs hook + MODULES/HOOKS/BINARIES | `src/configure/hooks.rs`, `src/configure/mkinitcpio.rs` |
+| dm-verity helpers | `src/configure/crypto/verity.rs` |
+| `verity-ab` initramfs hook + MODULES/HOOKS/BINARIES | `src/configure/system/hooks.rs`, `src/configure/system/mkinitcpio.rs` |
 | Read-only fstab (`/`+`/etc` via handler) | `src/install/fstab.rs` (`generate_fstab_lvm_ab`) |
-| Two-slot GRUB cmdline | `src/configure/bootloader.rs` (`configure_grub_defaults_lvm_ab`) |
+| Two-slot GRUB cmdline | `src/configure/boot/bootloader.rs` (`configure_grub_defaults_lvm_ab`) |
 | Install-time slot build + verity sealing | `src/install/installer.rs` (`*_lvm_ab_*`, `finalize_immutable_ab`) |
 | `update`/`rollback` engine + boot pointer | `src/immutable/lvm_ab.rs` |
 | CLI dispatch (btrfs vs LVM A/B) | `src/main.rs` |

@@ -5,7 +5,7 @@
 //! (which the resolver already sorts), and node identifiers are quoted
 //! to survive package names that contain hyphens or `+`.
 
-use super::model::{DepClosure, EdgeKind};
+use crate::model::{DepClosure, EdgeKind};
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy)]
@@ -88,7 +88,7 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkgdeps::model::{Dep, DepEdge, EdgeKind, Package};
+    use crate::model::{Dep, DepEdge, EdgeKind, Package};
 
     #[test]
     fn dot_basic_structure() {

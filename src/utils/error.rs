@@ -63,4 +63,20 @@ pub enum DeploytixError {
     Nix(#[from] nix::Error),
 }
 
+/// The `pkgdeps` crate has its own error vocabulary — it can only fail in four
+/// ways, none of them installer-shaped. This is the boundary where those four
+/// become installer errors.
+impl From<pkgdeps::Error> for DeploytixError {
+    fn from(err: pkgdeps::Error) -> Self {
+        match err {
+            pkgdeps::Error::CommandFailed { command, stderr } => {
+                Self::CommandFailed { command, stderr }
+            }
+            pkgdeps::Error::CommandNotFound(cmd) => Self::CommandNotFound(cmd),
+            pkgdeps::Error::Invalid(msg) => Self::ConfigError(msg),
+            pkgdeps::Error::Io(e) => Self::Io(e),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DeploytixError>;

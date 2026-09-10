@@ -286,11 +286,15 @@ pub fn protected_reason(pkg: &str, files: &[String], encrypted: bool) -> Option<
     }
 
     // Owns files in /boot directly: microcode, memtest86+, bootloader payloads.
-    // /boot is bind mounted from the live system into every set, so deleting
-    // these removes them everywhere.
-    if let Some(f) = files.iter().find(|f| f.starts_with("/boot/")) {
+    // Which mounts a set shares with the live system, and which of those a
+    // rollback cannot repair, is a property of the mount model rather than of
+    // removal — see `crate::immutable::UNRECOVERABLE_SHARED_MOUNTS`.
+    if let Some((f, mount)) = files
+        .iter()
+        .find_map(|f| crate::immutable::unrecoverable_shared_mount(f).map(|m| (f, m)))
+    {
         return Some(format!(
-            "it owns {f} in the shared /boot, which is not snapshotted and cannot be rolled back"
+            "it owns {f} in the shared {mount}, which is not snapshotted and cannot be rolled back"
         ));
     }
 

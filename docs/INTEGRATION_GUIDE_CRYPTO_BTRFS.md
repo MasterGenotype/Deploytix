@@ -107,20 +107,20 @@ GRUB → kernel + initramfs → crypttab-unlock → mountcrypt → switch_root �
 | `src/config/deployment.rs` | Add new layout type, encryption options |
 | `src/disk/layouts.rs` | Implement `CryptoSubvolume` layout |
 | `src/disk/formatting.rs` | Add LUKS formatting, btrfs subvolume creation |
-| `src/configure/encryption.rs` | Full LUKS implementation |
-| `src/configure/mkinitcpio.rs` | Add custom hook generation |
+| `src/configure/crypto/encryption.rs` | Full LUKS implementation |
+| `src/configure/system/mkinitcpio.rs` | Add custom hook generation |
 | `src/install/fstab.rs` | Support btrfs subvolume entries |
-| `src/configure/bootloader.rs` | Add LUKS kernel parameters |
-| `src/configure/services.rs` | Add greetd configuration |
+| `src/configure/boot/bootloader.rs` | Add LUKS kernel parameters |
+| `src/configure/system/services.rs` | Add greetd configuration |
 | `src/install/installer.rs` | Update workflow order |
 
 ### 2.3 New Files to Create
 
 | File | Purpose |
 |------|---------|
-| `src/configure/hooks.rs` | Generate custom mkinitcpio hooks |
+| `src/configure/system/hooks.rs` | Generate custom mkinitcpio hooks |
 | `src/install/crypttab.rs` | Generate `/etc/crypttab` |
-| `src/configure/greetd.rs` | Configure greetd display manager |
+| `src/configure/gaming/greetd.rs` | Configure greetd display manager |
 | `src/configure/networkmanager.rs` | Build NetworkManager from source with iwd support |
 
 ---
@@ -422,7 +422,7 @@ pub fn compute_layout(layout: &PartitionLayout, disk_mib: u64) -> Result<Compute
 
 ### 5.1 Implement Full LUKS Setup
 
-**File:** `src/configure/encryption.rs`
+**File:** `src/configure/crypto/encryption.rs`
 
 ```rust
 //! LUKS encryption setup
@@ -700,7 +700,7 @@ pub fn mount_btrfs_subvolumes(
 
 ### 7.1 Create Hooks Module
 
-**File:** `src/configure/hooks.rs` (NEW FILE)
+**File:** `src/configure/system/hooks.rs` (NEW FILE)
 
 ```rust
 //! Custom mkinitcpio hook generation
@@ -873,7 +873,7 @@ run_hook() {{
 
 ### 7.2 Update mkinitcpio.conf Generation
 
-**File:** `src/configure/mkinitcpio.rs`
+**File:** `src/configure/system/mkinitcpio.rs`
 
 ```rust
 /// Construct the HOOKS array based on configuration
@@ -1048,7 +1048,7 @@ pub fn generate_fstab_crypto_subvolume(
 
 ### 10.1 Update GRUB for LUKS
 
-**File:** `src/configure/bootloader.rs`
+**File:** `src/configure/boot/bootloader.rs`
 
 ```rust
 /// Configure GRUB defaults for encrypted root
@@ -1140,7 +1140,7 @@ fn install_grub_encrypted(
 
 ### 11.1 Create Greetd Configuration Module
 
-**File:** `src/configure/greetd.rs` (NEW FILE)
+**File:** `src/configure/gaming/greetd.rs` (NEW FILE)
 
 ```rust
 //! greetd display manager configuration
@@ -1282,7 +1282,7 @@ pub fn needs_source_build(config: &DeploymentConfig) -> bool {
 
 ### 11.3 Update Services Module
 
-**File:** `src/configure/services.rs`
+**File:** `src/configure/system/services.rs`
 
 Add seatd and greetd enabling:
 
@@ -1655,10 +1655,10 @@ environment = "kde"
 | `src/config/deployment.rs` | Add `CryptoSubvolume` layout, `luks_mapper_name` field, validation |
 | `src/disk/layouts.rs` | Add `SubvolumeDef`, `compute_crypto_subvolume_layout()`, `is_luks` field |
 | `src/disk/formatting.rs` | Add `create_btrfs_filesystem()`, `create_btrfs_subvolumes()`, `mount_btrfs_subvolumes()` |
-| `src/configure/encryption.rs` | Full implementation of `setup_encryption()`, `luks_format()`, `luks_open()` |
-| `src/configure/mkinitcpio.rs` | Update `construct_hooks()` for custom hooks |
-| `src/configure/bootloader.rs` | Add `configure_grub_defaults()` for LUKS, `install_grub_encrypted()` |
-| `src/configure/services.rs` | Add seatd/greetd enabling, `enable_runit_services()` |
+| `src/configure/crypto/encryption.rs` | Full implementation of `setup_encryption()`, `luks_format()`, `luks_open()` |
+| `src/configure/system/mkinitcpio.rs` | Update `construct_hooks()` for custom hooks |
+| `src/configure/boot/bootloader.rs` | Add `configure_grub_defaults()` for LUKS, `install_grub_encrypted()` |
+| `src/configure/system/services.rs` | Add seatd/greetd enabling, `enable_runit_services()` |
 | `src/install/fstab.rs` | Add `generate_fstab_crypto_subvolume()` |
 | `src/install/installer.rs` | Add encrypted workflow phases |
 | `src/configure/mod.rs` | Export new modules |
@@ -1668,9 +1668,9 @@ environment = "kde"
 
 | File | Purpose |
 |------|---------|
-| `src/configure/hooks.rs` | Custom mkinitcpio hook generation |
+| `src/configure/system/hooks.rs` | Custom mkinitcpio hook generation |
 | `src/install/crypttab.rs` | `/etc/crypttab` generation |
-| `src/configure/greetd.rs` | greetd configuration |
+| `src/configure/gaming/greetd.rs` | greetd configuration |
 | `src/configure/networkmanager.rs` | Build NetworkManager from source with iwd support |
 
 ### Module Exports

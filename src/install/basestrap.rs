@@ -18,7 +18,9 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
     packages.extend([
         "base".to_string(),
         "base-devel".to_string(),
-        config.system.init.base_package().to_string(),
+        crate::init::module(&config.system.init)
+            .base_package
+            .to_string(),
     ]);
 
     // For s6, pre-select providers to avoid interactive prompts
@@ -267,11 +269,19 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 // === Custom [deploytix] repository preparation ===
 //
 // The deploytix-git and tkg-gui-git packages live in a custom pacman
-// repository rather than in the standard Artix mirrors.  On the live ISO
-// this repo is embedded at /var/lib/deploytix-repo and referenced in
-// /etc/pacman.conf.  When the installer runs outside that environment we
-// create a temporary local repo from any pre-built .pkg.tar.zst files
-// we can locate and pass `-C <config>` to basestrap.
+// repository rather than in the standard Artix mirrors.  On the live ISO this
+// repo is embedded at /var/lib/deploytix-repo and referenced in
+// /etc/pacman.conf.  When the installer runs outside that environment we build
+// the repo at that same path from any pre-built .pkg.tar.zst files we can
+// locate, and pass `-C <config>` to basestrap.
+//
+// The repo is then copied into the system being installed
+// (`install_local_repo_into_target`), which is what makes a deploytix-installed
+// machine able to install another one.  Without that copy the chain dead-ends:
+// the ISO's repo exists only in the live environment, so a machine installed
+// from it has deploytix but no repo, no source clone, and no way to resolve
+// deploytix-git — the one package that cannot be built standalone because its
+// PKGBUILD builds from the repo tree itself.
 
 /// Filename prefixes (with trailing dash) for package archives that
 /// belong to the custom [deploytix] repository.
@@ -328,14 +338,92 @@ const EMBEDDED_BUILD_ROOT: &str = "/var/tmp/deploytix-pkgbuild";
 /// therefore no invoking user to drop to.
 const FALLBACK_BUILD_USER: &str = "nobody";
 
-/// Path where the ISO live-overlay embeds the deploytix repo.
-const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
+/// The one place a `[deploytix]` repo lives, on any host.
+///
+/// The ISO live-overlay embeds its pre-built packages here, an installer
+/// creating a repo from source builds it here, and an installed system
+/// receives a copy here (see [`install_local_repo_into_target`]). One path
+/// everywhere means the lookup below does not need to know which kind of host
+/// it is running on.
+///
+/// `/var` specifically, because of what an immutable root does to the
+/// alternatives. `/` and `/usr` are mounted read-only, so nothing can be
+/// written there at all; `/tmp` is a boot-wiped subvolume, so a repo left
+/// there does not survive a reboot. `/var` is writable, is *not* snapshotted
+/// — so a repo survives `deploytix rollback` — and is one of the mounts
+/// rbind-mounted into every snapshot set's chroot
+/// (`crate::immutable::SHARED_LIVE_MOUNTS`), which is what lets a
+/// `file:///var/lib/deploytix-repo` server resolve inside a `deploytix update`
+/// transaction as well as on the host.
+pub const SHARED_REPO_DIR: &str = "/var/lib/deploytix-repo";
 
-/// Temporary repo the installer creates when no repo is configured.
-const TEMP_REPO_DIR: &str = "/tmp/deploytix-local-repo";
+/// Where a repo is built when [`SHARED_REPO_DIR`] cannot be written — a live
+/// medium mounted read-only, most likely. Good enough for the install in
+/// progress, gone on the next boot.
+const FALLBACK_REPO_DIR: &str = "/tmp/deploytix-local-repo";
 
 /// Temporary pacman.conf that adds the [deploytix] repo.
 const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
+
+/// The directory this process will build a local repo in.
+///
+/// [`SHARED_REPO_DIR`] when it can be created and written, otherwise
+/// [`FALLBACK_REPO_DIR`]. Resolved once: the answer cannot change during a
+/// run, and re-probing risks two call sites disagreeing about where the repo
+/// is.
+fn local_repo_dir() -> &'static str {
+    static DIR: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if dir_is_writable(SHARED_REPO_DIR) {
+            SHARED_REPO_DIR
+        } else {
+            warn!(
+                "{} is not writable; building the local repo at {} instead. \
+                 It will not survive a reboot.",
+                SHARED_REPO_DIR, FALLBACK_REPO_DIR
+            );
+            FALLBACK_REPO_DIR
+        }
+    })
+}
+
+/// Whether `dir` exists (or can be created) *and* can be written to.
+///
+/// Existence is not enough: a live medium can carry a perfectly good
+/// `/var/lib/deploytix-repo` on a read-only mount, where `create_dir_all`
+/// succeeds trivially and the first `repo-add` then fails with EROFS.
+fn dir_is_writable(dir: &str) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = Path::new(dir).join(".deploytix-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The package files already sitting in the shared repo.
+///
+/// On the live ISO these are the packages the image embedded; on a machine
+/// deploytix installed they are the ones it was handed at install time.
+fn packages_in_shared_repo() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(SHARED_REPO_DIR) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".pkg.tar.zst"))
+        })
+        .collect()
+}
 
 // === Arch Linux [extra] repository support ===
 //
@@ -796,25 +884,31 @@ fn build_missing_packages(missing: &[&str]) -> Vec<PathBuf> {
     built
 }
 
-/// Create a temporary local pacman repository from the given package
-/// files and generate a repo database with `repo-add`.
-fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
-    let repo = Path::new(TEMP_REPO_DIR);
-
-    // Clean previous run.
-    if repo.is_dir() {
-        std::fs::remove_dir_all(repo).map_err(DeploytixError::Io)?;
-    }
+/// Add the given package files to the local pacman repository, creating it if
+/// it does not exist, and rebuild its database with `repo-add`.
+///
+/// Additive rather than destructive: the repo is a shared, persistent location
+/// that may already hold packages this run did not build — ones embedded by
+/// the ISO, or left by an earlier install. The database is rebuilt from
+/// whatever files are present afterwards, so the two never drift apart.
+fn create_local_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<&'static str> {
+    let repo_dir = local_repo_dir();
+    let repo = Path::new(repo_dir);
     std::fs::create_dir_all(repo).map_err(DeploytixError::Io)?;
 
     for pkg in packages {
         let dest = repo.join(pkg.file_name().unwrap());
+        // Already in the repo (a rebuild of the same version, or a package the
+        // ISO embedded); copying a file onto itself would truncate it.
+        if dest == *pkg {
+            continue;
+        }
         std::fs::copy(pkg, &dest).map_err(DeploytixError::Io)?;
-        info!("  Copied {} into temp repo", dest.display());
+        info!("  Copied {} into the local repo", dest.display());
     }
 
     // Build the pacman database.
-    let db_path = format!("{}/deploytix.db.tar.zst", TEMP_REPO_DIR);
+    let db_path = format!("{}/deploytix.db.tar.zst", repo_dir);
     let pkg_paths: Vec<String> = std::fs::read_dir(repo)
         .map_err(DeploytixError::Io)?
         .filter_map(|e| e.ok())
@@ -832,8 +926,8 @@ fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
 
     cmd.run("repo-add", &args)?;
 
-    info!("Created temporary deploytix repo at {}", TEMP_REPO_DIR);
-    Ok(())
+    info!("Local deploytix repo ready at {}", repo_dir);
+    Ok(repo_dir)
 }
 
 /// Write a temporary `pacman.conf` that extends the system config with
@@ -895,11 +989,16 @@ pub fn prepare_deploytix_repo(
 
     info!("Deploytix custom packages not in repos; preparing local repository");
 
-    // 1. ISO-embedded repo already has a database — use it.
-    let iso_db = Path::new(ISO_REPO_PATH).join("deploytix.db.tar.zst");
-    if iso_db.exists() {
+    // 1. A repo already exists at the shared location, with a database. This
+    //    is the ISO's embedded repo when running from the live medium, and the
+    //    copy `install_local_repo_into_target` left behind when running from a
+    //    system deploytix installed — including an immutable one, where /var
+    //    is the only place such a repo could have survived.
+    let shared_db = Path::new(SHARED_REPO_DIR).join("deploytix.db.tar.zst");
+    let in_shared_repo = packages_in_shared_repo();
+    if shared_db.exists() && find_missing_packages(&needed, &in_shared_repo).is_empty() {
         if pacman_conf_has_deploytix_repo() {
-            info!("ISO-embedded repo exists and [deploytix] in pacman.conf; retrying sync");
+            info!("Local repo exists and [deploytix] is in pacman.conf; retrying sync");
             let _ = std::process::Command::new("pacman")
                 .args(["-Sy", "--noconfirm"])
                 .stdout(Stdio::null())
@@ -909,13 +1008,16 @@ pub fn prepare_deploytix_repo(
                 return Ok(None);
             }
         }
-        info!("Using ISO-embedded repo at {}", ISO_REPO_PATH);
-        return write_custom_pacman_conf(ISO_REPO_PATH);
+        info!("Using the local repo at {}", SHARED_REPO_DIR);
+        return write_custom_pacman_conf(SHARED_REPO_DIR);
     }
 
     // 2. Search for pre-built package files (includes pacman cache and
-    //    artools local repo in addition to source tree locations).
+    //    artools local repo in addition to source tree locations). Whatever
+    //    the shared repo already holds counts: a repo missing only the newest
+    //    package should have the rest of it reused, not rebuilt.
     let mut packages = locate_prebuilt_packages();
+    packages.extend(in_shared_repo);
 
     // 3. Identify packages still missing and attempt to build them
     //    from source if PKGBUILDs are available.
@@ -961,10 +1063,16 @@ pub fn prepare_deploytix_repo(
         if !needs_tree.is_empty() {
             hint.push_str(&format!(
                 "\n{} is built from the deploytix repo tree itself and cannot be \
-                 fetched standalone. Run from the Deploytix live ISO (which has \
-                 it pre-built), or run the installer as a user whose \
-                 ~/.gitrepos/deploytix holds the repo.\n",
-                needs_tree.join(", ")
+                 fetched standalone. It has to come from a repository:\n  \
+                 - the Deploytix live ISO has it pre-built, or\n  \
+                 - {} on a machine deploytix installed (this one appears to be \
+                 missing or incomplete — deploytix copies it there during an \
+                 install, so a machine installed by an older version will not \
+                 have it), or\n  \
+                 - run the installer as a user whose ~/.gitrepos/deploytix \
+                 holds the repo tree.\n",
+                needs_tree.join(", "),
+                SHARED_REPO_DIR,
             ));
         }
 
@@ -978,11 +1086,118 @@ pub fn prepare_deploytix_repo(
     }
 
     info!(
-        "Found {} pre-built package file(s); creating temporary repo",
+        "Found {} pre-built package file(s); creating local repo",
         packages.len()
     );
-    create_temp_repo(cmd, &packages)?;
-    write_custom_pacman_conf(TEMP_REPO_DIR)
+    let repo_dir = create_local_repo(cmd, &packages)?;
+    write_custom_pacman_conf(repo_dir)
+}
+
+/// The `[deploytix]` section to add to a pacman.conf, pointing at the repo on
+/// the system that config belongs to.
+fn deploytix_repo_section() -> String {
+    format!(
+        "\n# Deploytix local repository (packages built for this machine)\n\
+         [deploytix]\n\
+         SigLevel = Optional TrustAll\n\
+         Server = file://{}\n",
+        SHARED_REPO_DIR
+    )
+}
+
+/// Copy the local repo into the system being installed and point its
+/// pacman.conf at it.
+///
+/// This is what stops the repo chain dead-ending at the live ISO. The ISO's
+/// embedded repo exists only in the live environment, so before this a machine
+/// installed by deploytix had the deploytix packages installed but no repo to
+/// resolve them from again — and `deploytix-git` cannot be rebuilt from
+/// nothing, because its PKGBUILD builds from a checkout of the repo tree. The
+/// second install from such a machine therefore failed at
+/// [`prepare_deploytix_repo`] with "Cannot resolve custom packages".
+///
+/// On an immutable target this lands on `/var`, which is writable, is not
+/// snapshotted (so a rollback cannot take the repo with it), and is
+/// rbind-mounted into every snapshot set's chroot, so `deploytix update` can
+/// resolve from it too.
+///
+/// Best-effort by design: a missing repo means this install did not need one
+/// (every custom package came from a configured repository), which is not a
+/// failure. The install has already succeeded by the time this runs, and
+/// nothing here is worth failing it over.
+pub fn install_local_repo_into_target(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    if cmd.is_dry_run() {
+        info!(
+            "[dry-run] Would copy the local repo to {}{}",
+            install_root, SHARED_REPO_DIR
+        );
+        return Ok(());
+    }
+
+    install_repo_from(Path::new(local_repo_dir()), install_root)
+}
+
+/// The body of [`install_local_repo_into_target`], with the source directory
+/// passed in so it can be exercised against a fixture.
+fn install_repo_from(source: &Path, install_root: &str) -> Result<()> {
+    if !source.join("deploytix.db.tar.zst").exists() {
+        info!(
+            "No local repo at {} to hand to the installed system",
+            source.display()
+        );
+        return Ok(());
+    }
+
+    let dest = format!("{}{}", install_root, SHARED_REPO_DIR);
+    std::fs::create_dir_all(&dest).map_err(DeploytixError::Io)?;
+
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(source)
+        .map_err(DeploytixError::Io)?
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        match std::fs::copy(&path, Path::new(&dest).join(name)) {
+            Ok(_) => copied += 1,
+            Err(e) => warn!("Could not copy {} into the target: {}", path.display(), e),
+        }
+    }
+
+    if copied == 0 {
+        warn!("Local repo at {} held no files to copy", source.display());
+        return Ok(());
+    }
+
+    // Only now that the target actually holds packages is it safe to name the
+    // repo in its pacman.conf: a `file://` server pointing at a directory that
+    // does not exist makes every later `pacman -Sy` on that machine fail.
+    let conf_path = format!("{}/etc/pacman.conf", install_root);
+    match std::fs::read_to_string(&conf_path) {
+        Ok(conf) if conf.lines().any(|l| l.trim() == "[deploytix]") => {
+            info!("[deploytix] already present in the target's pacman.conf");
+        }
+        Ok(conf) => {
+            let updated = format!("{}\n{}", conf.trim_end(), deploytix_repo_section());
+            std::fs::write(&conf_path, updated).map_err(DeploytixError::Io)?;
+            info!("Added [deploytix] to {}", conf_path);
+        }
+        Err(e) => {
+            warn!("Could not read {} to add [deploytix]: {}", conf_path, e);
+            return Ok(());
+        }
+    }
+
+    info!(
+        "Handed {} repo file(s) to the installed system at {}",
+        copied, SHARED_REPO_DIR
+    );
+    Ok(())
 }
 
 // === Arch Linux [extra] repository detection / injection ===
@@ -1196,6 +1411,117 @@ mod tests {
                 .any(|p| p.starts_with("linux") && p.contains("-tkg")),
             "the tkg kernel is not a repository package: {tkg:?}"
         );
+    }
+
+    // ── the local [deploytix] repo ───────────────────────────────────────
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dtx-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A repo directory holding a database and one package file.
+    fn fake_repo(tag: &str) -> PathBuf {
+        let dir = scratch_dir(tag);
+        std::fs::write(dir.join("deploytix.db.tar.zst"), b"db").unwrap();
+        std::fs::write(
+            dir.join("deploytix-git-1.5.1-1-x86_64.pkg.tar.zst"),
+            b"package",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A target with the pacman.conf basestrap would have left behind.
+    fn fake_target(tag: &str) -> PathBuf {
+        let root = scratch_dir(tag);
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(
+            root.join("etc/pacman.conf"),
+            "[options]\nHoldPkg = pacman glibc\n\n[system]\nInclude = /etc/pacman.d/mirrorlist\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// The whole point of the copy: a machine deploytix installed must be able
+    /// to install the next one, which means leaving it both the packages and a
+    /// pacman.conf that names them.
+    #[test]
+    fn the_installed_system_receives_the_repo_and_a_pacman_conf_entry() {
+        let repo = fake_repo("repo");
+        let root = fake_target("root");
+
+        install_repo_from(&repo, root.to_str().unwrap()).unwrap();
+
+        let landed = root.join(SHARED_REPO_DIR.trim_start_matches('/'));
+        assert!(landed.join("deploytix.db.tar.zst").is_file());
+        assert!(landed
+            .join("deploytix-git-1.5.1-1-x86_64.pkg.tar.zst")
+            .is_file());
+
+        let conf = std::fs::read_to_string(root.join("etc/pacman.conf")).unwrap();
+        assert!(conf.contains("[deploytix]"), "{conf}");
+        assert!(
+            conf.contains(&format!("Server = file://{}", SHARED_REPO_DIR)),
+            "{conf}"
+        );
+        // The config it was added to must survive intact.
+        assert!(conf.contains("[system]"), "{conf}");
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Re-running an install over the same target must not stack up repo
+    /// sections; pacman treats a duplicated section as a duplicate database.
+    #[test]
+    fn adding_the_repo_twice_leaves_one_section() {
+        let repo = fake_repo("repo-twice");
+        let root = fake_target("root-twice");
+        let path = root.to_str().unwrap();
+
+        install_repo_from(&repo, path).unwrap();
+        install_repo_from(&repo, path).unwrap();
+
+        let conf = std::fs::read_to_string(root.join("etc/pacman.conf")).unwrap();
+        assert_eq!(conf.matches("[deploytix]").count(), 1, "{conf}");
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An install that needed no custom packages has no repo to hand over, and
+    /// must not leave the target pointing at a `file://` directory that does
+    /// not exist — that breaks every later `pacman -Sy` on that machine.
+    #[test]
+    fn no_repo_means_no_pacman_conf_entry() {
+        let empty = scratch_dir("repo-empty");
+        let root = fake_target("root-empty");
+
+        install_repo_from(&empty, root.to_str().unwrap()).unwrap();
+
+        let conf = std::fs::read_to_string(root.join("etc/pacman.conf")).unwrap();
+        assert!(!conf.contains("[deploytix]"), "{conf}");
+        assert!(!root.join(SHARED_REPO_DIR.trim_start_matches('/')).exists());
+
+        std::fs::remove_dir_all(&empty).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The repo has to live on a mount that an immutable root keeps writable,
+    /// keeps across a rollback, and rbinds into a snapshot set's chroot.
+    /// `/var` is the only one of those; `/tmp` is boot-wiped and `/usr` is
+    /// read-only.
+    #[test]
+    fn the_shared_repo_lives_on_a_mount_immutable_hosts_share() {
+        assert!(crate::immutable::SHARED_LIVE_MOUNTS
+            .iter()
+            .any(|m| SHARED_REPO_DIR.starts_with(&format!("{m}/"))));
+        assert!(!crate::immutable::INITRAMFS_OWNED_MOUNTPOINTS
+            .iter()
+            .any(|m| *m != "/" && SHARED_REPO_DIR.starts_with(&format!("{m}/"))));
     }
 
     #[test]

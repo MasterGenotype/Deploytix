@@ -1,7 +1,7 @@
 //! Metadata source abstraction.
 //!
 //! Anything that can answer "what does package `X` depend on?" plugs in
-//! here: the production [`super::pacman::PacmanSource`] shells out to
+//! here: the production [`crate::pacman::PacmanSource`] shells out to
 //! pacman/pactree, while [`MockSource`] is a deterministic in-memory
 //! implementation used by tests and `--offline` mode.
 //!
@@ -9,8 +9,8 @@
 //! resolver — is what lets the test suite run inside sandboxes where
 //! pacman is not available.
 
-use super::model::{InstallPlan, Package};
-use crate::utils::error::Result;
+use crate::error::Result;
+use crate::model::{InstallPlan, Package};
 use std::collections::{BTreeMap, HashMap};
 
 /// Read-only access to a pacman-style package universe.
@@ -57,6 +57,45 @@ pub trait MetadataSource {
     /// transaction resolver, which knows about installed state,
     /// conflicts, and replacements.
     fn install_plan(&self, targets: &[&str], clean_root: bool) -> Result<InstallPlan>;
+}
+
+/// A boxed source is a source.
+///
+/// Lets a caller that only has `Box<dyn MetadataSource>` — which is what
+/// [`crate::cli::build_source`] hands back — still compose it with another
+/// source, such as stacking the AUR on top of the local repositories.
+impl MetadataSource for Box<dyn MetadataSource> {
+    fn package(&self, name: &str) -> Result<Option<Package>> {
+        (**self).package(name)
+    }
+
+    fn provider_of(&self, virtual_name: &str) -> Result<Option<String>> {
+        (**self).provider_of(virtual_name)
+    }
+
+    fn required_by(&self, name: &str) -> Result<Vec<String>> {
+        (**self).required_by(name)
+    }
+
+    fn optional_for(&self, name: &str) -> Result<Vec<String>> {
+        (**self).optional_for(name)
+    }
+
+    fn is_installed(&self, name: &str) -> Result<bool> {
+        (**self).is_installed(name)
+    }
+
+    fn databases(&self) -> Vec<String> {
+        (**self).databases()
+    }
+
+    fn staleness_warnings(&self) -> Vec<String> {
+        (**self).staleness_warnings()
+    }
+
+    fn install_plan(&self, targets: &[&str], clean_root: bool) -> Result<InstallPlan> {
+        (**self).install_plan(targets, clean_root)
+    }
 }
 
 /// In-memory metadata source for tests and `--offline` mode.

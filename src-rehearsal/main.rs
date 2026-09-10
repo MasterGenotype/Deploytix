@@ -4,12 +4,16 @@
 //! provides its own CLI argument parsing.  It exists so that the rehearsal
 //! tool can be built and distributed as a separate binary (`deploytix-rehearsal`)
 //! without needing the full CLI subcommand infrastructure.
+//!
+//! Install rehearsal only.  Update and removal rehearsals act on a live
+//! deployed system rather than on a target disk, so they live with the rest of
+//! the system-management commands: `deploytix rehearse update|remove`.
 
-use anyhow::Result;
 use clap::Parser;
 use deploytix::config::DeploymentConfig;
-use deploytix::rehearsal::run_rehearsal;
+use deploytix::rehearsal::{run_rehearsal, RehearsalOp};
 use deploytix::utils::error::DeploytixError;
+use deploytix::utils::error::Result;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser)]
@@ -48,7 +52,7 @@ fn main() -> Result<()> {
 
     // Must be root
     if !nix::unistd::geteuid().is_root() {
-        return Err(DeploytixError::NotRoot.into());
+        return Err(DeploytixError::NotRoot);
     }
 
     let config = DeploymentConfig::from_file(&args.config)?;
@@ -61,7 +65,7 @@ fn main() -> Result<()> {
     eprintln!("   All data on the target device will be destroyed.");
     eprintln!("   Live output will appear below as each operation completes.\n");
 
-    let report = run_rehearsal(&config);
+    let report = run_rehearsal(RehearsalOp::Install(Box::new(config)));
     report.print_table();
 
     // Write detailed log

@@ -18,14 +18,26 @@ pub struct RehearsalLogLine {
     pub text: String,
 }
 
-/// Aggregated results of a rehearsal installation run.
+/// How a rehearsal undid what it did, and whether the undo worked.
+///
+/// An install is undone by wiping the disk; a transaction against a live
+/// system is undone by discarding the set or slot it staged.
+#[derive(Debug, Clone)]
+pub struct Restoration {
+    /// What the undo was, phrased as a heading: "Disk wiped".
+    pub what: &'static str,
+    /// Whether it succeeded.
+    pub ok: bool,
+}
+
+/// Aggregated results of a rehearsal run.
 pub struct RehearsalReport {
     /// Every command invocation recorded during the rehearsal.
     pub records: Vec<OperationRecord>,
     /// If the installer short-circuited, the error description.
     pub short_circuited_at: Option<String>,
-    /// Whether the disk was successfully wiped after the rehearsal.
-    pub disk_wiped: bool,
+    /// How the rehearsal put the system back, and whether that worked.
+    pub restoration: Restoration,
     /// Wall-clock duration of the entire rehearsal.
     pub total_duration: Duration,
 }
@@ -104,14 +116,20 @@ impl RehearsalReport {
             println!("{}", format!("Short-circuited at: {}", err).yellow().bold());
         }
 
-        if self.disk_wiped {
-            println!("{}", "Disk wiped: ✓ (restored to pristine state)".dimmed());
+        if self.restoration.ok {
+            println!(
+                "{}",
+                format!("{}: ✓ (system restored)", self.restoration.what).dimmed()
+            );
         } else {
             println!(
                 "{}",
-                "Disk wiped: ✗ (WARNING: disk may be in partial state)"
-                    .red()
-                    .bold()
+                format!(
+                    "{}: ✗ (WARNING: the system may be in a partial state)",
+                    self.restoration.what
+                )
+                .red()
+                .bold()
             );
         }
         println!();
@@ -163,11 +181,14 @@ impl RehearsalReport {
         }
 
         lines.push(RehearsalLogLine {
-            success: self.disk_wiped,
-            text: if self.disk_wiped {
-                "Disk wiped: restored to pristine state".to_string()
+            success: self.restoration.ok,
+            text: if self.restoration.ok {
+                format!("{}: system restored", self.restoration.what)
             } else {
-                "WARNING: disk wipe failed — disk may be in partial state".to_string()
+                format!(
+                    "WARNING: {} failed — the system may be in a partial state",
+                    self.restoration.what.to_lowercase()
+                )
             },
         });
 
@@ -197,7 +218,7 @@ impl RehearsalReport {
         if let Some(ref err) = self.short_circuited_at {
             writeln!(f, "# Short-circuited at: {}", err)?;
         }
-        writeln!(f, "# Disk wiped: {}", self.disk_wiped)?;
+        writeln!(f, "# {}: {}", self.restoration.what, self.restoration.ok)?;
         writeln!(f)?;
 
         for (i, rec) in self.records.iter().enumerate() {

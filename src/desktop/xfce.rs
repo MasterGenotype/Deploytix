@@ -1,39 +1,32 @@
-//! XFCE desktop environment installer
+//! XFCE.
 
-use crate::config::DeploymentConfig;
-use crate::utils::command::CommandRunner;
-use crate::utils::error::Result;
-use std::fs;
-use tracing::info;
+use super::{DesktopModule, DesktopSession};
+use crate::config::DesktopEnvironment;
 
 /// XFCE packages (display manager handled centrally via desktop.display_manager)
 const XFCE_PACKAGES: &[&str] = &["xfce4", "xfce4-goodies"];
 
-/// Install XFCE desktop environment
-pub fn install(cmd: &CommandRunner, config: &DeploymentConfig, install_root: &str) -> Result<()> {
-    info!("Installing XFCE desktop environment");
-
-    if cmd.is_dry_run() {
-        println!(
-            "  [dry-run] Would install XFCE packages: {:?}",
-            XFCE_PACKAGES
-        );
-        return Ok(());
-    }
-
-    // Install packages
-    let pkg_list = XFCE_PACKAGES.join(" ");
-    let install_cmd = format!("pacman -S --noconfirm {}", pkg_list);
-    crate::configure::packages::pacman_install_chroot(cmd, install_root, &install_cmd)?;
-
-    // Create .xinitrc for startx fallback
-    let username = &config.user.name;
-    let xinitrc_path = format!("{}/home/{}/.xinitrc", install_root, username);
-    fs::write(&xinitrc_path, "exec startxfce4\n")?;
-
-    info!("XFCE installation complete");
-    Ok(())
-}
+pub const MODULE: DesktopModule = DesktopModule {
+    id: DesktopEnvironment::Xfce,
+    label: "XFCE",
+    packages: XFCE_PACKAGES,
+    service_packages: &[],
+    xinitrc_command: Some("startxfce4"),
+    session: Some(DesktopSession {
+        command: "startxfce4",
+        fallbacks: &["startplasma-wayland", "gnome-session"],
+        procs: &[
+            "x:startxfce4",
+            "x:xfce4-session",
+            "x:xfwm4",
+            "x:xfdesktop",
+            "x:xfce4-panel",
+            "f:xdg-desktop-portal-xfce",
+        ],
+    }),
+    sddm_conf: None,
+    desktop_file: desktop_file_content,
+};
 
 /// Generate XFCE-specific desktop file content
 pub fn desktop_file_content(bindir: &str) -> String {

@@ -4,7 +4,7 @@
 //!
 //! The tree has no HTTP client and every network fetch so far shells out to
 //! `curl` — see the Warp and linux-tkg downloads in
-//! [`crate::configure::packages`]. Adding `reqwest` for metadata lookups would
+//! [`crate::install::packages`]. Adding `reqwest` for metadata lookups would
 //! pull an async runtime and a TLS stack into a binary that is otherwise a
 //! collection of process invocations, so this follows the existing pattern.
 //!
@@ -23,10 +23,10 @@
 //! Nothing here mutates system state, per the [`MetadataSource`] contract it
 //! exists to serve.
 //!
-//! [`MetadataSource`]: crate::pkgdeps::source::MetadataSource
+//! [`MetadataSource`]: pkgdeps::source::MetadataSource
 
-use crate::pkgdeps::model::{Dep, Package};
 use crate::utils::error::{DeploytixError, Result};
+use pkgdeps::model::{Dep, Package};
 use serde::Deserialize;
 use std::process::Command;
 use tracing::debug;

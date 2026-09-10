@@ -1,21 +1,21 @@
-//! Headless/server installation (no desktop environment)
+//! Headless/server: no desktop environment.
 
-use crate::config::DeploymentConfig;
-use crate::utils::command::CommandRunner;
-use crate::utils::error::Result;
-use tracing::info;
+use super::DesktopModule;
+use crate::config::DesktopEnvironment;
 
-/// Install headless/server configuration (no desktop)
-#[allow(dead_code)]
-pub fn install(
-    _cmd: &CommandRunner,
-    _config: &DeploymentConfig,
-    _install_root: &str,
-) -> Result<()> {
-    info!("No desktop environment selected - headless/server mode");
-    // Nothing to install for headless mode
-    Ok(())
-}
+/// The absence of a desktop, expressed as a module rather than as a special
+/// case: no packages, no session, nothing to start. Every `is_graphical()`
+/// check downstream keys off this being empty.
+pub const MODULE: DesktopModule = DesktopModule {
+    id: DesktopEnvironment::None,
+    label: "None (headless/server)",
+    packages: &[],
+    service_packages: &[],
+    xinitrc_command: None,
+    session: None,
+    sddm_conf: None,
+    desktop_file: desktop_file_content,
+};
 
 /// Generate generic desktop file content (no DE-specific features)
 pub fn desktop_file_content(bindir: &str) -> String {

@@ -272,7 +272,7 @@ redirfd -w 1 /sys/block/zram0/reset echo 1
     // service to the default bundle.  The staged change is compiled and
     // installed as the boot database (`s6 set commit` + `s6 live install
     // --init`) in the finalize phase.
-    crate::configure::services::sync_s6_repository(
+    crate::configure::services::sync_service_repository(
         cmd,
         &crate::config::InitSystem::S6,
         install_root,

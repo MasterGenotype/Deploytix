@@ -103,11 +103,11 @@ fmt:
 
 ## Run linter (deny warnings)
 lint:
-	cargo clippy --all-features -- -D warnings
+	cargo clippy --workspace --all-features -- -D warnings
 
 ## Run tests
 test:
-	cargo test --all-features
+	cargo test --workspace --all-features
 
 ## Remove build artifacts
 clean:

@@ -3,12 +3,12 @@
 //! Each handler accepts a [`MetadataSource`] so the CLI is agnostic to
 //! whether resolution comes from real pacman or a fixture.
 
-use super::graph::{to_dot, DotOpts};
-use super::model::{DepClosure, InstallPlan};
-use super::pacman::{PacmanConfig, PacmanSource};
-use super::resolver::{self, ResolveOpts};
-use super::source::{MetadataSource, MockSource};
-use crate::utils::error::{DeploytixError, Result};
+use crate::error::{Error, Result};
+use crate::graph::{to_dot, DotOpts};
+use crate::model::{DepClosure, InstallPlan};
+use crate::pacman::{PacmanConfig, PacmanSource};
+use crate::resolver::{self, ResolveOpts};
+use crate::source::{MetadataSource, MockSource};
 use serde::Serialize;
 use std::path::Path;
 
@@ -53,23 +53,27 @@ impl DepsArgs {
     }
 }
 
-/// Construct the metadata source the CLI should use given the args.
+/// Construct the local metadata source the CLI should use given the args:
+/// an offline fixture if one was named, otherwise the host's pacman.
+///
+/// `args.aur` is deliberately not consulted here. Composing the AUR on top is
+/// the caller's job — this layer resolves dependencies and knows nothing about
+/// where extra metadata might come from.
 pub fn build_source(args: &DepsArgs) -> Result<Box<dyn MetadataSource>> {
     if let Some(path) = &args.offline {
         // An offline fixture is a closed universe by definition; consulting
-        // the network would defeat the point of it.
+        // anything else would defeat the point of it.
         let mock = load_offline_fixture(Path::new(path))?;
         return Ok(Box::new(mock));
     }
-    let pacman = PacmanSource::system(args.pacman_config());
-    if args.aur {
-        Ok(Box::new(crate::aur::source::CompositeSource::new(
-            pacman,
-            crate::aur::source::AurSource::new(crate::aur::rpc::CurlGet),
-        )))
-    } else {
-        Ok(Box::new(pacman))
-    }
+    Ok(Box::new(PacmanSource::system(args.pacman_config())))
+}
+
+/// Whether `args` asks for a source the local system cannot answer on its own.
+///
+/// An offline fixture wins over `--aur`: it is a closed universe.
+pub fn wants_aur(args: &DepsArgs) -> bool {
+    args.aur && args.offline.is_none()
 }
 
 /// Read a JSON fixture from disk into a [`MockSource`]. Format:
@@ -88,7 +92,7 @@ pub fn load_offline_fixture(path: &Path) -> Result<MockSource> {
         providers: Vec<super::model::ProviderChoice>,
     }
     let fixture: Fixture = serde_json::from_str(&text).map_err(|e| {
-        DeploytixError::ConfigError(format!("invalid offline fixture {}: {}", path.display(), e))
+        Error::Invalid(format!("invalid offline fixture {}: {}", path.display(), e))
     })?;
 
     // Build via the chainable builder so the JSON-fixture loader and any
@@ -239,7 +243,7 @@ fn print_plan_human(plan: &InstallPlan) {
 
 pub fn cmd_metadata(source: &dyn MetadataSource, package: &str, args: &DepsArgs) -> Result<()> {
     let pkg = source.package(package)?.ok_or_else(|| {
-        DeploytixError::ConfigError(format!(
+        Error::Invalid(format!(
             "package '{}' not found in any sync database",
             package
         ))
@@ -319,10 +323,10 @@ struct CompareOutput<'a> {
 pub fn cmd_compare(source: &dyn MetadataSource, a: &str, b: &str, args: &DepsArgs) -> Result<()> {
     let pa = source
         .package(a)?
-        .ok_or_else(|| DeploytixError::ConfigError(format!("package '{}' not found", a)))?;
+        .ok_or_else(|| Error::Invalid(format!("package '{}' not found", a)))?;
     let pb = source
         .package(b)?
-        .ok_or_else(|| DeploytixError::ConfigError(format!("package '{}' not found", b)))?;
+        .ok_or_else(|| Error::Invalid(format!("package '{}' not found", b)))?;
     let differences = resolver::diff_packages(&pa, &pb);
     if args.json {
         print_json(&CompareOutput {
@@ -342,7 +346,7 @@ pub fn cmd_compare(source: &dyn MetadataSource, a: &str, b: &str, args: &DepsArg
 
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(value)
-        .map_err(|e| DeploytixError::ConfigError(format!("json serialization failed: {}", e)))?;
+        .map_err(|e| Error::Invalid(format!("json serialization failed: {}", e)))?;
     println!("{}", text);
     Ok(())
 }
@@ -356,7 +360,7 @@ fn emit_warnings(warnings: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkgdeps::model::{Dep, Package};
+    use crate::model::{Dep, Package};
 
     fn fixture_source() -> MockSource {
         let mut s = MockSource::default();

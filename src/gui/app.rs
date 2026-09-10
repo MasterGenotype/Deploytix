@@ -208,7 +208,9 @@ impl DeploytixGui {
         self.install.receiver = Some(rx);
 
         thread::spawn(move || {
-            let report = crate::rehearsal::run_rehearsal(&config);
+            let report = crate::rehearsal::run_rehearsal(crate::rehearsal::RehearsalOp::Install(
+                Box::new(config),
+            ));
             let lines = report.to_log_lines();
             let has_failures = report.has_failures();
             let _ = tx.send(InstallMessage::RehearsalResults {

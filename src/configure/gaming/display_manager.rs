@@ -69,9 +69,11 @@ fn configure_sddm(
     let sddm_conf_dir = format!("{}/etc/sddm.conf.d", install_root);
     fs::create_dir_all(&sddm_conf_dir)?;
 
+    // Whether a desktop ships an sddm theme is the desktop's own fact, so it
+    // is stated in its module rather than known here.
     let mut sddm_conf = String::new();
-    if config.desktop.environment == DesktopEnvironment::Kde {
-        sddm_conf.push_str("[Theme]\nCurrent=breeze\n\n");
+    if let Some(stanza) = crate::desktop::module(&config.desktop.environment).sddm_conf {
+        sddm_conf.push_str(stanza);
     }
     sddm_conf.push_str("[Users]\nMaximumUid=60000\nMinimumUid=1000\n");
 

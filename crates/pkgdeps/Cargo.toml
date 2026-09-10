@@ -1,0 +1,15 @@
+[package]
+name = "pkgdeps"
+version = "0.1.0"
+edition = "2021"
+authors = ["superphenotype"]
+description = "Dependency resolution and queries against the pacman/libalpm package universe"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/MasterGenotype/Deploytix"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+regex = "1"
