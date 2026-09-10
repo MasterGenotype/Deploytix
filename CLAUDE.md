@@ -184,6 +184,16 @@ Both block direct `pacman -Syu` via the read-only `/usr` plus a `/etc/profile.d`
 interactive nudge (not a pacman hook, which would break `basestrap`/`pacman -r`
 image builds and deploys).
 
+**Per-image pacman database.** `/var` is shared across every set/slot, so a
+database living at `/var/lib/pacman` described the newest state while the files
+rolled back — `pacman -Qkk` then reported missing files for packages it claimed
+were installed. The database is therefore stored at `/usr/lib/sysimage/pacman`
+(inside `@usr` on btrfs, inside the root LV on LVM A/B) and bind-mounted back
+onto `/var/lib/pacman` via an fstab `bind,nofail` entry, so it rolls back with
+the system. `DBPath` stays at its default — the bind is the whole mechanism.
+Older installs are migrated inside the next transaction without touching the
+running system's copy. `src/immutable/pacman_db.rs`.
+
 **Composing updates within a session.** Both backends distinguish what is
 *running* (from `/proc/cmdline`: `rootflags=subvol=` or `deploytix.slot=`) from
 what is *staged* for the next boot (the boot pointer), via
@@ -194,6 +204,24 @@ and asserted never to be it — building into the running slot would mount a liv
 dm-verity data device read-write. `deploytix rollback` with no argument discards
 a staged set and returns to the running one. Transactions are serialised by an
 flock on `/run/deploytix-update.lock`. See `docs/IMMUTABLE_SET_COMPOSITION.md`.
+
+## Working Directories
+
+deploytix never writes its working files to `/tmp`. A *deployed immutable* host
+has no writable `/tmp` on the LVM A/B backend (`/` is a read-only dm-verity image
+and only `/etc` is overlaid), and a `/tmp` path is invisible from inside a
+transactional chroot, which rbinds only `/var`, `/home` and `/boot`. Two homes,
+picked by `utils::paths`:
+
+- `/run/deploytix` (`runtime_path`) — mount points and generated scripts: small,
+  root-only, worthless after a reboot.
+- `/var/cache/deploytix` (`cache_path`) — the local `[deploytix]` repo
+  (`repo/`) and the generated `pacman.conf` passed to `basestrap -C`. Large, and
+  on the one filesystem a transactional chroot can see.
+
+The ISO build script follows the same rule: its package staging directory sits
+beside the artools workspace (so `-w` moves it onto the build disk), never
+`/tmp`.
 
 ## Reference Materials
 

@@ -234,21 +234,49 @@ The fourth rule is a short list of names — `pacman`, `mkinitcpio`, `grub`,
 update mechanism depends on them. Removing any one leaves a system with a
 read-only `/usr` that can no longer repair itself.
 
-### The pacman database caveat
+### The pacman database
 
-The pacman database lives on the shared `/var`. A removal updates it for every
-set at once, while deleting files from the new set only. Roll a removal back and
-the files come back while the database still says the package is gone.
+The database is part of the snapshot set, not of the shared `/var`. It is stored
+at `/usr/lib/sysimage/pacman` — inside `@usr`, so every set carries its own — and
+bind-mounted back onto `/var/lib/pacman`, where pacman looks for it:
 
-Updates already have the same problem in the other direction: roll one back and
-the database reports versions the files no longer match. It comes from `/var`
-being shared rather than from either command.
+```
+/usr/lib/sysimage/pacman  /var/lib/pacman  none  bind,nofail  0  0
+```
 
-Removal does guarantee one thing here. The database is copied aside with
-`cp -a --reflink=auto` before the transaction — instant on btrfs, and using no
-extra space until one copy changes — and restored if pacman or the following
-`mkinitcpio -P` fails. Without that, a failed removal would leave the database
-saying a package is gone while the running system still has every file.
+`DBPath` is left at its default, so `pacman`, `pacman -Q`, `yay`, `pactree` and
+every `--dbpath` deploytix passes elsewhere keep working unchanged. This is the
+same move openSUSE MicroOS and Fedora Silverblue made with the RPM database, for
+the same reason. See `src/immutable/pacman_db.rs`.
+
+What this buys:
+
+- **Rollback restores the database with the files.** Roll an update back and the
+  database reports the versions that are actually on disk; roll a removal back
+  and the package is installed again as far as pacman is concerned. Before this,
+  a rolled-back system reported missing files for packages the database still
+  claimed were installed, and the next transaction planned against a state the
+  machine was not in.
+- **The live database is read-only**, because the `/usr` under it is. Writing it
+  needs a transaction — the rule the rest of the model already enforces.
+- **A failed transaction needs no unwinding.** The database is inside the set, so
+  discarding the set discards it, and the running system's copy was never
+  touched.
+
+**Migration is automatic and windowless.** An install made before this existed
+still has the shared `/var/lib/pacman`; the next `deploytix update` or
+`deploytix remove` seeds the new set's `/usr/lib/sysimage/pacman` from it with
+`cp -a --reflink=auto` (instant on btrfs, and free until one copy changes) and
+adds the fstab entry — all **inside the set**. The running system keeps its own
+database exactly where it is, so nothing changes underneath it. Rolling back to a
+set from before the migration also still works: that set has no fstab entry, and
+`nofail` turns the absent bind into a skipped mount, so it uses the shared
+database as it always did.
+
+The one case that still needs unwinding is a set whose migration could not be
+completed, where pacman writes the shared database directly. There
+`deploytix remove` copies it aside with `cp -a --reflink=auto` before the
+transaction and restores it if pacman or the following `mkinitcpio -P` fails.
 
 ### LVM A/B
 

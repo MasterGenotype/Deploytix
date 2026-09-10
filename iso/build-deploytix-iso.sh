@@ -70,7 +70,12 @@ TKG_GUI_REMOTE="git+ssh://git@github.com/MasterGenotype/tkg-gui.git"
 GAMESCOPE_REMOTE="git+ssh://git@github.com/MasterGenotype/gamescope.git#branch=gamescope-ba"
 # Staging directory — single source of truth fed to both the local artools repo
 # and the live-overlay embedded repo, eliminating version drift between the two.
-PKG_STAGE_DIR="/tmp/deploytix-iso-stage-$$"
+# Resolved in resolve_paths() next to the workspace, NOT under /tmp: a deployed
+# immutable Deploytix host (LVM A/B) mounts / read-only from a dm-verity slot and
+# overlays only /etc, so /tmp there is a read-only directory inside the sealed
+# image and staging died at the first mkdir. Keeping it beside the workspace also
+# means -w moves it onto the same real disk as the rest of the build.
+PKG_STAGE_DIR=""
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -166,6 +171,10 @@ resolve_paths() {
     # The repo lives beside the chroots so both sit on the same filesystem —
     # with the default chroots_dir this is the historical /var/lib/artools path.
     LOCAL_REPO_DIR="${CHROOTS_DIR}/repos/deploytix"
+    # Beside the workspace (which resolve_chroots_dir has just pointed at the
+    # build disk, if -w was given) and owned by the invoking user, unlike the
+    # root-owned repo above. The pid suffix keeps two concurrent builds apart.
+    PKG_STAGE_DIR="${WORKSPACE_DIR}/pkg-stage-$$"
     PROFILE_SRC="${ISO_DIR}/profile/deploytix"
     TKG_GUI_PKG_DIR="${REPO_ROOT}/vendor/tkg-gui/pkg"
     GAMESCOPE_PKG_DIR="${REPO_ROOT}/vendor/gamescope/pkg"
@@ -668,7 +677,8 @@ _cleanup_dirty_pkgbuilds() {
     # staging dir would report failure on the two paths where it is *expected*
     # to be missing — every dry run, and every successful build, where
     # cleanup_built_packages has already removed it. An `if` yields 0 instead.
-    if [[ -d "${PKG_STAGE_DIR}" ]]; then
+    # The -n guard covers the window before resolve_paths sets the variable.
+    if [[ -n "${PKG_STAGE_DIR}" && -d "${PKG_STAGE_DIR}" ]]; then
         rm -rf "${PKG_STAGE_DIR}"
     fi
 }
@@ -791,8 +801,13 @@ stage_packages() {
     fi
 
     msg "Staging packages..."
+    [[ -n "${PKG_STAGE_DIR}" ]] || die "PKG_STAGE_DIR unresolved (resolve_paths not run?)"
     rm -rf "${PKG_STAGE_DIR}"
-    mkdir -p "${PKG_STAGE_DIR}"
+    mkdir -p "${PKG_STAGE_DIR}" \
+        || die "Cannot create the staging directory ${PKG_STAGE_DIR}. If this is a
+       read-only path (an immutable Deploytix host seals / with dm-verity), point
+       the build at a writable disk with -w <dir>."
+
 
     local src_dir pkg
     for src_dir in "${PKG_DIR}" "${TKG_GUI_PKG_DIR}" "${GAMESCOPE_PKG_DIR}"; do
@@ -913,7 +928,7 @@ reset_artifacts() {
         msg2 "Removed repo: ${LOCAL_REPO_DIR}"
     fi
 
-    if [[ -d "${PKG_STAGE_DIR}" ]]; then
+    if [[ -n "${PKG_STAGE_DIR}" && -d "${PKG_STAGE_DIR}" ]]; then
         rm -rf "${PKG_STAGE_DIR}"
         msg2 "Removed staging dir: ${PKG_STAGE_DIR}"
     fi

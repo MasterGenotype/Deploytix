@@ -100,6 +100,59 @@ pub fn tmp_fstab_entry(root_fs_uuid: &str) -> String {
     format!("UUID={root_fs_uuid}  /tmp  btrfs  subvol=@tmp,rw,noatime,compress=zstd  0  0\n")
 }
 
+// ── LVM A/B backend ─────────────────────────────────────────────────────────
+//
+// The A/B backend has no btrfs to put a `@tmp` subvolume on: `/` is an ext4/xfs
+// image sealed with dm-verity and mounted read-only, and the `verity-ab` hook
+// overlays only `/etc`. That left `/tmp` a read-only directory inside the sealed
+// image — writable by nothing, which breaks far more than deploytix: makepkg,
+// pacman's own scratch files, and the GUIs' single-instance locks all need it.
+//
+// It gets the same treatment as `/root`, `/opt` and `/srv` on the btrfs backend:
+// a real directory on the shared, writable `/var`, bind-mounted into place. Disk
+// backed rather than a half-RAM tmpfs, for the reason in `docs/TMP_DISK_BACKED.md`,
+// and boot-wiped by the same tmpfiles drop-in as the btrfs backend.
+
+/// Backing directory on the shared `/var` for the A/B backend's `/tmp`.
+///
+/// A sibling of the `WRITABLE_BIND_PATHS` sources (`/var/roothome`, `/var/opt`,
+/// `/var/srv`) rather than something under `/var/tmp`: the stock tmpfiles rule
+/// `q /var/tmp 1777 root root 30d` ages out everything below `/var/tmp`, which
+/// is the wrong policy to inherit for a directory that *is* `/tmp` and is
+/// boot-wiped on its own schedule.
+pub const AB_TMP_SOURCE: &str = "/var/deploytix-tmp";
+
+/// fstab line binding [`AB_TMP_SOURCE`] onto `/tmp`, for the A/B backend.
+pub fn ab_tmp_fstab_entry() -> String {
+    format!(
+        "# /tmp. The verity root is read-only and has no writable `@tmp` subvolume\n\
+         # to offer, so /tmp is a directory on the shared /var bound into place.\n\
+         # Disk-backed, not a half-RAM tmpfs; boot-wiped by tmpfiles.d.\n\
+         {AB_TMP_SOURCE}  /tmp  none  bind  0  0\n"
+    )
+}
+
+/// Create [`AB_TMP_SOURCE`] under `install_root` (mode 1777) and bind it over
+/// `<install_root>/tmp`, the way the booted system will have it.
+///
+/// Call once `/var` is mounted and before basestrap, so the rest of the install
+/// has a writable `/tmp` inside the target exactly as the booted system does.
+pub fn create_and_bind_ab_tmp(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("[immutable] Creating the A/B backend's writable /tmp on the shared /var");
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would bind {install_root}{AB_TMP_SOURCE} -> {install_root}/tmp");
+        return Ok(());
+    }
+    let source = format!("{install_root}{AB_TMP_SOURCE}");
+    let mount = format!("{install_root}/tmp");
+    std::fs::create_dir_all(&source)?;
+    std::fs::create_dir_all(&mount)?;
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o1777))?;
+    cmd.run("mount", &["--bind", &source, &mount])?;
+    std::fs::set_permissions(&mount, std::fs::Permissions::from_mode(0o1777))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +193,32 @@ mod tests {
         assert!(line.contains("subvol=@tmp"));
         assert!(line.contains("/tmp"));
         assert!(!line.contains("tmpfs"));
+    }
+
+    /// A read-only /tmp is not a working system: makepkg, pacman's scratch
+    /// files and the GUI locks all need to write there, and the sealed A/B root
+    /// offers no `@tmp` subvolume to mount instead.
+    #[test]
+    fn the_ab_backend_gets_a_writable_disk_backed_tmp() {
+        let entry = ab_tmp_fstab_entry();
+        let line = entry
+            .lines()
+            .find(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .expect("no entry line");
+        assert_eq!(
+            line.split_whitespace().collect::<Vec<_>>(),
+            vec![AB_TMP_SOURCE, "/tmp", "none", "bind", "0", "0"]
+        );
+        assert!(
+            AB_TMP_SOURCE.starts_with("/var/"),
+            "the bind source must be on the shared, writable /var"
+        );
+    }
+
+    #[test]
+    fn create_and_bind_ab_tmp_is_dry_run_safe() {
+        let cmd = CommandRunner::new(true);
+        create_and_bind_ab_tmp(&cmd, "/mnt/target").unwrap();
     }
 
     #[test]

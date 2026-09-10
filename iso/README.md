@@ -106,12 +106,13 @@ overlay graph driver; `-w` pointed at a volume on a real filesystem fixes it too
 ## What the Script Does
 
 1. **Builds deploytix packages** — runs `makepkg` in `pkg/` and clones/builds `tkg-gui-git`
-2. **Creates a local pacman repository** — copies packages to `/var/lib/artools/repos/deploytix/` and runs `repo-add`
-3. **Configures pacman** — installs a custom `iso-x86_64.conf` in `~/.config/artools/pacman.conf.d/` with a `[deploytix]` repo pointing to the local repository
-4. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`
-5. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo`; at runtime the Rust installer detects this repo and generates a temporary pacman.conf for basestrap, then copies the repo into the installed system at the same path (and adds a `[deploytix]` section to its `pacman.conf`) so that machine can install the next one
-6. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
-7. **Overrides the live GRUB templates** — the ISO auto-selects the appropriate default boot entry after a 1 second timeout instead of waiting indefinitely at the GRUB menu
+2. **Stages them** — collects every built `.pkg.tar.zst` into one directory beside the artools workspace (`~/artools-workspace/pkg-stage-<pid>/`, or under `-w`'s directory when that is given), which is the single source both repos below are built from. Deliberately not `/tmp`: a deployed immutable Deploytix host seals `/` with dm-verity and overlays only `/etc`, so `/tmp` there is read-only and staging died at the first `mkdir`
+3. **Creates a local pacman repository** — copies packages to `/var/lib/artools/repos/deploytix/` and runs `repo-add`
+4. **Configures pacman** — installs a custom `iso-x86_64.conf` in `~/.config/artools/pacman.conf.d/` with a `[deploytix]` repo pointing to the local repository
+5. **Installs the ISO profile** — copies the deploytix profile to `~/artools-workspace/iso-profiles/deploytix/`
+6. **Embeds packages in live-overlay** — copies `.pkg.tar.zst` files and a pacman database into the ISO at `/var/lib/deploytix-repo`; at runtime the Rust installer detects this repo and generates a pacman.conf for basestrap (under `/var/cache/deploytix/`), then copies the repo into the installed system at the same path (and adds a `[deploytix]` section to its `pacman.conf`) so that machine can install the next one
+7. **Runs `buildiso`** — produces the ISO at `~/artools-workspace/iso/deploytix/`
+8. **Overrides the live GRUB templates** — the ISO auto-selects the appropriate default boot entry after a 1 second timeout instead of waiting indefinitely at the GRUB menu
 
 To remove all installed artifacts (profile, repo, pacman.conf override), run `./iso/build-deploytix-iso.sh -r`.
 

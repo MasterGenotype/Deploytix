@@ -16,9 +16,11 @@
 //! mounts `/` read-only.
 //!
 //! ## Shared writable state
-//! `/var`, `/home` and `/boot` are shared across slots. As with the btrfs
-//! backend, the pacman DB lives on the shared `/var`, so a rollback restores the
-//! slot's `/usr` files but not the package database. See `docs/IMMUTABLE_LVM_AB.md`.
+//! `/var`, `/home` and `/boot` are shared across slots. The pacman database is
+//! the deliberate exception: it lives at `/usr/lib/sysimage/pacman` inside each
+//! slot's sealed root and is bind-mounted back onto `/var/lib/pacman`, so a slot
+//! flip restores the database along with the files it describes. See
+//! [`crate::immutable::pacman_db`] and `docs/IMMUTABLE_LVM_AB.md`.
 
 use crate::config::Filesystem;
 use crate::disk::lvm::{ab, lv_path};
@@ -343,10 +345,16 @@ pub fn run_update(
             cmd.run("sh", &["-c", &rsync_root_cmd(&target)])?;
         }
 
+        // Give the slot its own pacman database (migrating an older install on
+        // the way), so a slot flip carries the database with the files it
+        // describes. After the rsync above, which would otherwise overwrite it
+        // with the running slot's copy, and before pacman writes an entry.
+        crate::immutable::pacman_db::ensure_in_target(cmd, &t);
+
         let staged = update::stage_local_pkgs(cmd, &local_files)?;
-        // Bracket the transaction with two `pacman -Q` reads. /var is shared
-        // across both slots and is not part of the verity-sealed root, so this
-        // pair is the only record of what the slot's build changed.
+        // Bracket the transaction with two `pacman -Q` reads against the slot's
+        // own database (see `pacman_db`), which is what makes the diff describe
+        // this slot's build rather than the shared /var's last state.
         let before = history::query_packages(cmd, &t);
         info!("[lvm-ab] Running pacman in slot {}", target);
         for pac in update::pacman_cmds(&staged, &repo_names) {

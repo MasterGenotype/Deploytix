@@ -169,10 +169,10 @@ Run with the baseline config and `device` pointing at the test disk.
 | ID | Validates | Procedure | Pass criteria | Fail action |
 |----|-----------|-----------|---------------|-------------|
 | **T6a** | Custom repo discovery | On a clean Artix host with no `[deploytix]` section in pacman.conf, no built packages, no live-ISO repo, run install | Fails with `Cannot resolve custom packages: …` and the multi-line "To fix" message | Inspect `prepare_deploytix_repo` in `src/install/basestrap.rs:784-875` |
-| **T6b** | Pre-built `.pkg.tar.zst` discovery | Place pre-built archives in `pkg/`; run install | Logs `Found N pre-built package file(s); creating temporary repo`; `/tmp/deploytix-local-repo/` populated | Inspect `locate_prebuilt_packages` in `src/install/basestrap.rs:409-497` |
+| **T6b** | Pre-built `.pkg.tar.zst` discovery | Place pre-built archives in `pkg/`; run install | Logs `Found N pre-built package file(s); creating temporary repo`; `/var/cache/deploytix/repo/` populated | Inspect `locate_prebuilt_packages` in `src/install/basestrap.rs:409-497` |
 | **T6c** | Build-from-source fallback | Remove pre-built packages, keep `pkg/PKGBUILD`; run install as `sudo` (so `SUDO_USER` is set) | Logs `Building deploytix-git from …`; new `.pkg.tar.zst` files appear in `pkg/` | Inspect `build_package_from_source` in `src/install/basestrap.rs:591-669` |
 | **T6d** | Network retry | Block outbound HTTP via firewall during basestrap; observe | Three attempts, 5 s delay between; final error message includes `failed to retrieve some files` or similar | Inspect `run_basestrap_with_retries` in `src/install/basestrap.rs:967-1038` |
-| **T6e** | Arch [extra] injection | On a host without `[extra]` configured, run install with package(s) from [extra] | Log line `Arch [extra] repository not configured; adding it`; `/tmp/deploytix-pacman.conf` contains `[extra]` block | Inspect `ensure_arch_repos` in `src/install/basestrap.rs:891-930` |
+| **T6e** | Arch [extra] injection | On a host without `[extra]` configured, run install with package(s) from [extra] | Log line `Arch [extra] repository not configured; adding it`; `/var/cache/deploytix/pacman.conf` contains `[extra]` block | Inspect `ensure_arch_repos` in `src/install/basestrap.rs:891-930` |
 
 ### T7 — fstab / crypttab
 
@@ -319,7 +319,7 @@ Run each package test with that flag enabled and all others disabled.
 
 ### Fix-3: Changes to `prepare_deploytix_repo` (`src/install/basestrap.rs`)
 
-- **Before/after**: state of `/tmp/deploytix-pacman.conf` and `/tmp/deploytix-local-repo/` after install on (a) live ISO, (b) clean Artix host with pre-built packages, (c) clean Artix host without pre-built packages.
+- **Before/after**: state of `/var/cache/deploytix/pacman.conf` and `/var/cache/deploytix/repo/` after install on (a) live ISO, (b) clean Artix host with pre-built packages, (c) clean Artix host without pre-built packages.
 - **Regression**: T6a, T6b, T6c, T6e, T13c (gaming uses gamescope-git from custom repo).
 
 ### Fix-4: Changes to `enable_service` family (`src/configure/system/services.rs`)

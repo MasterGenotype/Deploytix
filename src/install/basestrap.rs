@@ -360,15 +360,29 @@ pub const SHARED_REPO_DIR: &str = "/var/lib/deploytix-repo";
 /// Where a repo is built when [`SHARED_REPO_DIR`] cannot be written — a live
 /// medium mounted read-only, most likely. Good enough for the install in
 /// progress, gone on the next boot.
-const FALLBACK_REPO_DIR: &str = "/tmp/deploytix-local-repo";
+///
+/// Resolved by [`crate::utils::paths::cache_dir`] rather than being a `/tmp`
+/// literal: on a deployed immutable host `/tmp` is read-only (the LVM A/B
+/// backend seals `/` with dm-verity and overlays only `/etc`), so the fallback
+/// would have failed in exactly the situation it exists for.
+fn fallback_repo_dir() -> String {
+    crate::utils::paths::cache_path("repo")
+}
 
-/// Temporary pacman.conf that adds the [deploytix] repo.
-const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
+/// Generated pacman.conf that adds the [deploytix] repo.
+///
+/// Beside the fallback repo, and off `/tmp` for the same reason — note this one
+/// is written on the **success** path too (`write_custom_pacman_conf` runs even
+/// when the shared repo resolved cleanly), so a read-only `/tmp` failed the
+/// install regardless of where the repo itself ended up.
+fn temp_pacman_conf() -> String {
+    crate::utils::paths::cache_path("pacman.conf")
+}
 
 /// The directory this process will build a local repo in.
 ///
 /// [`SHARED_REPO_DIR`] when it can be created and written, otherwise
-/// [`FALLBACK_REPO_DIR`]. Resolved once: the answer cannot change during a
+/// [`fallback_repo_dir`]. Resolved once: the answer cannot change during a
 /// run, and re-probing risks two call sites disagreeing about where the repo
 /// is.
 fn local_repo_dir() -> &'static str {
@@ -377,12 +391,16 @@ fn local_repo_dir() -> &'static str {
         if dir_is_writable(SHARED_REPO_DIR) {
             SHARED_REPO_DIR
         } else {
+            // Leaked once, so the contract stays `&'static str` for the call
+            // sites that compare it. The fallback path is probed, so it is not
+            // a constant.
+            let fallback: &'static str = Box::leak(fallback_repo_dir().into_boxed_str());
             warn!(
                 "{} is not writable; building the local repo at {} instead. \
                  It will not survive a reboot.",
-                SHARED_REPO_DIR, FALLBACK_REPO_DIR
+                SHARED_REPO_DIR, fallback
             );
-            FALLBACK_REPO_DIR
+            fallback
         }
     })
 }
@@ -393,17 +411,7 @@ fn local_repo_dir() -> &'static str {
 /// `/var/lib/deploytix-repo` on a read-only mount, where `create_dir_all`
 /// succeeds trivially and the first `repo-add` then fails with EROFS.
 fn dir_is_writable(dir: &str) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let probe = Path::new(dir).join(".deploytix-write-probe");
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
+    crate::utils::paths::dir_is_writable(Path::new(dir))
 }
 
 /// The package files already sitting in the shared repo.
@@ -945,13 +953,17 @@ fn write_custom_pacman_conf(repo_dir: &str) -> Result<Option<String>> {
         repo_dir,
     );
 
-    std::fs::write(TEMP_PACMAN_CONF, &custom).map_err(DeploytixError::Io)?;
+    let conf_path = temp_pacman_conf();
+    if let Some(parent) = Path::new(&conf_path).parent() {
+        std::fs::create_dir_all(parent).map_err(DeploytixError::Io)?;
+    }
+    std::fs::write(&conf_path, &custom).map_err(DeploytixError::Io)?;
 
     info!(
         "Custom pacman.conf written to {} (repo: file://{})",
-        TEMP_PACMAN_CONF, repo_dir
+        conf_path, repo_dir
     );
-    Ok(Some(TEMP_PACMAN_CONF.to_string()))
+    Ok(Some(conf_path))
 }
 
 /// Ensure the deploytix custom packages are resolvable by pacman for
@@ -1245,14 +1257,18 @@ fn ensure_arch_repos(existing_conf: Option<String>, cmd: &CommandRunner) -> Resu
         mirror_entry,
     );
 
-    std::fs::write(TEMP_PACMAN_CONF, &updated).map_err(DeploytixError::Io)?;
+    let conf_path = temp_pacman_conf();
+    if let Some(parent) = Path::new(&conf_path).parent() {
+        std::fs::create_dir_all(parent).map_err(DeploytixError::Io)?;
+    }
+    std::fs::write(&conf_path, &updated).map_err(DeploytixError::Io)?;
 
     info!(
         "Updated pacman.conf at {} with Arch [extra] repository",
-        TEMP_PACMAN_CONF,
+        conf_path,
     );
 
-    Ok(Some(TEMP_PACMAN_CONF.to_string()))
+    Ok(Some(conf_path))
 }
 
 /// Maximum number of retry attempts for basestrap on network failures
@@ -1381,6 +1397,28 @@ pub fn run_basestrap_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Neither the fallback repo nor the generated pacman.conf may be a `/tmp`
+    /// literal. `SHARED_REPO_DIR` covers the normal case, but the fallback runs
+    /// precisely when the normal case failed, and `write_custom_pacman_conf`
+    /// runs on the success path too — so a read-only `/tmp` (a deployed
+    /// immutable host, where `/` is a sealed dm-verity image and only `/etc` is
+    /// overlaid) failed the install either way.
+    #[test]
+    fn the_fallback_repo_and_the_generated_config_are_not_on_tmp() {
+        for p in [fallback_repo_dir(), temp_pacman_conf()] {
+            assert!(
+                !p.starts_with("/tmp/"),
+                "{p} is on /tmp, which a deployed immutable host mounts read-only"
+            );
+        }
+        // Same directory, so the `Server = file://` line and the file carrying
+        // it can never land on different filesystems.
+        assert_eq!(
+            std::path::Path::new(&fallback_repo_dir()).parent(),
+            std::path::Path::new(&temp_pacman_conf()).parent()
+        );
+    }
 
     /// linux-tkg replaces the stock kernel rather than joining it, so
     /// basestrap must not also pull linux-zen in: two kernels is not the

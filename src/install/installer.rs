@@ -1285,6 +1285,10 @@ impl Installer {
             // install, so packages that write there land on @var instead of
             // inside @ where the boot-time bind mount would hide them.
             crate::immutable::mount_writable_path_binds(&self.cmd, INSTALL_ROOT)?;
+            // ...and put the pacman database inside @usr, where it is
+            // snapshotted with the system rather than shared across every set.
+            // Before basestrap, so the base system's database is written there.
+            crate::immutable::pacman_db::create_and_bind(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -2067,7 +2071,8 @@ impl Installer {
     /// - Var:  @var (→ /var), @log (→ /var/log)
     /// - Home: @home (→ /home)
     fn mount_multi_volume_with_subvolumes(&self) -> Result<()> {
-        let temp_mount = "/tmp/deploytix_btrfs_crypto";
+        let temp_mount = crate::utils::paths::runtime_path("btrfs-crypto");
+        let temp_mount = temp_mount.as_str();
 
         // Root container must be mounted first
         let root_container = self
@@ -2123,6 +2128,9 @@ impl Installer {
             // install, so packages that write there land on @var instead of
             // inside @ where the boot-time bind mount would hide them.
             crate::immutable::mount_writable_path_binds(&self.cmd, INSTALL_ROOT)?;
+            // ...and put the pacman database inside @usr, where it is
+            // snapshotted with the system rather than shared across every set.
+            crate::immutable::pacman_db::create_and_bind(&self.cmd, INSTALL_ROOT)?;
         }
 
         Ok(())
@@ -2696,6 +2704,17 @@ impl Installer {
         // during install and must land on the real partitions, not inside the
         // sealed slot-A image).
         self.mount_ab_boot_and_efi()?;
+
+        // The sealed root has no writable /tmp to offer, so it gets one on the
+        // shared /var. Before basestrap, so the install itself has the same
+        // writable /tmp the booted system will have.
+        crate::immutable::tmp::create_and_bind_ab_tmp(&self.cmd, INSTALL_ROOT)?;
+
+        // The pacman database belongs inside the slot image, not on the shared
+        // /var — otherwise a slot flip restores the files and leaves the
+        // database describing the other slot. /var is mounted by now, so the
+        // bind can be put in place before basestrap writes the first entry.
+        crate::immutable::pacman_db::create_and_bind(&self.cmd, INSTALL_ROOT)?;
 
         // Enable swap partition if present.
         for part in &self.layout.as_ref().unwrap().partitions {

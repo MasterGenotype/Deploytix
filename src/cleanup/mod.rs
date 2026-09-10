@@ -248,7 +248,8 @@ impl Cleaner {
         // Create blank GPT
         // Using sfdisk to write empty GPT
         let script = "label: gpt\n";
-        let script_path = "/tmp/deploytix_wipe";
+        let script_path = crate::utils::paths::runtime_path("wipe_script");
+        let script_path = script_path.as_str();
         fs::write(script_path, script)?;
 
         let result = std::process::Command::new("sfdisk")

@@ -212,7 +212,11 @@ fn mount_partitions_with_subvolumes(
 
     // Create subvolumes on the ROOT partition
     // This temporarily mounts the raw btrfs, creates subvolumes, then unmounts
-    let temp_mount = "/tmp/deploytix_btrfs_setup";
+    // /run, not /tmp: on a deployed immutable host (dm-verity root) /tmp is
+    // inside the read-only image, so an install started from one could not
+    // create this mount point at all.
+    let temp_mount = crate::utils::paths::runtime_path("btrfs-setup");
+    let temp_mount = temp_mount.as_str();
     create_btrfs_subvolumes(cmd, &root_path, subvolumes, temp_mount)?;
 
     // Now mount the subvolumes to their final locations
@@ -271,10 +275,10 @@ fn mount_partitions_with_subvolumes(
                     });
                 }
 
-                let temp_mount = format!(
-                    "/tmp/deploytix_btrfs_{}",
+                let temp_mount = crate::utils::paths::runtime_path(&format!(
+                    "btrfs-{}",
                     subvol_name.trim_start_matches('@')
-                );
+                ));
                 create_btrfs_subvolumes(cmd, &part_path, &part_subvols, &temp_mount)?;
                 mount_btrfs_subvolumes(cmd, &part_path, &part_subvols, install_root)?;
             } else {
@@ -313,7 +317,8 @@ pub fn mount_boot_btrfs_subvolume(
         mount_point: "/boot".to_string(),
         mount_options: "defaults,noatime,compress=zstd".to_string(),
     }];
-    let boot_temp = "/tmp/deploytix_btrfs_boot";
+    let boot_temp = crate::utils::paths::runtime_path("btrfs-boot");
+    let boot_temp = boot_temp.as_str();
     create_btrfs_subvolumes(cmd, boot_device, &boot_subvol, boot_temp)?;
     mount_btrfs_subvolumes(cmd, boot_device, &boot_subvol, install_root)?;
     Ok(())
