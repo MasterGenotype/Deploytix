@@ -122,7 +122,7 @@ treatment as `/root`, `/opt` and `/srv` do on the btrfs backend: a real director
 on the shared, writable `/var`, bind-mounted into place.
 
 ```
-/var/tmp/deploytix-tmp  /tmp  none  bind  0  0
+/var/deploytix-tmp  /tmp  none  bind  0  0
 ```
 
 Still disk-backed rather than RAM, for the reason this whole document exists, and

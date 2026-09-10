@@ -54,6 +54,7 @@
 
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
+use std::os::unix::fs::MetadataExt;
 use tracing::{info, warn};
 
 /// Where the database really lives: inside `/usr`, so it is part of the
@@ -118,9 +119,17 @@ pub fn add_fstab_entry(cmd: &CommandRunner, root: &str) {
 /// Both directories are created first: at install time neither exists yet, and
 /// inside an update chroot [`DB_MOUNT`] belongs to the rbound shared `/var` and
 /// so still shows the *live* database until this covers it.
+///
+/// A `db.lck` is cleared on the way in. pacman's lock now lives *inside* the
+/// image, so one left behind by an interrupted transaction would be snapshotted
+/// into every set descended from it and make each one refuse to install
+/// anything ("unable to lock database"). Nothing else can hold it here: the
+/// caller holds the deploytix transaction lock and the set was snapshotted a
+/// moment ago, so any lock file present is a fossil.
 pub fn bind_cmd(root: &str) -> String {
     format!(
         "set -e; mkdir -p \"{root}{DB_DIR}\" \"{root}{DB_MOUNT}\"; \
+         rm -f \"{root}{DB_DIR}/db.lck\"; \
          mount --bind \"{root}{DB_DIR}\" \"{root}{DB_MOUNT}\""
     )
 }
@@ -139,6 +148,22 @@ pub fn seed_cmd(root: &str) -> String {
         "set -e; mkdir -p \"{root}{DB_DIR}\"; \
          cp -a --reflink=auto \"{root}{DB_MOUNT}/.\" \"{root}{DB_DIR}/\""
     )
+}
+
+/// Whether the bind is actually in place under `<root>` — i.e. whether writing
+/// [`DB_MOUNT`] there writes the image's own database rather than the shared
+/// `/var` one.
+///
+/// Asks the precise question by inode rather than inferring it from
+/// [`is_migrated`], which only says the directory has been seeded: a seed that
+/// succeeded and a bind that then failed would otherwise look like a per-image
+/// database while pacman wrote straight through to the shared `/var`.
+pub fn target_uses_own_db(root: &str) -> bool {
+    let same = |a: &str, b: &str| match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    };
+    same(&format!("{root}{DB_DIR}"), &format!("{root}{DB_MOUNT}"))
 }
 
 /// Whether `<root>` already keeps its database inside the image.
@@ -291,6 +316,39 @@ mod tests {
 
         std::fs::create_dir_all(format!("{root}{DB_DIR}/local")).unwrap();
         assert!(is_migrated(&root));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pacman's lock now lives inside the image, so a fossil `db.lck` would be
+    /// inherited by every set snapshotted from this one and make each of them
+    /// refuse to install anything.
+    #[test]
+    fn binding_clears_a_fossil_lock_file() {
+        let bind = bind_cmd("/run/deploytix-update/42");
+        assert!(
+            bind.contains("rm -f \"/run/deploytix-update/42/usr/lib/sysimage/pacman/db.lck\""),
+            "{bind}"
+        );
+        assert_valid_shell(&bind);
+    }
+
+    /// A seeded directory is not a working bind. Reporting one as the other is
+    /// what would let `deploytix remove` skip its safety copy while pacman
+    /// wrote straight through to the shared /var.
+    #[test]
+    fn using_the_own_db_is_decided_by_the_mount_not_the_directory() {
+        let dir = std::env::temp_dir().join(format!("deploytix-pacdb-m{}", std::process::id()));
+        let root = dir.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::fs::create_dir_all(format!("{root}{DB_DIR}/local")).unwrap();
+        std::fs::create_dir_all(format!("{root}{DB_MOUNT}")).unwrap();
+        assert!(is_migrated(&root), "seeded");
+        assert!(
+            !target_uses_own_db(&root),
+            "two distinct directories are not a bind"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

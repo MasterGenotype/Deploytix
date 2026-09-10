@@ -114,7 +114,13 @@ pub fn tmp_fstab_entry(root_fs_uuid: &str) -> String {
 // and boot-wiped by the same tmpfiles drop-in as the btrfs backend.
 
 /// Backing directory on the shared `/var` for the A/B backend's `/tmp`.
-pub const AB_TMP_SOURCE: &str = "/var/tmp/deploytix-tmp";
+///
+/// A sibling of the `WRITABLE_BIND_PATHS` sources (`/var/roothome`, `/var/opt`,
+/// `/var/srv`) rather than something under `/var/tmp`: the stock tmpfiles rule
+/// `q /var/tmp 1777 root root 30d` ages out everything below `/var/tmp`, which
+/// is the wrong policy to inherit for a directory that *is* `/tmp` and is
+/// boot-wiped on its own schedule.
+pub const AB_TMP_SOURCE: &str = "/var/deploytix-tmp";
 
 /// fstab line binding [`AB_TMP_SOURCE`] onto `/tmp`, for the A/B backend.
 pub fn ab_tmp_fstab_entry() -> String {

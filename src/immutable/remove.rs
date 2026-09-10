@@ -467,7 +467,7 @@ pub fn run_remove(cmd: &CommandRunner, packages: &[String], opts: &RemoveOptions
             // failure after this point would otherwise leave that database
             // saying the package is gone while the running system still has
             // every file of it.
-            let own_db = crate::immutable::pacman_db::is_migrated(target);
+            let own_db = crate::immutable::pacman_db::target_uses_own_db(target);
             if !own_db {
                 cmd.run("sh", &["-c", &db_backup_cmd(set_id)])?;
             }
