@@ -6,6 +6,7 @@ pub mod deps;
 pub mod error;
 pub mod idle;
 pub mod interactive;
+pub mod paths;
 pub mod prompt;
 pub mod signal;
 pub mod single_instance;

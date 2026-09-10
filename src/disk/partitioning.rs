@@ -226,9 +226,11 @@ pub fn apply_partitions(cmd: &CommandRunner, device: &str, layout: &ComputedLayo
         return Ok(());
     }
 
-    // Write script to temp file
-    let script_path = "/tmp/deploytix/partition_script";
-    fs::create_dir_all("/tmp/deploytix")?;
+    // Write script to a scratch file. /run rather than /tmp: an install driven
+    // from a deployed immutable host has a read-only /tmp inside the sealed
+    // image, and this write is the first thing that would fail.
+    let script_path = crate::utils::paths::runtime_path("partition_script");
+    let script_path = script_path.as_str();
     let mut file = fs::File::create(script_path)?;
     file.write_all(script.as_bytes())?;
     drop(file);

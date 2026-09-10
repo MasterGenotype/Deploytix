@@ -164,9 +164,9 @@ pacman and Artix repos. Equivalent with a helper:
 1. Bind-mount the mounted target root (`/install`) to
    `<helper_dir>/mnt/target`.
 2. Make the custom `[deploytix]` repo reachable: copy (small) or bind
-   `/tmp/deploytix-local-repo` to `<helper_dir>/tmp/deploytix-local-repo`;
+   `/var/cache/deploytix/repo` to `<helper_dir>/var/cache/deploytix/repo`;
    generate the custom pacman.conf **against helper-internal paths**
-   (`Server = file:///tmp/deploytix-local-repo`).
+   (`Server = file:///var/cache/deploytix/repo`).
 3. Run inside the helper (via the fixed chroot runner):
 
    ```

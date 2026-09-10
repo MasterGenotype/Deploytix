@@ -640,6 +640,10 @@ pub fn generate_fstab_lvm_thin(params: &LvmThinFstabParams) -> Result<()> {
             );
         }
         println!(
+            "    {}  /tmp  none  bind  0  0",
+            crate::immutable::tmp::AB_TMP_SOURCE
+        );
+        println!(
             "    {}  {}  none  bind,nofail  0  0",
             crate::immutable::pacman_db::DB_DIR,
             crate::immutable::pacman_db::DB_MOUNT
@@ -829,6 +833,11 @@ pub fn generate_fstab_lvm_ab(params: &LvmAbFstabParams) -> Result<()> {
             vol.name, fs_uuid, vol.mount_point, fstype, options, pass
         ));
     }
+
+    // Writable /tmp for the read-only verity root, backed by the shared /var.
+    // After the /var entry above, which has to be mounted first.
+    content.push_str(&crate::immutable::tmp::ab_tmp_fstab_entry());
+    content.push('\n');
 
     // The pacman database is the exception to that sharing: it lives inside the
     // slot's verity-sealed root and is bound back onto /var/lib/pacman, so a

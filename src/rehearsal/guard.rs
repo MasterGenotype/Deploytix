@@ -74,7 +74,8 @@ impl DiskWipeGuard {
 
         // 4. Write blank GPT
         let script = "label: gpt\n";
-        let script_path = "/tmp/deploytix_rehearsal_wipe";
+        let script_path = crate::utils::paths::runtime_path("rehearsal_wipe");
+        let script_path = script_path.as_str();
         if fs::write(script_path, script).is_ok() {
             let ok = Command::new("sfdisk")
                 .arg(device)

@@ -173,6 +173,24 @@ dm-verity data device read-write. `deploytix rollback` with no argument discards
 a staged set and returns to the running one. Transactions are serialised by an
 flock on `/run/deploytix-update.lock`. See `docs/IMMUTABLE_SET_COMPOSITION.md`.
 
+## Working Directories
+
+deploytix never writes its working files to `/tmp`. A *deployed immutable* host
+has no writable `/tmp` on the LVM A/B backend (`/` is a read-only dm-verity image
+and only `/etc` is overlaid), and a `/tmp` path is invisible from inside a
+transactional chroot, which rbinds only `/var`, `/home` and `/boot`. Two homes,
+picked by `utils::paths`:
+
+- `/run/deploytix` (`runtime_path`) — mount points and generated scripts: small,
+  root-only, worthless after a reboot.
+- `/var/cache/deploytix` (`cache_path`) — the local `[deploytix]` repo
+  (`repo/`) and the generated `pacman.conf` passed to `basestrap -C`. Large, and
+  on the one filesystem a transactional chroot can see.
+
+The ISO build script follows the same rule: its package staging directory sits
+beside the artools workspace (so `-w` moves it onto the build disk), never
+`/tmp`.
+
 ## Reference Materials
 
 - `ref/` — original bash installer scripts (implementation reference)

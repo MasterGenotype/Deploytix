@@ -270,8 +270,12 @@ pub fn build_package_list(config: &DeploymentConfig) -> Vec<String> {
 // repository rather than in the standard Artix mirrors.  On the live ISO
 // this repo is embedded at /var/lib/deploytix-repo and referenced in
 // /etc/pacman.conf.  When the installer runs outside that environment we
-// create a temporary local repo from any pre-built .pkg.tar.zst files
-// we can locate and pass `-C <config>` to basestrap.
+// create a local repo from any pre-built .pkg.tar.zst files we can locate
+// and pass `-C <config>` to basestrap.
+//
+// Both the repo and the generated pacman.conf live under /var (see
+// `temp_repo_dir`), never /tmp: a deployed immutable host has a read-only
+// /tmp, and only /var is visible from inside a transactional chroot.
 
 /// Filename prefixes (with trailing dash) for package archives that
 /// belong to the custom [deploytix] repository.
@@ -331,11 +335,28 @@ const FALLBACK_BUILD_USER: &str = "nobody";
 /// Path where the ISO live-overlay embeds the deploytix repo.
 const ISO_REPO_PATH: &str = "/var/lib/deploytix-repo";
 
-/// Temporary repo the installer creates when no repo is configured.
-const TEMP_REPO_DIR: &str = "/tmp/deploytix-local-repo";
+/// Local repo the installer creates when no repo is configured.
+///
+/// Under `/var` (see [`crate::utils::paths::cache_dir`]), not `/tmp`. Two
+/// reasons, either of which is sufficient:
+///
+/// - On a deployed **immutable** system `/tmp` is not writable. The LVM A/B
+///   backend mounts `/` read-only from a dm-verity slot and overlays only
+///   `/etc`, so `/tmp` is a read-only directory inside the sealed image: the
+///   repo directory could not be created at all, and an install started from
+///   such a machine died before it could place a single package file.
+/// - A transactional chroot rbinds `/var`, `/home` and `/boot` and nothing
+///   else. A repo anywhere but `/var` is invisible to `deploytix update`, so it
+///   could never serve the custom packages to an immutable target either.
+fn temp_repo_dir() -> String {
+    crate::utils::paths::cache_path("repo")
+}
 
-/// Temporary pacman.conf that adds the [deploytix] repo.
-const TEMP_PACMAN_CONF: &str = "/tmp/deploytix-pacman.conf";
+/// Generated pacman.conf that adds the [deploytix] repo, beside the repo it
+/// points at and writable for the same reasons as [`temp_repo_dir`].
+fn temp_pacman_conf() -> String {
+    crate::utils::paths::cache_path("pacman.conf")
+}
 
 // === Arch Linux [extra] repository support ===
 //
@@ -796,10 +817,12 @@ fn build_missing_packages(missing: &[&str]) -> Vec<PathBuf> {
     built
 }
 
-/// Create a temporary local pacman repository from the given package
-/// files and generate a repo database with `repo-add`.
+/// Create the local `[deploytix]` pacman repository from the given package
+/// files and generate a repo database with `repo-add`. Lives under `/var` — see
+/// [`temp_repo_dir`] for why that is not negotiable.
 fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
-    let repo = Path::new(TEMP_REPO_DIR);
+    let repo_dir = temp_repo_dir();
+    let repo = Path::new(&repo_dir);
 
     // Clean previous run.
     if repo.is_dir() {
@@ -814,7 +837,7 @@ fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
     }
 
     // Build the pacman database.
-    let db_path = format!("{}/deploytix.db.tar.zst", TEMP_REPO_DIR);
+    let db_path = format!("{}/deploytix.db.tar.zst", repo_dir);
     let pkg_paths: Vec<String> = std::fs::read_dir(repo)
         .map_err(DeploytixError::Io)?
         .filter_map(|e| e.ok())
@@ -832,12 +855,12 @@ fn create_temp_repo(cmd: &CommandRunner, packages: &[PathBuf]) -> Result<()> {
 
     cmd.run("repo-add", &args)?;
 
-    info!("Created temporary deploytix repo at {}", TEMP_REPO_DIR);
+    info!("Created local deploytix repo at {}", repo_dir);
     Ok(())
 }
 
-/// Write a temporary `pacman.conf` that extends the system config with
-/// a `[deploytix]` repo section.  Returns the path to the temp file.
+/// Write a `pacman.conf` that extends the system config with a `[deploytix]`
+/// repo section, beside the repo it points at. Returns its path.
 fn write_custom_pacman_conf(repo_dir: &str) -> Result<Option<String>> {
     let system_conf = std::fs::read_to_string("/etc/pacman.conf").map_err(DeploytixError::Io)?;
 
@@ -851,13 +874,17 @@ fn write_custom_pacman_conf(repo_dir: &str) -> Result<Option<String>> {
         repo_dir,
     );
 
-    std::fs::write(TEMP_PACMAN_CONF, &custom).map_err(DeploytixError::Io)?;
+    let conf_path = temp_pacman_conf();
+    if let Some(parent) = Path::new(&conf_path).parent() {
+        std::fs::create_dir_all(parent).map_err(DeploytixError::Io)?;
+    }
+    std::fs::write(&conf_path, &custom).map_err(DeploytixError::Io)?;
 
     info!(
         "Custom pacman.conf written to {} (repo: file://{})",
-        TEMP_PACMAN_CONF, repo_dir
+        conf_path, repo_dir
     );
-    Ok(Some(TEMP_PACMAN_CONF.to_string()))
+    Ok(Some(conf_path))
 }
 
 /// Ensure the deploytix custom packages are resolvable by pacman for
@@ -982,7 +1009,7 @@ pub fn prepare_deploytix_repo(
         packages.len()
     );
     create_temp_repo(cmd, &packages)?;
-    write_custom_pacman_conf(TEMP_REPO_DIR)
+    write_custom_pacman_conf(&temp_repo_dir())
 }
 
 // === Arch Linux [extra] repository detection / injection ===
@@ -1030,14 +1057,18 @@ fn ensure_arch_repos(existing_conf: Option<String>, cmd: &CommandRunner) -> Resu
         mirror_entry,
     );
 
-    std::fs::write(TEMP_PACMAN_CONF, &updated).map_err(DeploytixError::Io)?;
+    let conf_path = temp_pacman_conf();
+    if let Some(parent) = Path::new(&conf_path).parent() {
+        std::fs::create_dir_all(parent).map_err(DeploytixError::Io)?;
+    }
+    std::fs::write(&conf_path, &updated).map_err(DeploytixError::Io)?;
 
     info!(
         "Updated pacman.conf at {} with Arch [extra] repository",
-        TEMP_PACMAN_CONF,
+        conf_path,
     );
 
-    Ok(Some(TEMP_PACMAN_CONF.to_string()))
+    Ok(Some(conf_path))
 }
 
 /// Maximum number of retry attempts for basestrap on network failures
@@ -1166,6 +1197,29 @@ pub fn run_basestrap_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The repo and the pacman.conf that names it used to be `/tmp` literals.
+    /// On a deployed immutable host `/tmp` is a read-only directory inside the
+    /// dm-verity image, so an install started from one could not create the
+    /// repo at all; and even where it could, `/tmp` is invisible from inside a
+    /// transactional chroot, which rbinds only `/var`, `/home` and `/boot`.
+    #[test]
+    fn the_local_repo_and_its_config_live_on_var() {
+        let repo = temp_repo_dir();
+        let conf = temp_pacman_conf();
+        for p in [&repo, &conf] {
+            assert!(
+                !p.starts_with("/tmp/"),
+                "{p} is on /tmp, which a deployed immutable host mounts read-only"
+            );
+        }
+        // Same directory, so the `Server = file://` line and the file that
+        // carries it can never end up on different filesystems.
+        assert_eq!(
+            std::path::Path::new(&repo).parent(),
+            std::path::Path::new(&conf).parent()
+        );
+    }
 
     /// linux-tkg replaces the stock kernel rather than joining it, so
     /// basestrap must not also pull linux-zen in: two kernels is not the

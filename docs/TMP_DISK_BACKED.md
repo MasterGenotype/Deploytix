@@ -108,12 +108,28 @@ subcommand.
 - `sanitize_fstab` still leaves the `/tmp` line active.
 - Create/mount helpers are dry-run safe.
 
-## LVM A/B gap
+## LVM A/B backend
 
-`generate_fstab_lvm_ab` does not currently emit an explicit `/tmp` entry. A
-dm-verity read-only root needs the same *kind* of fix (disk-backed scratch on a
-shared data LV). That is a separate follow-up; this document’s install path is
-the **btrfs transactional** backend.
+Closed. `generate_fstab_lvm_ab` used to emit no `/tmp` entry at all, which left
+`/tmp` a **read-only directory inside the dm-verity image** — not a half-RAM
+tmpfs but no writable scratch whatsoever. Anything that writes there failed on
+such a host: `makepkg`, pacman's own scratch files, the GUIs' single-instance
+locks, and (the case that surfaced it) the installer creating its local
+`[deploytix]` package repository.
+
+The A/B root has no btrfs to carry an `@tmp` subvolume, so `/tmp` gets the same
+treatment as `/root`, `/opt` and `/srv` do on the btrfs backend: a real directory
+on the shared, writable `/var`, bind-mounted into place.
+
+```
+/var/tmp/deploytix-tmp  /tmp  none  bind  0  0
+```
+
+Still disk-backed rather than RAM, for the reason this whole document exists, and
+boot-wiped by the same `tmpfiles.d` drop-in as the btrfs backend. The bind is put
+in place before basestrap too, so the install itself has the writable `/tmp` the
+booted system will have. `src/immutable/tmp.rs` (`ab_tmp_fstab_entry`,
+`create_and_bind_ab_tmp`).
 
 ## Operational notes
 

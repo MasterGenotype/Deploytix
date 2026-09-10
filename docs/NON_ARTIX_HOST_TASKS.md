@@ -62,7 +62,7 @@ Derived from `NON_ARTIX_HOST_PLAN.md`. Ordered by milestone; M1–M3 are indepen
 - [ ] Add backend dispatch in `run_basestrap[_with_retries]` (`src/install/basestrap.rs:925-1017`): `native` → basestrap (unchanged), `helper` → helper pacman
 - [ ] Extract the retry/error-classification wrapper so both backends share it
 - [ ] Bind-mount the mounted target root (`/install`) to `<helper_dir>/mnt/target`
-- [ ] Custom-repo plumbing for the helper namespace: copy or bind `/tmp/deploytix-local-repo` into `<helper_dir>/tmp/deploytix-local-repo`; generate the custom pacman.conf against helper-internal paths (`Server = file:///tmp/deploytix-local-repo`)
+- [ ] Custom-repo plumbing for the helper namespace: copy or bind `/var/cache/deploytix/repo` into `<helper_dir>/var/cache/deploytix/repo`; generate the custom pacman.conf against helper-internal paths (`Server = file:///var/cache/deploytix/repo`)
 - [ ] Run inside the helper via the fixed chroot runner: `pacman -r /mnt/target --config /etc/deploytix-pacman.conf --cachedir /mnt/target/var/cache/pacman/pkg --noconfirm -Sy <packages>` (target-side cachedir keeps packages out of the helper and preserves them for the installed system)
 - [ ] Post-bootstrap parity: copy helper `/etc/pacman.d/mirrorlist` and `/etc/pacman.conf` into the target if packages didn't provide them; copy `resolv.conf` for in-chroot network use
 - [ ] Confirm `build_package_list()` stays backend-independent and target keyring init (`installer.rs:730-748`) runs unchanged afterward
