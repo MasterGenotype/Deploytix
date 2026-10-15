@@ -75,8 +75,8 @@ impl SnapshotBackend for Btrfs {
         rollback::print_targets(cmd)
     }
 
-    fn staged_change(&self, cmd: &CommandRunner) -> Result<Option<String>> {
-        let staged = super::boot::pointer_set_id(&super::boot::current_boot_pointer(cmd)?)
+    fn staged_change(&self, _cmd: &CommandRunner) -> Result<Option<String>> {
+        let staged = super::boot::pointer_set_id(&super::boot::current_boot_pointer())
             .unwrap_or_else(|| super::ROOT_SUBVOL.to_string());
         let session = super::SessionState {
             running: super::boot::running_set_id(),

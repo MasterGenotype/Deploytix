@@ -354,7 +354,7 @@ where
     // pointer moved to the new set.
     let session = crate::immutable::SessionState {
         running: running.clone(),
-        staged: boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+        staged: boot::pointer_set_id(&boot::current_boot_pointer())
             .unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string()),
     };
     let composing = match session.pending() {

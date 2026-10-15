@@ -225,28 +225,31 @@ pub fn activate_target(
 /// diverge whenever something writes grub.cfg without rebuilding the binary.
 /// Falls back to grub.cfg for installs predating the template sync. `@` when
 /// neither yields anything.
-pub fn current_boot_pointer(cmd: &CommandRunner) -> Result<String> {
-    if cmd.is_dry_run() {
-        return Ok("@".to_string());
-    }
-    let from_template = format!(
-        "grep -o 'rootflags=subvol=[^ \"]*' {GRUB_DEFAULT} 2>/dev/null | head -n1 \
-         | sed 's/rootflags=subvol=//'"
-    );
-    if let Some(out) = cmd.run("sh", &["-c", &from_template])? {
-        let ptr = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !ptr.is_empty() {
-            return Ok(ptr);
-        }
-    }
-    let script = format!(
-        "grep -o 'rootflags=subvol=[^ \"]*' {GRUB_CFG} | head -n1 | sed 's/rootflags=subvol=//'"
-    );
-    let out = cmd.run("sh", &["-c", &script])?;
-    let ptr = out
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    Ok(if ptr.is_empty() { "@".to_string() } else { ptr })
+///
+/// Read directly rather than through the `CommandRunner`, so a dry run sees the
+/// real pointer: reading has no side effects, and a dry run that assumed `@`
+/// reported every running set as having a staged update to compose onto.
+pub fn current_boot_pointer() -> String {
+    [GRUB_DEFAULT, GRUB_CFG]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|text| first_pointer(&text))
+        .unwrap_or_else(|| crate::immutable::ROOT_SUBVOL.to_string())
+}
+
+/// The first `rootflags=subvol=` value in a grub template or grub.cfg — the
+/// default entry; later grub.cfg entries are grub-btrfs snapshots. Ends at a
+/// whitespace or quote, matching the `[^ "]*` that [`set_pointer_sed`] rewrites.
+fn first_pointer(text: &str) -> Option<String> {
+    const KEY: &str = "rootflags=subvol=";
+    text.match_indices(KEY).find_map(|(i, _)| {
+        let rest = &text[i + KEY.len()..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '"')
+            .unwrap_or(rest.len());
+        let ptr = &rest[..end];
+        (!ptr.is_empty()).then(|| ptr.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -361,5 +364,33 @@ mod tests {
             running_subvols(),
             SubvolSet::for_root(&running_root_subvol())
         );
+    }
+
+    #[test]
+    fn the_boot_pointer_is_the_first_entry_not_a_later_snapshot() {
+        // grub.cfg lists the default entry first and grub-btrfs snapshot
+        // entries after it; the last match would name a snapshot.
+        let cfg = "linux /vmlinuz root=/dev/mapper/Crypt-Root rw rootflags=subvol=@deploytix-sets/7/root quiet\n\
+                   linux /vmlinuz rootflags=subvol=@snapshots/12/snapshot\n";
+        assert_eq!(
+            first_pointer(cfg).as_deref(),
+            Some("@deploytix-sets/7/root")
+        );
+    }
+
+    #[test]
+    fn the_template_pointer_stops_at_the_closing_quote() {
+        let template =
+            "GRUB_CMDLINE_LINUX=\"cryptdevice=x rootflags=subvol=@deploytix-sets/7/root\"\n";
+        assert_eq!(
+            first_pointer(template).as_deref(),
+            Some("@deploytix-sets/7/root")
+        );
+    }
+
+    #[test]
+    fn no_pointer_is_none_not_an_empty_string() {
+        assert_eq!(first_pointer("GRUB_TIMEOUT=5\n"), None);
+        assert_eq!(first_pointer("rootflags=subvol= quiet"), None);
     }
 }

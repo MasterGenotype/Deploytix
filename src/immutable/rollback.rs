@@ -30,7 +30,7 @@ pub fn list_targets(cmd: &CommandRunner) -> Result<Vec<String>> {
 
 /// Print the rollback targets, marking the one currently selected for boot.
 pub fn print_targets(cmd: &CommandRunner) -> Result<()> {
-    let current = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?);
+    let current = boot::pointer_set_id(&boot::current_boot_pointer());
     let current = current.unwrap_or_else(|| "@".to_string());
     println!("Available boot targets (current marked *):");
     for t in list_targets(cmd)? {
@@ -73,7 +73,7 @@ pub fn resolve_target(cmd: &CommandRunner, selection: Option<&str>) -> Result<St
                     "no snapshot set '{id}' (see `deploytix rollback --list`)"
                 )));
             }
-            let current = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+            let current = boot::pointer_set_id(&boot::current_boot_pointer())
                 .unwrap_or_else(|| "@".to_string());
             if is_forward(&targets, &current, id) {
                 return Err(DeploytixError::ConfigError(format!(
@@ -86,7 +86,7 @@ pub fn resolve_target(cmd: &CommandRunner, selection: Option<&str>) -> Result<St
         }
         None => {
             let targets = list_targets(cmd)?;
-            let current = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+            let current = boot::pointer_set_id(&boot::current_boot_pointer())
                 .unwrap_or_else(|| "@".to_string());
 
             // A set staged this session but never booted is not history to step

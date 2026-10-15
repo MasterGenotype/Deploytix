@@ -674,7 +674,7 @@ fn collect_state(
         }
         Backend::Btrfs => {
             let devices = detect_devices();
-            let pointer = boot::pointer_set_id(&boot::current_boot_pointer(cmd)?)
+            let pointer = boot::pointer_set_id(&boot::current_boot_pointer())
                 .unwrap_or_else(|| "@".to_string());
             // From the kernel cmdline, not `findmnt -no FSROOT /`: on an
             // immutable system `/` is an overlayfs whose FSROOT is just "/",
