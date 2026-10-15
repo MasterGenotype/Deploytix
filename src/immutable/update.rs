@@ -313,8 +313,11 @@ pub(crate) fn prune_sets(
 /// This is the part every transactional operation shares. `update` and `remove`
 /// differ only in what they run inside the chroot:
 ///
-/// 1. repair the live fstab, then snapshot the **running** trio into a new
-///    writable set (so operations stack rather than each rebasing onto `@`);
+/// 1. repair the live fstab, then snapshot a trio into a new writable set: the
+///    set already **staged** for next boot if there is one (so a second
+///    transaction in a session composes with the first instead of discarding
+///    it), otherwise the **running** one (so operations stack rather than each
+///    rebasing onto `@`);
 /// 2. mount it with `/var`, `/home`, `/boot` rbound and the writable binds
 ///    reproduced, so the chroot has the booted system's topology;
 /// 3. run `body`, which does the actual work and reports what it changed;

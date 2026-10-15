@@ -197,6 +197,14 @@ different pacman verb: snapshot the running trio, run `pacman -Rs` inside the
 set, regenerate the initramfs, activate on reboot. `deploytix rollback` undoes a
 removal the same way it undoes an update.
 
+The update GUI (`deploytix-update-gui`) offers the same operation from the
+**Remove packages** section of its Update tab: type the names, tick `--cascade`
+or `--purge` if wanted, and the section shows what `pacman -Rs --print`
+resolves — vetted by the same guard the transaction uses — before **Remove
+selected** asks for confirmation and stages the set. The preview is resolved
+against the running system and re-checked inside the snapshot the transaction
+builds.
+
 `-s` (`--recursive`) is always on. Without it the system would collect orphaned
 dependencies that cannot be cleaned up interactively, because `/usr` is
 read-only. `--cascade` adds `-c`, which also removes anything depending on the
@@ -220,14 +228,25 @@ it is called:
 
 | Refused when the package owns | Because |
 |---|---|
-| `usr/lib/modules/*/vmlinuz` | It is a kernel. `60-mkinitcpio-remove.hook` watches exactly this path with `When = PreTransaction`, and deletes `/boot/initramfs-linux.img` and the kernel image. That is the shared `/boot`, it happens before pacman deletes any file, and it breaks every rollback target. |
+| `usr/lib/modules/*/vmlinuz`, **and no other kernel would remain** | It is the last kernel. `60-mkinitcpio-remove.hook` watches exactly this path with `When = PreTransaction`, and deletes `/boot/vmlinuz-<pkgbase>` and that kernel's initramfs from the shared `/boot`, before pacman deletes any file. With nothing else to boot, every set — including every rollback target — is unbootable at once. |
 | anything under `/boot/` | Microcode, `memtest86+`, bootloader payloads. Shared, and not recoverable. |
 | `usr/bin/cryptsetup` or `usr/lib/initcpio/*`, on encrypted roots | `90-mkinitcpio-install.hook` fires when these are removed and regenerates an initramfs that can no longer unlock the root, into the shared `/boot`. |
 
-A kernel is identified by that file rather than by name because the dangerous
-packages share no naming convention. `linux`, `linux-lts`, `linux-zen` and
-anything built locally are all equally fatal, and all own the file the hook
-watches for.
+A kernel is identified by that file rather than by name because kernel packages
+share no naming convention. `linux`, `linux-lts`, `linux-zen` and anything
+built locally all own the file the hook watches for.
+
+**Removing a kernel is allowed as long as another kernel stays installed.** The
+hook only deletes the removed kernel's own images; the survivor's are
+untouched, `mkinitcpio -P` rebuilds its initramfs from inside the set, and the
+grub.cfg regenerated on activation lists only kernels that still exist. Every
+set then boots the surviving kernel — which is exactly the documented
+shared-`/boot` behaviour after a kernel *update*, where every set already boots
+whatever kernel `/boot` holds. The removal is reported before confirmation
+("Removes kernel `linux`. The next boot uses `linux-zen`."), and separately if
+the kernel being removed is the one currently running. The set the transaction
+builds always contains the survivor: it is a snapshot of the running system,
+where the survivor is installed.
 
 The fourth rule is a short list of names — `pacman`, `mkinitcpio`, `grub`,
 `btrfs-progs` — because nothing in their file lists shows that deploytix's
@@ -309,7 +328,10 @@ bypasses it.
   non-snapshotted `/boot` partition, so they are shared across all sets. A
   rollback restores userspace (`@`/`@usr`/`@etc`) but boots with the most
   recently installed kernel. The `mountcrypt` hook is version-independent, so
-  this is safe; only kernel *contents* are not rolled back.
+  this is safe; only kernel *contents* are not rolled back. The same applies
+  to a kernel *removed* with `deploytix remove`: its images are gone from
+  `/boot` for every set, and every set boots whichever kernel remains. That is
+  why the last kernel cannot be removed.
 - **`/` is read-only, and writes to it fail.** There is no overlay catching
   stray writes to paths outside `/tmp` (disk-backed `@tmp`), `/etc`, `/var`,
   `/home`, `/root`, `/opt`, `/srv`. `/mnt` and `/media` in particular are

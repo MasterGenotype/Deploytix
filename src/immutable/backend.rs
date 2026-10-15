@@ -94,16 +94,6 @@ impl SnapshotBackend for Btrfs {
     }
 }
 
-/// Why the A/B backend turns down `deploytix remove`.
-///
-/// It could express the same operation (rsync the active root into the
-/// inactive slot, `pacman -R` in a chroot, `veritysetup format` a fresh hash,
-/// repoint), but that is not implemented — and silently running the btrfs path
-/// on an A/B system would edit a root that is not the one that boots.
-const AB_REMOVE_REFUSAL: &str = "`deploytix remove` is not implemented for the LVM A/B backend. \
-     Remove packages by staging a full `deploytix update` into the inactive \
-     slot instead.";
-
 /// The LVM A/B dual-slot backend with dm-verity roots.
 pub struct LvmAb;
 
@@ -134,7 +124,7 @@ impl SnapshotBackend for LvmAb {
     }
 
     fn remove_refusal(&self) -> Option<&'static str> {
-        Some(AB_REMOVE_REFUSAL)
+        Some(remove::LVM_AB_REFUSAL)
     }
 
     fn remove(
@@ -144,7 +134,7 @@ impl SnapshotBackend for LvmAb {
         _opts: &RemoveOptions,
     ) -> Result<()> {
         Err(crate::utils::error::DeploytixError::ConfigError(
-            AB_REMOVE_REFUSAL.to_string(),
+            remove::LVM_AB_REFUSAL.to_string(),
         ))
     }
 }

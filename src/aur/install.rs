@@ -25,12 +25,14 @@
 //! The LVM A/B backend, matching `deploytix remove`: running the btrfs path
 //! against a root that is not the one that boots would edit the wrong slot.
 //!
-//! Packages that own the kernel, anything under `/boot`, or the cryptsetup and
-//! initramfs pieces on an encrypted root. `/boot` and `/var` are shared across
-//! every snapshot set, so a build that overwrites something there does it for
-//! every set at once and no rollback can undo it. That check is
+//! Packages that own anything under `/boot`, or the cryptsetup and initramfs
+//! pieces on an encrypted root. `/boot` and `/var` are shared across every
+//! snapshot set, so a build that overwrites something there does it for every
+//! set at once and no rollback can undo it. That check is
 //! [`crate::immutable::remove::check_protected`], reused rather than
 //! reimplemented, and it runs against what the build would actually install.
+//! A kernel built from the AUR is *not* refused: it only adds its own image
+//! and initramfs to `/boot`, which is harmless to every other set.
 
 use crate::aur::build;
 use crate::aur::capability::AurCapability;
