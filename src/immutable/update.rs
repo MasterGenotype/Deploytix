@@ -154,21 +154,28 @@ pub fn classify_args(extra: &[String]) -> (Vec<String>, Vec<String>) {
 /// absolute paths valid *inside the chroot*; `names` are repo package names.
 ///
 /// - nothing → full `pacman -Syu`;
-/// - repo names → `pacman -Syu --noconfirm <names>`;
-/// - local files → `pacman -U --noconfirm <files>` (no DB sync, so it works
-///   offline / without configured repos — which is why `-Syu <file>` failed with
-///   a "missing database" error).
+/// - repo names → `pacman -Syu <names>`;
+/// - local files → `pacman -U <files>` (no DB sync, so it works offline /
+///   without configured repos — which is why `-Syu <file>` failed with a
+///   "missing database" error).
+///
+/// None of them pass `--noconfirm`: they are run through
+/// [`CommandRunner::run_pacman_in_chroot`], whose console answers pacman's
+/// questions. `--color never` keeps escape codes out from around those
+/// questions (a `Color` line in pacman.conf would otherwise add them), and
+/// `--noprogressbar` keeps the transcript to lines.
 pub fn pacman_cmds(staged_files: &[String], names: &[String]) -> Vec<String> {
+    const PACMAN: &str = "pacman --noprogressbar --color never";
     let mut cmds = Vec::new();
     if staged_files.is_empty() && names.is_empty() {
-        cmds.push("pacman -Syu --noconfirm".to_string());
+        cmds.push(format!("{PACMAN} -Syu"));
         return cmds;
     }
     if !names.is_empty() {
-        cmds.push(format!("pacman -Syu --noconfirm {}", names.join(" ")));
+        cmds.push(format!("{PACMAN} -Syu {}", names.join(" ")));
     }
     if !staged_files.is_empty() {
-        cmds.push(format!("pacman -U --noconfirm {}", staged_files.join(" ")));
+        cmds.push(format!("{PACMAN} -U {}", staged_files.join(" ")));
     }
     cmds
 }
@@ -488,7 +495,7 @@ pub fn run_update(
         let before = history::query_packages(cmd, target);
         info!("[immutable] Running pacman in {}", target);
         for pac in pacman_cmds(&staged, &repo_names) {
-            cmd.run_in_chroot(target, &pac)?;
+            cmd.run_pacman_in_chroot(target, &pac)?;
         }
         let after = history::query_packages(cmd, target);
         // Regenerate the (shared) initramfs from within the updated set.
@@ -566,11 +573,14 @@ mod tests {
     #[test]
     fn pacman_cmds_full_upgrade_vs_repo_names_vs_local_files() {
         // No args → full upgrade.
-        assert_eq!(pacman_cmds(&[], &[]), vec!["pacman -Syu --noconfirm"]);
+        assert_eq!(
+            pacman_cmds(&[], &[]),
+            vec!["pacman --noprogressbar --color never -Syu"]
+        );
         // Repo names → -S.
         assert_eq!(
             pacman_cmds(&[], &["vim".to_string(), "git".to_string()]),
-            vec!["pacman -Syu --noconfirm vim git"]
+            vec!["pacman --noprogressbar --color never -Syu vim git"]
         );
         // Local files → -U (no DB sync).
         assert_eq!(
@@ -578,8 +588,21 @@ mod tests {
                 &["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()],
                 &[]
             ),
-            vec!["pacman -U --noconfirm /var/cache/deploytix-update/a.pkg.tar.zst"]
+            vec![
+                "pacman --noprogressbar --color never -U /var/cache/deploytix-update/a.pkg.tar.zst"
+            ]
         );
+    }
+
+    /// `--noconfirm` would answer pacman's questions before the console could,
+    /// which is how a conflict used to fail the whole update unasked.
+    #[test]
+    fn pacman_cmds_leave_questions_to_the_console() {
+        let staged = ["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()];
+        for c in pacman_cmds(&staged, &["vim".to_string()]) {
+            assert!(!c.contains("--noconfirm"), "{c}");
+            assert!(c.contains("--color never"), "{c}");
+        }
     }
 
     #[test]

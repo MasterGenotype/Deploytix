@@ -70,6 +70,13 @@ The pipeline is feature-driven: each step checks flags (encryption, LVM thin, su
 
 **CommandRunner**: All system commands (`mkfs`, `cryptsetup`, `mount`, etc.) go through `CommandRunner` which respects dry-run mode. Use `cmd.run()` for host commands and `cmd.run_in_chroot()` for chroot execution.
 
+**Pacman questions** (`utils/console.rs`): the `deploytix update` transaction runs
+pacman through `cmd.run_pacman_in_chroot()`, which streams its output to an
+attached `Console` and lets it answer pacman's questions (`Unattended`, the
+`--noconfirm` defaults, when none is attached). Those commands must not pass
+`--noconfirm`: a declined conflict question ("Remove plasma-x11-session?") is
+exactly what used to fail an update with no way to say yes.
+
 **Partition Layout Abstraction**: `ComputedLayout` and `PartitionDef` in `disk/layouts.rs` are generic across all layout types. Downstream code (`format_all_partitions()`, `generate_fstab()`, `generate_crypttab()`) works identically for Standard, Minimal, LVM Thin, and Custom layouts. Encryption and LVM are applied as layers, not separate code paths.
 
 **Proportional Partitioning**: Fixed partitions (EFI 512 MiB, Boot 2 GiB, Swap 2×RAM clamped 4–20 GiB) are allocated first; remaining space is distributed by weighted proportions.

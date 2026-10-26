@@ -358,7 +358,7 @@ pub fn run_update(
         let before = history::query_packages(cmd, &t);
         info!("[lvm-ab] Running pacman in slot {}", target);
         for pac in update::pacman_cmds(&staged, &repo_names) {
-            cmd.run_in_chroot(&t, &pac)?;
+            cmd.run_pacman_in_chroot(&t, &pac)?;
         }
         let after = history::query_packages(cmd, &t);
         cmd.run_in_chroot(&t, "mkinitcpio -P")?;

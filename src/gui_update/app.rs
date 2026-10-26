@@ -101,6 +101,13 @@ impl eframe::App for UpdateGui {
         if self.state.pump() {
             ctx.request_repaint();
         }
+        // pacman is stalled on a question; flash the window rather than wait
+        // for the user to happen to look.
+        if std::mem::take(&mut self.state.wants_attention) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
         // A running operation produces messages sporadically; keep the frame
         // loop alive so a finished worker is noticed promptly.
         if self.state.busy {

@@ -1,5 +1,6 @@
 //! Command execution utilities
 
+use crate::utils::console::{self, Console, ConsoleHandle, ConsoleRun, Unattended};
 use crate::utils::error::{DeploytixError, Result};
 use crate::utils::host::{self, HostAdapter};
 use crate::utils::interactive::{PacmanDecision, PacmanInvocation, PolicyHandle};
@@ -169,6 +170,32 @@ pub fn run_in_artix_chroot(chroot_path: &str, command: &str) -> Result<Output> {
     }
 }
 
+/// [`run_in_artix_chroot`], with the command's output and questions going
+/// through `console` instead of being captured. The plain-`chroot` fallback's
+/// API mounts are set up and torn down around it in the same way.
+pub fn drive_in_artix_chroot(
+    chroot_path: &str,
+    command: &str,
+    console: &mut dyn Console,
+) -> Result<ConsoleRun> {
+    let chroot = |program: &str| {
+        let mut c = Command::new(program);
+        c.args([chroot_path, "bash", "-c", command]);
+        c
+    };
+    if command_exists("artix-chroot") {
+        ensure_chroot_mtab(chroot_path);
+        console::drive(chroot("artix-chroot"), console)
+    } else {
+        debug!("artix-chroot not found; using plain chroot with API mounts");
+        run_shell_quietly(&chroot_api_setup_cmd(chroot_path));
+        ensure_chroot_mtab(chroot_path);
+        let result = console::drive(chroot("chroot"), console);
+        run_shell_quietly(&chroot_api_teardown_cmd(chroot_path));
+        result
+    }
+}
+
 /// Log a command that would be run (for dry-run mode)
 pub fn log_dry_run(program: &str, args: &[&str]) {
     println!("  [dry-run] {} {}", program, args.join(" "));
@@ -184,6 +211,9 @@ pub struct CommandRunner {
     dry_run: bool,
     recorder: Option<Sender<OperationRecord>>,
     policy: Option<PolicyHandle>,
+    /// Who answers the questions of a pacman run through
+    /// [`CommandRunner::run_pacman_in_chroot`]; [`Unattended`] when unset.
+    console: Option<ConsoleHandle>,
     /// Where chroot commands land.  Always the local machine today; the field
     /// exists so that "which host" is a value rather than an assumption baked
     /// into every call site.
@@ -196,6 +226,7 @@ impl CommandRunner {
             dry_run,
             recorder: None,
             policy: None,
+            console: None,
             host: host::current(),
         }
     }
@@ -223,6 +254,13 @@ impl CommandRunner {
     /// `crate::utils::interactive` for the contract.
     pub fn with_policy(mut self, policy: PolicyHandle) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Attach a console that streams the output of, and answers the questions
+    /// asked by, pacman runs made through [`Self::run_pacman_in_chroot`].
+    pub fn with_console(mut self, console: ConsoleHandle) -> Self {
+        self.console = Some(console);
         self
     }
 
@@ -306,6 +344,58 @@ impl CommandRunner {
         }
     }
 
+    /// Run a pacman transaction inside a chroot through the attached console
+    /// (see [`crate::utils::console`]), or [`Unattended`] without one, so that
+    /// `command` must not pass `--noconfirm`: the console is what answers.
+    ///
+    /// The transcript is recorded as the command's stdout. A failure's error
+    /// carries the transcript's tail, which is where pacman's question and
+    /// its reason for giving up both are.
+    pub fn run_pacman_in_chroot(
+        &self,
+        chroot_path: &str,
+        command: &str,
+    ) -> Result<Option<ConsoleRun>> {
+        if crate::utils::signal::is_interrupted() {
+            return Err(DeploytixError::Interrupted);
+        }
+        if self.dry_run {
+            println!("  [dry-run] chroot {} bash -c '{}'", chroot_path, command);
+            return Ok(None);
+        }
+        let cmd_str = format!("chroot {} bash -c '{}'", chroot_path, command);
+        let start = Instant::now();
+        let run = match &self.console {
+            Some(handle) => {
+                let mut console = handle.lock().unwrap_or_else(|p| p.into_inner());
+                self.host
+                    .chroot_console(chroot_path, command, &mut *console)
+            }
+            None => self
+                .host
+                .chroot_console(chroot_path, command, &mut Unattended),
+        };
+        match run {
+            Ok(run) => {
+                if let Some(ref tx) = self.recorder {
+                    let _ = tx.send(OperationRecord {
+                        command: cmd_str.clone(),
+                        stdout: run.transcript.clone(),
+                        stderr: String::new(),
+                        exit_code: run.status.code().unwrap_or(-1),
+                        duration: start.elapsed(),
+                        success: run.status.success() && !run.cancelled,
+                    });
+                }
+                run.into_result(&cmd_str).map(Some)
+            }
+            Err(e) => {
+                self.record_err(&cmd_str, &e, start.elapsed());
+                Err(e)
+            }
+        }
+    }
+
     /// Run a command regardless of interrupt state.
     /// Used for cleanup operations that must execute even after a signal.
     pub fn force_run(&self, program: &str, args: &[&str]) -> Result<Option<Output>> {
@@ -385,6 +475,90 @@ impl CommandRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the "chroot" command on this machine, so the pacman path can be
+    /// exercised end to end without a target root.
+    struct ShellHost;
+
+    impl HostAdapter for ShellHost {
+        fn name(&self) -> &'static str {
+            "shell"
+        }
+        fn chroot_cmd(&self, _: &str, command: &str) -> Result<Output> {
+            run_command("sh", &["-c", command])
+        }
+        fn chroot_console(
+            &self,
+            _: &str,
+            command: &str,
+            console: &mut dyn Console,
+        ) -> Result<ConsoleRun> {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(command);
+            console::drive(c, console)
+        }
+        fn has_binary(&self, name: &str) -> bool {
+            command_exists(name)
+        }
+    }
+
+    /// A pacman stand-in: asks about a conflict, echoes the answer it read
+    /// from the pipe as pacman does, and fails unless that answer is yes.
+    const CONFLICT: &str = "printf ':: a-2-1 and b-1-1 are in conflict. Remove b? [y/N] ' >&2; \
+                            read a; echo \"$a\" >&2; [ \"$a\" = y ] || { echo 'error: unresolvable package conflicts detected' >&2; exit 1; }; \
+                            echo removed b";
+
+    struct AlwaysYes;
+    impl Console for AlwaysYes {
+        fn output(&mut self, _: &str) {}
+        fn ask(&mut self, _: &console::Question) -> console::Answer {
+            console::Answer::Reply("y".into())
+        }
+    }
+
+    #[test]
+    fn pacman_without_a_console_declines_as_noconfirm_did_and_says_why() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cmd = CommandRunner::new(false)
+            .with_host(&ShellHost)
+            .with_recorder(tx);
+        match cmd.run_pacman_in_chroot("/target", CONFLICT) {
+            Err(DeploytixError::CommandFailed { stderr, .. }) => {
+                // The question pacman was refused, not just its verdict.
+                assert!(stderr.contains("Remove b? [y/N] n"), "{stderr}");
+                assert!(
+                    stderr.contains("unresolvable package conflicts"),
+                    "{stderr}"
+                );
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+        let record = rx.try_recv().unwrap();
+        assert!(!record.success);
+        assert!(record.stdout.contains("are in conflict"));
+    }
+
+    #[test]
+    fn pacman_with_a_console_takes_its_answers() {
+        let console: ConsoleHandle = std::sync::Arc::new(std::sync::Mutex::new(AlwaysYes));
+        let cmd = CommandRunner::new(false)
+            .with_host(&ShellHost)
+            .with_console(console);
+        let run = cmd
+            .run_pacman_in_chroot("/target", CONFLICT)
+            .unwrap()
+            .unwrap();
+        assert!(run.transcript.contains("removed b"), "{}", run.transcript);
+    }
+
+    #[test]
+    fn dry_run_pacman_runs_nothing() {
+        let cmd = CommandRunner::new(true).with_host(&ShellHost);
+        assert!(cmd
+            .run_pacman_in_chroot("/target", "exit 1")
+            .unwrap()
+            .is_none());
+    }
 
     fn assert_valid_shell(script: &str) {
         if let Ok(status) = Command::new("sh").arg("-n").arg("-c").arg(script).status() {

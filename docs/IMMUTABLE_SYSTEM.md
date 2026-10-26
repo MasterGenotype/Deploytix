@@ -153,6 +153,13 @@ What it does:
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
    rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
    `artix-chroot`, or plain `chroot` where `artools-base` is not installed.
+   pacman's output streams to the terminal (or the updater's console), and
+   any question it asks — typically *"X and Y are in conflict. Remove Y?"*
+   when an upgrade replaces something dropped from the repos — is put to the
+   user rather than answered "no" by `--noconfirm`. Only *"Proceed with
+   installation?"* is answered automatically. Without a terminal on stdin
+   (a script, a pipe) every question takes pacman's default, as before, and
+   a failure names the question that was declined. See `utils/console.rs`.
 3. On success, points the default boot entry at the new set and regenerates
    grub.cfg. **Reboot to activate.**
 4. On failure, deletes the half-built set and leaves the running system

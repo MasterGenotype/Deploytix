@@ -11,6 +11,7 @@
 //! Only `theme` and `widgets` are shared.
 
 mod app;
+mod console;
 pub mod model;
 mod panels;
 pub mod preview;

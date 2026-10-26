@@ -104,7 +104,7 @@ impl SnapshotRow {
             Some(r) => {
                 let mut s = r.request.summary();
                 if let history::Outcome::Failed(ref why) = r.outcome {
-                    s.push_str(&format!("  —  FAILED: {why}"));
+                    s.push_str(&format!("  —  FAILED: {}", failure_line(why)));
                 } else {
                     let changes = r.changes.summary();
                     if !changes.is_empty() {
@@ -201,6 +201,27 @@ pub fn format_op(record: &OperationRecord, tail_lines: usize) -> String {
         out.push_str(line);
     }
     out
+}
+
+/// The line of a recorded failure that belongs in a one-line row: pacman's
+/// first `error:`, which names the cause, or the first line when there is
+/// none. A failed pacman run records its question, errors and detail over
+/// several lines, and the row would otherwise carry them all.
+fn failure_line(why: &str) -> &str {
+    why.lines()
+        .find(|l| l.starts_with("error:"))
+        .or_else(|| why.lines().next())
+        .unwrap_or(why)
+}
+
+/// Whether a command's output is not worth a line in the Log even though it
+/// succeeded: the `pacman -Q` reads that bracket a transaction (the installed
+/// package list, every time), and a pacman run the console already showed in
+/// full. A failure's output is always kept — it is the reason.
+pub fn output_is_noise(record: &OperationRecord) -> bool {
+    record.success
+        && (record.command.ends_with("bash -c 'pacman -Q'")
+            || record.command.contains("pacman --noprogressbar"))
 }
 
 /// Split a whitespace-separated package entry into names.
@@ -385,6 +406,22 @@ mod tests {
         assert!(rows[0].detail().contains("FAILED: target not found"));
     }
 
+    #[test]
+    fn a_multi_line_failure_is_one_line_in_its_row() {
+        let mut r = record(100, "100");
+        r.outcome = Outcome::Failed(
+            "Command failed: chroot /run/deploytix-update/100 bash -c 'pacman -Syu'\n\
+             :: b-2 and a-1 are in conflict. Remove a? [y/N] n\n\
+             error: unresolvable package conflicts detected\n\
+             error: failed to prepare transaction (conflicting dependencies)"
+                .into(),
+        );
+        let rows = build_snapshot_rows(&["100".into()], &[r], "100", "100");
+        let detail = rows[0].detail();
+        assert!(!detail.contains('\n'), "{detail}");
+        assert!(detail.ends_with("FAILED: error: unresolvable package conflicts detected"));
+    }
+
     // ── misc helpers ──
 
     #[test]
@@ -401,6 +438,28 @@ mod tests {
         assert!(text.starts_with("$ pacman -Syu  (7s)"));
         assert!(text.contains("line 50"));
         assert!(!text.contains("line 46"), "only the tail should survive");
+    }
+
+    #[test]
+    fn bookkeeping_output_is_noise_only_when_it_succeeded() {
+        let rec = |command: &str, success: bool| OperationRecord {
+            command: command.into(),
+            stdout: "zlib 1:1.3.2-3".into(),
+            stderr: String::new(),
+            exit_code: i32::from(!success),
+            duration: std::time::Duration::ZERO,
+            success,
+        };
+        let query = "chroot /run/deploytix-update/1 bash -c 'pacman -Q'";
+        let upgrade =
+            "chroot /run/deploytix-update/1 bash -c 'pacman --noprogressbar --color never -Syu'";
+        assert!(output_is_noise(&rec(query, true)));
+        assert!(output_is_noise(&rec(upgrade, true)));
+        assert!(!output_is_noise(&rec(upgrade, false)));
+        assert!(!output_is_noise(&rec(
+            "chroot /x bash -c 'mkinitcpio -P'",
+            true
+        )));
     }
 
     #[test]

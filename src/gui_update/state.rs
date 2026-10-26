@@ -1,5 +1,6 @@
 //! State and background workers for the update GUI.
 
+use super::console::{self as pacman_console, ConsoleBuffer, GuiConsole, PendingQuestion, Phase};
 use super::model::{self, Backend, SnapshotRow};
 use super::preview::{self, Preview};
 use crate::aur::capability::{self, AurCapability};
@@ -10,8 +11,10 @@ use crate::immutable::remove::{self, RemovalPlan, RemoveOptions, RemoveRefusal};
 use crate::immutable::update::{run_update, UpdateOptions};
 use crate::immutable::{boot, detect_devices, history, lvm_ab, rollback, snapshot};
 use crate::utils::command::{CommandRunner, OperationRecord};
+use crate::utils::console::{Answer, ConsoleHandle};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Which worker channel `pump_one` is draining.
@@ -82,10 +85,32 @@ impl SystemInfo {
     }
 }
 
+/// How far pacman's download has got, for a readout pacman itself does not
+/// give without a terminal.
+#[derive(Debug, Default)]
+pub struct Download {
+    /// From pacman's `Total Download Size` line, if it printed one.
+    pub total: Option<u64>,
+    pub bytes: u64,
+    since: Option<std::time::SystemTime>,
+    scanned: Option<std::time::Instant>,
+}
+
+/// How often the package cache is re-measured during a download.
+const DOWNLOAD_SCAN: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Messages from the background workers to the UI thread.
 pub enum Msg {
     Status(String),
     Log(String),
+    /// Output from the pacman run, as it is written.
+    Console(String),
+    /// pacman is blocked on a question until it is answered.
+    Question(Box<PendingQuestion>),
+    /// pacman moved on to another part of the transaction.
+    Phase(Phase),
+    /// What pacman is about to download, in bytes.
+    DownloadSize(u64),
     /// A refresh completed.
     Refreshed {
         info: SystemInfo,
@@ -169,6 +194,15 @@ pub struct AppState {
     pub busy: bool,
     pub status: String,
     pub logs: Vec<String>,
+    /// The running transaction's pacman output.
+    pub console: ConsoleBuffer,
+    /// The question pacman is waiting on, if any.
+    pub question: Option<PendingQuestion>,
+    /// A question has just arrived; the window should ask for attention.
+    pub wants_attention: bool,
+    /// Where pacman is, while it runs.
+    pub phase: Option<Phase>,
+    pub download: Download,
     pub finished: Option<String>,
     pub error: Option<String>,
     /// Messages from the update/rollback worker.
@@ -227,6 +261,11 @@ impl Default for AppState {
             busy: false,
             status: String::new(),
             logs: Vec::new(),
+            console: ConsoleBuffer::default(),
+            question: None,
+            wants_attention: false,
+            phase: None,
+            download: Download::default(),
             finished: None,
             error: None,
             receiver: None,
@@ -355,6 +394,22 @@ impl AppState {
         match msg {
             Msg::Status(s) => self.status = s,
             Msg::Log(l) => self.logs.push(l),
+            Msg::Console(text) => self.console.push(&text),
+            Msg::Phase(phase) => {
+                if phase == Phase::Downloading {
+                    self.download.since = Some(std::time::SystemTime::now());
+                    self.download.bytes = 0;
+                }
+                self.phase = Some(phase);
+            }
+            Msg::DownloadSize(bytes) => self.download.total = Some(bytes),
+            Msg::Question(q) => {
+                self.question = Some(*q);
+                // Wherever the user has wandered off to, the transaction is
+                // stalled until they answer.
+                self.tab = Tab::Progress;
+                self.wants_attention = true;
+            }
             Msg::Refreshed {
                 info,
                 rows,
@@ -391,13 +446,51 @@ impl AppState {
             Msg::Finished(s) => {
                 self.finished = Some(s);
                 self.busy = false;
+                self.question = None;
+                self.phase = None;
                 // The snapshot list is stale the moment an update lands.
                 self.start_refresh();
             }
             Msg::Error(e) => {
                 self.error = Some(e);
                 self.busy = false;
+                self.question = None;
+                self.phase = None;
             }
+        }
+    }
+
+    /// Re-measure the download, at most every [`DOWNLOAD_SCAN`]. Called each
+    /// frame; a no-op outside the download phase.
+    pub fn refresh_download(&mut self) {
+        let (Some(Phase::Downloading), Some(since)) = (self.phase, self.download.since) else {
+            return;
+        };
+        if self
+            .download
+            .scanned
+            .is_some_and(|t| t.elapsed() < DOWNLOAD_SCAN)
+        {
+            return;
+        }
+        self.download.scanned = Some(std::time::Instant::now());
+        self.download.bytes = pacman_console::downloaded_since(
+            std::path::Path::new(pacman_console::PKG_CACHE),
+            since,
+        );
+    }
+
+    /// Answer the pending question, if one is still pending.
+    pub fn answer_question(&mut self, answer: Answer) {
+        if let Some(q) = self.question.take() {
+            q.answer(answer);
+        }
+    }
+
+    /// Answer the pending question with what its answer box holds.
+    pub fn submit_question(&mut self) {
+        if let Some(q) = self.question.take() {
+            q.submit();
         }
     }
 
@@ -754,6 +847,10 @@ impl AppState {
     pub fn start_update(&mut self, args: Vec<String>) {
         let tx = self.begin("Building update...");
         self.logs.clear();
+        self.console.clear();
+        self.question = None;
+        self.phase = None;
+        self.download = Download::default();
         // The preview described the pre-update system; it is stale the moment
         // the transaction starts.
         self.preview = None;
@@ -765,11 +862,10 @@ impl AppState {
         };
 
         thread::spawn(move || {
-            let cmd = command_runner_logging_to(&tx);
+            let console: ConsoleHandle = Arc::new(Mutex::new(GuiConsole::new(tx.clone())));
+            let cmd = command_runner_logging_to(&tx).with_console(console);
             let backend = Backend::detect();
-            let _ = tx.send(Msg::Status(
-                "Running pacman — output appears as each step completes.".to_string(),
-            ));
+            let _ = tx.send(Msg::Status("Running the update...".to_string()));
 
             let result = match backend {
                 Some(Backend::LvmAb) => lvm_ab::run_update(&cmd, &args, &opts),
@@ -830,7 +926,12 @@ fn command_runner_logging_to(tx: &Sender<Msg>) -> CommandRunner {
     let log_tx = tx.clone();
     thread::spawn(move || {
         for record in op_rx {
-            let _ = log_tx.send(Msg::Log(model::format_op(&record, LOG_TAIL_LINES)));
+            let tail = if model::output_is_noise(&record) {
+                0
+            } else {
+                LOG_TAIL_LINES
+            };
+            let _ = log_tx.send(Msg::Log(model::format_op(&record, tail)));
         }
     });
     CommandRunner::new(false).with_recorder(op_tx)
@@ -947,6 +1048,63 @@ mod tests {
         assert_eq!(state.status, "working");
         assert_eq!(state.finished.as_deref(), Some("done"));
         assert!(!state.busy);
+    }
+
+    /// Pump until the worker's question lands, as the frame loop would.
+    fn pump_until_asked(state: &mut AppState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.question.is_none() {
+            assert!(std::time::Instant::now() < deadline, "no question arrived");
+            state.pump();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn ask_conflict_on_a_worker(tx: Sender<Msg>) -> thread::JoinHandle<Answer> {
+        use crate::utils::console::{Console, Question};
+        thread::spawn(move || {
+            let mut console = GuiConsole::new(tx);
+            console.output(":: b and a are in conflict. Remove a? [y/N] ");
+            console.ask(&Question::parse(":: b and a are in conflict. Remove a? [y/N] ").unwrap())
+        })
+    }
+
+    #[test]
+    fn a_question_brings_the_user_to_it_and_their_answer_reaches_pacman() {
+        let mut state = AppState::default();
+        let (tx, rx) = channel();
+        state.receiver = Some(rx);
+        state.busy = true;
+        state.tab = Tab::Snapshots;
+
+        let worker = ask_conflict_on_a_worker(tx);
+        pump_until_asked(&mut state);
+        assert_eq!(state.tab, Tab::Progress);
+        assert!(state.wants_attention);
+        assert_eq!(
+            state.console.row(0),
+            ":: b and a are in conflict. Remove a? [y/N] "
+        );
+
+        state.answer_question(Answer::Reply("y".into()));
+        assert!(state.question.is_none());
+        assert_eq!(worker.join().unwrap(), Answer::Reply("y".into()));
+    }
+
+    #[test]
+    fn an_operation_that_ends_mid_question_cancels_it() {
+        let mut state = AppState::default();
+        let (tx, rx) = channel();
+        state.receiver = Some(rx);
+        state.busy = true;
+
+        let worker_tx = tx.clone();
+        let worker = ask_conflict_on_a_worker(worker_tx);
+        pump_until_asked(&mut state);
+        tx.send(Msg::Error("boom".into())).unwrap();
+        state.pump();
+        assert!(state.question.is_none());
+        assert_eq!(worker.join().unwrap(), Answer::Cancel);
     }
 
     #[test]

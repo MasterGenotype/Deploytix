@@ -2,6 +2,7 @@
 
 pub mod cli_policy;
 pub mod command;
+pub mod console;
 pub mod deps;
 pub mod error;
 pub mod host;

@@ -552,13 +552,18 @@ fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -
     use deploytix::immutable::backend;
     use deploytix::immutable::update::UpdateOptions;
     use deploytix::utils::command::CommandRunner;
+    use deploytix::utils::console::{ConsoleHandle, Terminal};
+    use std::sync::{Arc, Mutex};
 
     if !dry_run && !nix::unistd::geteuid().is_root() {
         return Err(DeploytixError::NotRoot);
     }
-    let cmd = CommandRunner::new(dry_run);
-    // An update is a full `pacman` transaction in a chroot — as long and as
-    // input-free as an install, so it gets the same idle inhibitors.
+    // pacman's output streams to the terminal, and its questions — a conflict
+    // that needs a package removed — are put to the user when there is one.
+    let console: ConsoleHandle = Arc::new(Mutex::new(Terminal::for_stdin()));
+    let cmd = CommandRunner::new(dry_run).with_console(console);
+    // An update is a full `pacman` transaction in a chroot — as long as an
+    // install, so it gets the same idle inhibitors.
     let _awake = (!dry_run).then(|| deploytix::utils::idle::keep_awake("Updating Artix Linux"));
     backend::active().update(
         &cmd,

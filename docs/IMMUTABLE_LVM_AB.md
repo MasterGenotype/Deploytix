@@ -95,6 +95,8 @@ What it does (active = A → target = B):
    (`--delete`, excluding `/var`, `/home`, `/boot` and pseudo-filesystems).
 2. `artix-chroot`s the slot and runs `pacman -Syu` (+ requested packages; local
    `.pkg.tar.zst` files go through `pacman -U`) and `mkinitcpio -P`.
+   pacman's questions go to the user, as on the btrfs backend (see
+   `IMMUTABLE_SYSTEM.md`, *Updating*).
 3. Freezes the slot and `veritysetup format`s a fresh hash tree → new root hash.
 4. Records the hash + `active=B` in the slot-state file and repoints the boot
    pointer. **Reboot to activate.**

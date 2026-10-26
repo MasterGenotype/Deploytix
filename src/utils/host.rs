@@ -11,7 +11,8 @@
 //! ever needs to target a container or a remote machine, that is a second
 //! `impl HostAdapter` rather than an edit to every caller.
 
-use crate::utils::command::{command_exists, run_in_artix_chroot};
+use crate::utils::command::{command_exists, drive_in_artix_chroot, run_in_artix_chroot};
+use crate::utils::console::{Console, ConsoleRun};
 use crate::utils::error::Result;
 use std::process::Output;
 
@@ -25,6 +26,15 @@ pub trait HostAdapter: Send + Sync {
 
     /// Run `command` inside the target root mounted at `chroot_path`.
     fn chroot_cmd(&self, chroot_path: &str, command: &str) -> Result<Output>;
+
+    /// Run `command` inside the target root with its output streamed to, and
+    /// its questions answered by, `console`. See [`crate::utils::console`].
+    fn chroot_console(
+        &self,
+        chroot_path: &str,
+        command: &str,
+        console: &mut dyn Console,
+    ) -> Result<ConsoleRun>;
 
     /// Whether `name` is an executable this host can run.
     fn has_binary(&self, name: &str) -> bool;
@@ -49,6 +59,15 @@ impl HostAdapter for LocalHost {
 
     fn chroot_cmd(&self, chroot_path: &str, command: &str) -> Result<Output> {
         run_in_artix_chroot(chroot_path, command)
+    }
+
+    fn chroot_console(
+        &self,
+        chroot_path: &str,
+        command: &str,
+        console: &mut dyn Console,
+    ) -> Result<ConsoleRun> {
+        drive_in_artix_chroot(chroot_path, command, console)
     }
 
     fn has_binary(&self, name: &str) -> bool {
