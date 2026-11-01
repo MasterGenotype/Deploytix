@@ -211,24 +211,39 @@ pub fn write_pair_marker_cmd(root_fs: &str, id: &str) -> String {
 }
 
 /// Build the command that deletes every subvolume of a set (both filesystems).
+///
+/// Each filesystem's `<id>` directory goes too, and each command fails unless
+/// it is gone afterwards. A subvolume already missing is not an error — the
+/// delete is retried by the next prune — but one that survives is reported.
+///
+/// The root filesystem's directory matters most: [`list_sets`] reads it, so an
+/// empty one left behind was taken for a set on every later update and offered
+/// as a rollback target with nothing in it to boot.
 pub fn delete_set_cmds(devices: &ImmutableDevices, id: &str) -> Vec<String> {
+    delete_set_bodies(devices)
+        .into_iter()
+        .map(|(device, body)| with_fs_root(device, id, &body))
+        .collect()
+}
+
+/// The shell bodies [`delete_set_cmds`] runs, each with the filesystem it runs on.
+fn delete_set_bodies(devices: &ImmutableDevices) -> Vec<(&str, String)> {
     let del_root = format!(
         "btrfs subvolume delete \"$m/{SETS_DIR}/$id/root\" 2>/dev/null || true; \
          btrfs subvolume delete \"$m/{SETS_DIR}/$id/etc\" 2>/dev/null || true",
     );
-    let del_usr = "btrfs subvolume delete \"$m/@deploytix-sets/$id/usr\" 2>/dev/null || true; \
-                   rmdir \"$m/@deploytix-sets/$id\" 2>/dev/null || true"
-        .to_string();
+    let del_usr = format!("btrfs subvolume delete \"$m/{SETS_DIR}/$id/usr\" 2>/dev/null || true");
+    let remove_dir =
+        format!("rmdir \"$m/{SETS_DIR}/$id\" 2>/dev/null || true; [ ! -e \"$m/{SETS_DIR}/$id\" ]");
     if devices.usr_on_root() {
-        let body = format!(
-            "{}; {}; rmdir \"$m/{SETS_DIR}/$id\" 2>/dev/null || true",
-            del_root, del_usr
-        );
-        vec![with_fs_root(&devices.root_fs, id, &body)]
+        vec![(
+            &devices.root_fs,
+            format!("{del_root}; {del_usr}; {remove_dir}"),
+        )]
     } else {
         vec![
-            with_fs_root(&devices.root_fs, id, &del_root),
-            with_fs_root(&devices.usr_fs, id, &del_usr),
+            (&devices.root_fs, format!("{del_root}; {remove_dir}")),
+            (&devices.usr_fs, format!("{del_usr}; {remove_dir}")),
         ]
     }
 }
@@ -268,11 +283,15 @@ pub fn delete_set(cmd: &CommandRunner, devices: &ImmutableDevices, id: &str) -> 
 }
 
 /// List existing set ids on `root_fs`, sorted ascending (oldest first).
+///
+/// A set is a directory holding a `root` snapshot. A directory without one —
+/// left by an older delete, or by a create that failed part-way — is not a set:
+/// nothing in it can boot, so it is neither pruned again nor offered for rollback.
 pub fn list_sets(cmd: &CommandRunner, root_fs: &str) -> Result<Vec<String>> {
     if cmd.is_dry_run() {
         return Ok(Vec::new());
     }
-    let body = format!("ls -1 \"$m/{SETS_DIR}\" 2>/dev/null || true");
+    let body = list_sets_body();
     let script = with_fs_root(root_fs, "-", &body);
     let out = cmd
         .run("sh", &["-c", &script])?
@@ -288,6 +307,15 @@ pub fn list_sets(cmd: &CommandRunner, root_fs: &str) -> Result<Vec<String>> {
         .collect();
     ids.sort();
     Ok(ids)
+}
+
+/// Shell body printing the id of every set directory that holds a `root` snapshot.
+fn list_sets_body() -> String {
+    format!(
+        "for d in \"$m/{SETS_DIR}\"/*/; do \
+         [ -e \"${{d}}root\" ] && basename \"$d\"; \
+         done; true"
+    )
 }
 
 #[cfg(test)]
@@ -394,6 +422,149 @@ mod tests {
         assert!(script.contains("@deploytix-sets/42/etc"));
         assert!(script.contains(".deploytix-pair"));
         assert_valid_shell(&script);
+    }
+
+    /// Runs `body` as `with_fs_root` would, with `$m` a plain directory instead
+    /// of a mounted filesystem and `btrfs subvolume delete` a stub that removes
+    /// the directory it is given. Returns whether the body succeeded.
+    fn run_body(m: &std::path::Path, id: &str, body: &str) -> bool {
+        let bin = m.join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("btrfs");
+        std::fs::write(&stub, "#!/bin/sh\n[ -d \"$3\" ] || exit 1\nrm -rf \"$3\"\n").unwrap();
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("m={}; id={id}; {body}", m.display()))
+            .env("PATH", path)
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn make_set(m: &std::path::Path, id: &str, parts: &[&str]) {
+        for part in parts {
+            std::fs::create_dir_all(m.join(SETS_DIR).join(id).join(part)).unwrap();
+        }
+    }
+
+    fn temp_fs(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "deploytix-sets-{name}-{}-{}",
+            std::process::id(),
+            new_set_id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(SETS_DIR)).unwrap();
+        dir
+    }
+
+    /// The bug this guards: with `/usr` on its own filesystem, deleting a set
+    /// left its empty directory on the root filesystem. `list_sets` reads that
+    /// one, so every later update "deleted" the same sets again and rollback
+    /// offered them as targets with nothing in them to boot.
+    #[test]
+    fn delete_leaves_no_directory_on_either_filesystem() {
+        let devices = multi();
+        let (root_fs, usr_fs) = (temp_fs("root"), temp_fs("usr"));
+        make_set(&root_fs, "42", &["root", "etc"]);
+        make_set(&usr_fs, "42", &["usr"]);
+
+        for (device, body) in delete_set_bodies(&devices) {
+            let m = if device == devices.root_fs {
+                &root_fs
+            } else {
+                &usr_fs
+            };
+            assert!(run_body(m, "42", &body), "delete failed on {device}");
+        }
+
+        assert!(!root_fs.join(SETS_DIR).join("42").exists());
+        assert!(!usr_fs.join(SETS_DIR).join("42").exists());
+        let _ = std::fs::remove_dir_all(root_fs);
+        let _ = std::fs::remove_dir_all(usr_fs);
+    }
+
+    #[test]
+    fn delete_on_one_filesystem_removes_the_whole_set() {
+        let devices = single();
+        let fs = temp_fs("single");
+        make_set(&fs, "42", &["root", "etc", "usr"]);
+
+        let bodies = delete_set_bodies(&devices);
+        assert_eq!(bodies.len(), 1);
+        assert!(run_body(&fs, "42", &bodies[0].1));
+
+        assert!(!fs.join(SETS_DIR).join("42").exists());
+        let _ = std::fs::remove_dir_all(fs);
+    }
+
+    #[test]
+    fn deleting_an_already_empty_directory_succeeds() {
+        let fs = temp_fs("empty");
+        make_set(&fs, "42", &[]);
+
+        let (_, body) = delete_set_bodies(&multi()).swap_remove(0);
+        assert!(run_body(&fs, "42", &body));
+        assert!(!fs.join(SETS_DIR).join("42").exists());
+        let _ = std::fs::remove_dir_all(fs);
+    }
+
+    #[test]
+    fn a_set_that_survives_its_delete_is_reported() {
+        let fs = temp_fs("stuck");
+        make_set(&fs, "42", &["root", "etc"]);
+        // Something the delete does not remove keeps the directory alive.
+        std::fs::write(fs.join(SETS_DIR).join("42").join("stray"), "").unwrap();
+
+        let (_, body) = delete_set_bodies(&multi()).swap_remove(0);
+        assert!(
+            !run_body(&fs, "42", &body),
+            "a surviving set must fail the delete"
+        );
+        let _ = std::fs::remove_dir_all(fs);
+    }
+
+    #[test]
+    fn only_directories_holding_a_root_snapshot_are_sets() {
+        let fs = temp_fs("list");
+        make_set(&fs, "100", &["root", "etc"]);
+        make_set(&fs, "200", &[]);
+        make_set(&fs, "300", &["etc"]);
+        make_set(&fs, "400", &["root", "etc"]);
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("m={}; {}", fs.display(), list_sets_body()))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let mut ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["100", "400"]);
+        let _ = std::fs::remove_dir_all(fs);
+    }
+
+    #[test]
+    fn listing_an_empty_sets_directory_succeeds() {
+        let fs = temp_fs("none");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("m={}; {}", fs.display(), list_sets_body()))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        let _ = std::fs::remove_dir_all(fs);
     }
 
     #[test]
