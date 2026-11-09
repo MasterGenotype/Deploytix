@@ -39,6 +39,7 @@ use crate::aur::capability::AurCapability;
 use crate::aur::helper::AurHelper;
 use crate::aur::keys;
 use crate::aur::rpc::CurlGet;
+use crate::aur::space;
 use crate::aur::srccache;
 use crate::aur::srcinfo;
 use crate::immutable::history;
@@ -140,6 +141,23 @@ pub fn run_aur_install(
                 .collect();
             return Err(DeploytixError::ConfigError(format!(
                 "Cannot verify the sources of:\n  {}",
+                lines.join("\n  ")
+            )));
+        }
+
+        let short = space::check(&srcinfos, |s| {
+            Ok(match cmd.run_in_chroot(target, s)? {
+                Some(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+                None => String::new(),
+            })
+        })?;
+        if !short.is_empty() {
+            let lines: Vec<String> = short
+                .iter()
+                .map(|(base, s)| format!("{base}: {}", s.reason()))
+                .collect();
+            return Err(DeploytixError::ConfigError(format!(
+                "Not enough free space to build:\n  {}",
                 lines.join("\n  ")
             )));
         }

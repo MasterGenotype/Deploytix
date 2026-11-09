@@ -17,6 +17,8 @@
 //!   batch for the checks above and below.
 //! * [`srccache`] — the shared source cache, with files a PKGBUILD no longer
 //!   means removed before building.
+//! * [`space`] — *whether a build fits*: what each base needs free on the
+//!   build root, checked before building.
 //! * [`rpc`] — *what exists*: a read-only client for the AUR's RPC interface.
 //! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
 //!   composite that resolves a dependency graph spanning the repositories and
@@ -38,6 +40,7 @@ pub mod keys;
 pub mod rpc;
 pub mod search;
 pub mod source;
+pub mod space;
 pub mod srccache;
 pub mod srcinfo;
 pub mod upgrade;

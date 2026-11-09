@@ -190,7 +190,12 @@ Skipped, and named in the log:
 - packages whose installed version already owns files in the shared `/boot`
   (e.g. `xen`'s `xen.gz`). They are caught before building because every
   build goes into one helper invocation, so one refusal would throw away all
-  of them. The usual post-build check still runs, for files a new version adds.
+  of them. The usual post-build check still runs, for files a new version adds;
+- packages whose build cannot fit in the free space under
+  `/var/cache/deploytix/build`: about 21 GiB for a kernel, which builds with
+  debug info, and twice the installed size plus 1 GiB for anything else. A
+  build that fills `/var` fails partway through and takes the set with it.
+  `deploytix aur` refuses such a package instead. Code: `src/aur/space.rs`.
 
 VCS packages (`-git`) are rebuilt only when their AUR version passes the
 installed one, as with a helper run without `--devel`. If the AUR cannot be

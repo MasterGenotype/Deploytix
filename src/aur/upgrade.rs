@@ -25,7 +25,7 @@
 //!
 //! Every build goes into one helper invocation, so anything that would fail
 //! fails them all — after the kernels in the batch have finished compiling.
-//! Four things are therefore settled before building, not after:
+//! Five things are therefore settled before building, not after:
 //!
 //! * **`IgnorePkg`** in the set's `pacman.conf`. `pacman -Syu` honours it and
 //!   so do the helpers; deploytix pins `gamescope-git` this way, and a pacman
@@ -45,6 +45,9 @@
 //!   batch, and gives up on the lot when it cannot. [`crate::aur::keys`]
 //!   imports them first, from more than one, and what is still missing holds
 //!   its package back.
+//! * **room to build.** A build that fills `/var` fails partway through.
+//!   [`crate::aur::space`] estimates what each base needs, and one that cannot
+//!   fit in what is free is held back.
 //!
 //! A hold covers the whole package base. A helper builds a split package by
 //! building its base, so `xen-docs` beside a held `xen` would compile all of
@@ -64,7 +67,7 @@ use crate::aur::helper::AurHelper;
 use crate::aur::install::build_in_target;
 use crate::aur::keys;
 use crate::aur::rpc::{AurRpc, CurlGet, HttpGet};
-use crate::aur::{srccache, srcinfo};
+use crate::aur::{space, srccache, srcinfo};
 use crate::immutable::{history, remove};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
@@ -186,6 +189,11 @@ impl UpgradePlan {
                 .get(&o.base)
                 .map(|keys| keys::missing_reason(keys, user))
         });
+    }
+
+    /// Hold back outdated packages whose base the build root has no room for.
+    pub fn hold_without_room(&mut self, short: &BTreeMap<String, space::Shortfall>) {
+        self.hold_where(|o| short.get(&o.base).map(space::Shortfall::reason));
     }
 }
 
@@ -402,6 +410,7 @@ pub fn upgrade_in_target(
         srcinfos = srcinfo::fetch(&CurlGet, &plan.bases());
         let missing = keys::ensure_for_bases(cmd, build_user, &srcinfos)?;
         plan.hold_unverifiable(&missing, build_user);
+        plan.hold_without_room(&space::check(&srcinfos, |s| query(cmd, target, s))?);
     }
 
     if !plan.not_in_aur.is_empty() {
@@ -677,6 +686,43 @@ mod tests {
         let held: Vec<_> = plan.held.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(held, vec!["linux-xanmod-bore", "linux-xanmod-bore-headers"]);
         assert!(plan.held[0].reason.contains("ABAF11C6"), "{:?}", plan.held);
+    }
+
+    /// A kernel that cannot fit is held with its headers, and the rest of
+    /// the batch still builds.
+    #[test]
+    fn a_base_without_room_to_build_is_held_with_its_siblings() {
+        let mut plan = UpgradePlan {
+            outdated: vec![
+                outdated(
+                    "linux-xanmod-bore",
+                    "linux-xanmod-bore",
+                    "7.1.13-1",
+                    "7.3.3-1",
+                ),
+                outdated(
+                    "linux-xanmod-bore-headers",
+                    "linux-xanmod-bore",
+                    "7.1.13-1",
+                    "7.3.3-1",
+                ),
+                outdated("yay", "yay", "13.0-1", "13.1-1"),
+            ],
+            ..Default::default()
+        };
+        let short = BTreeMap::from([(
+            "linux-xanmod-bore".to_string(),
+            space::Shortfall {
+                need: space::KERNEL_BUILD + space::RESERVE,
+                free: 17 << 30,
+                kernel: true,
+            },
+        )]);
+        plan.hold_without_room(&short);
+        assert_eq!(plan.names(), vec!["yay"]);
+        let held: Vec<_> = plan.held.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(held, vec!["linux-xanmod-bore", "linux-xanmod-bore-headers"]);
+        assert!(plan.held[0].reason.contains("17.0 GiB"), "{:?}", plan.held);
     }
 
     const XANMOD: &str = r#"{"version":5,"type":"multiinfo","resultcount":3,

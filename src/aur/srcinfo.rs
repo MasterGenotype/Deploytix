@@ -2,8 +2,9 @@
 //! the helper starts.
 //!
 //! Fetched once per batch and shared by everything that settles a build in
-//! advance: the PGP keys its sources are signed with ([`crate::aur::keys`]) and
-//! the cached sources that no longer match it ([`crate::aur::srccache`]).
+//! advance: the PGP keys its sources are signed with ([`crate::aur::keys`]),
+//! the room it needs ([`crate::aur::space`]) and the cached sources that no
+//! longer match it ([`crate::aur::srccache`]).
 
 use crate::aur::rpc::{is_valid_package_name, AurRpc, HttpGet};
 use std::collections::{BTreeMap, BTreeSet};
