@@ -64,6 +64,7 @@ use crate::aur::helper::AurHelper;
 use crate::aur::install::build_in_target;
 use crate::aur::keys;
 use crate::aur::rpc::{AurRpc, CurlGet, HttpGet};
+use crate::aur::srcinfo;
 use crate::immutable::{history, remove};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
@@ -396,7 +397,8 @@ pub fn upgrade_in_target(
     // Here rather than in `plan_for`: importing keys writes to the keyring,
     // and the GUI's preview of the plan must stay read-only.
     if !plan.outdated.is_empty() {
-        let missing = keys::ensure_for_bases(cmd, target, build_user, &plan.bases())?;
+        let srcinfos = srcinfo::fetch(&CurlGet, &plan.bases());
+        let missing = keys::ensure_for_bases(cmd, build_user, &srcinfos)?;
         plan.hold_unverifiable(&missing, build_user);
     }
 

@@ -11,6 +11,10 @@
 //!   `base-devel`, each with a reason when missing.
 //! * [`keys`] — *whether a build can verify its sources*: the PGP keys its
 //!   PKGBUILD names, imported from more than one keyserver before building.
+//! * [`keyring`] — the keyring builds verify with: deploytix's own, without
+//!   keyboxd, whose locks a chroot's PID namespace strands.
+//! * [`srcinfo`] — *what a base builds from*: its `.SRCINFO`, read once per
+//!   batch for the key check above.
 //! * [`rpc`] — *what exists*: a read-only client for the AUR's RPC interface.
 //! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
 //!   composite that resolves a dependency graph spanning the repositories and
@@ -27,10 +31,12 @@ pub mod build;
 pub mod capability;
 pub mod helper;
 pub mod install;
+pub mod keyring;
 pub mod keys;
 pub mod rpc;
 pub mod search;
 pub mod source;
+pub mod srcinfo;
 pub mod upgrade;
 
 pub use capability::{AurCapability, Blocker, BuildUser, BuildUserSource};

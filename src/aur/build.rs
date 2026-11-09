@@ -34,7 +34,11 @@
 //! reads these from the environment in preference to `makepkg.conf`, so one
 //! mechanism covers every helper — including ones whose own flags differ or
 //! do not exist.
+//!
+//! The keyring builds verify sources with lives here too, for the same
+//! reason it must not be the user's: see [`crate::aur::keyring`].
 
+use crate::aur::keyring;
 use crate::utils::command::CommandRunner;
 use crate::utils::error::Result;
 use tracing::info;
@@ -74,6 +78,9 @@ pub fn build_env() -> Vec<(String, String)> {
         ("SRCPKGDEST".to_string(), subdir("srcpkg")),
         ("LOGDEST".to_string(), subdir("log")),
         ("TMPDIR".to_string(), subdir("build")),
+        // makepkg verifies sources and the helper imports keys with gpg; this
+        // keeps both off the user's keyring. See `crate::aur::keyring`.
+        ("GNUPGHOME".to_string(), keyring::GNUPGHOME.to_string()),
     ]
 }
 
@@ -97,10 +104,11 @@ pub fn build_env_prefix() -> String {
 pub fn ensure_build_root_cmd(user: &str) -> String {
     let dirs: Vec<String> = SUBDIRS.iter().map(|d| subdir(d)).collect();
     format!(
-        "mkdir -p {dirs} && chown -R {user}:{user} {root}",
+        "mkdir -p {dirs} && chown -R {user}:{user} {root} && {keyring}",
         dirs = dirs.join(" "),
         user = user,
         root = BUILD_ROOT,
+        keyring = keyring::ensure_cmd(user),
     )
 }
 

@@ -38,6 +38,8 @@ use crate::aur::build;
 use crate::aur::capability::AurCapability;
 use crate::aur::helper::AurHelper;
 use crate::aur::keys;
+use crate::aur::rpc::CurlGet;
+use crate::aur::srcinfo;
 use crate::immutable::history;
 use crate::immutable::remove;
 use crate::immutable::update::{run_in_new_set, UpdateOptions};
@@ -127,7 +129,9 @@ pub fn run_aur_install(
     run_in_new_set(cmd, &update_opts, request, move |cmd, target, _set_id| {
         // Before the helper downloads anything: it would give up on every
         // package, after fetching all their sources, over one missing key.
-        let missing = keys::ensure_for_packages(cmd, target, &build_user, &packages)?;
+        let bases = srcinfo::bases_of(CurlGet, &packages);
+        let srcinfos = srcinfo::fetch(&CurlGet, &bases);
+        let missing = keys::ensure_for_bases(cmd, &build_user, &srcinfos)?;
         if !missing.is_empty() {
             let lines: Vec<String> = missing
                 .iter()
