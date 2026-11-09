@@ -9,6 +9,8 @@
 //!   yay, something else, or nothing.
 //! * [`capability`] — *whether* a build can run at all: helper, build user and
 //!   `base-devel`, each with a reason when missing.
+//! * [`keys`] — *whether a build can verify its sources*: the PGP keys its
+//!   PKGBUILD names, imported from more than one keyserver before building.
 //! * [`rpc`] — *what exists*: a read-only client for the AUR's RPC interface.
 //! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
 //!   composite that resolves a dependency graph spanning the repositories and
@@ -25,6 +27,7 @@ pub mod build;
 pub mod capability;
 pub mod helper;
 pub mod install;
+pub mod keys;
 pub mod rpc;
 pub mod search;
 pub mod source;

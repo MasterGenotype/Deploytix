@@ -25,7 +25,7 @@
 //!
 //! Every build goes into one helper invocation, so anything that would fail
 //! fails them all — after the kernels in the batch have finished compiling.
-//! Three things are therefore settled before building, not after:
+//! Four things are therefore settled before building, not after:
 //!
 //! * **`IgnorePkg`** in the set's `pacman.conf`. `pacman -Syu` honours it and
 //!   so do the helpers; deploytix pins `gamescope-git` this way, and a pacman
@@ -40,6 +40,11 @@
 //!   files the guard in [`crate::immutable::remove::check_protected`] refuses
 //!   (Xen's `/boot/xen.gz`, say) will own them again once rebuilt. The guard
 //!   still runs after the build too, for files a new version adds.
+//! * **source-signing keys** no keyserver has. A helper fetches a PKGBUILD's
+//!   `validpgpkeys` from one keyserver, after downloading every source in the
+//!   batch, and gives up on the lot when it cannot. [`crate::aur::keys`]
+//!   imports them first, from more than one, and what is still missing holds
+//!   its package back.
 //!
 //! A hold covers the whole package base. A helper builds a split package by
 //! building its base, so `xen-docs` beside a held `xen` would compile all of
@@ -57,6 +62,7 @@
 
 use crate::aur::helper::AurHelper;
 use crate::aur::install::build_in_target;
+use crate::aur::keys;
 use crate::aur::rpc::{AurRpc, CurlGet, HttpGet};
 use crate::immutable::{history, remove};
 use crate::utils::command::CommandRunner;
@@ -101,6 +107,14 @@ impl UpgradePlan {
     /// The names to hand the helper.
     pub fn names(&self) -> Vec<String> {
         self.outdated.iter().map(|o| o.name.clone()).collect()
+    }
+
+    /// The package bases the helper will build, each once.
+    pub fn bases(&self) -> Vec<String> {
+        let mut bases: Vec<String> = self.outdated.iter().map(|o| o.base.clone()).collect();
+        bases.sort();
+        bases.dedup();
+        bases
     }
 
     /// Move each outdated package `reason` names into [`Self::held`], and
@@ -160,6 +174,16 @@ impl UpgradePlan {
                     .collect::<Vec<_>>()
                     .join("; "),
             )
+        });
+    }
+
+    /// Hold back outdated packages whose base verifies its sources against a
+    /// key the build user's keyring lacks. `missing` maps a base to those keys.
+    pub fn hold_unverifiable(&mut self, missing: &BTreeMap<String, Vec<String>>, user: &str) {
+        self.hold_where(|o| {
+            missing
+                .get(&o.base)
+                .map(|keys| keys::missing_reason(keys, user))
         });
     }
 }
@@ -363,12 +387,18 @@ pub fn upgrade_in_target(
         "[aur] Checking {} foreign package(s) against the AUR",
         installed.len()
     );
-    let plan = plan_for(
+    let mut plan = plan_for(
         &AurRpc::new(CurlGet),
         &installed,
         &read_pacman_conf(cmd, target),
         |s| query(cmd, target, s),
     )?;
+    // Here rather than in `plan_for`: importing keys writes to the keyring,
+    // and the GUI's preview of the plan must stay read-only.
+    if !plan.outdated.is_empty() {
+        let missing = keys::ensure_for_bases(cmd, target, build_user, &plan.bases())?;
+        plan.hold_unverifiable(&missing, build_user);
+    }
 
     if !plan.not_in_aur.is_empty() {
         info!(
@@ -608,6 +638,40 @@ mod tests {
         assert_eq!(plan.names(), vec!["yay"]);
         let docs = plan.held.iter().find(|h| h.name == "xen-docs").unwrap();
         assert!(docs.reason.contains("xen is held back"), "{:?}", docs);
+    }
+
+    /// Seen on a real host: no keyserver yay asked had the kernel's signing
+    /// key, and yay gave up on every package in the batch.
+    #[test]
+    fn a_base_whose_signing_key_is_missing_is_held_with_its_siblings() {
+        let mut plan = UpgradePlan {
+            outdated: vec![
+                outdated(
+                    "linux-xanmod-bore",
+                    "linux-xanmod-bore",
+                    "7.1.13-1",
+                    "7.2.12-1",
+                ),
+                outdated(
+                    "linux-xanmod-bore-headers",
+                    "linux-xanmod-bore",
+                    "7.1.13-1",
+                    "7.2.12-1",
+                ),
+                outdated("yay", "yay", "13.0-1", "13.1-1"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(plan.bases(), vec!["linux-xanmod-bore", "yay"]);
+        let missing = BTreeMap::from([(
+            "linux-xanmod-bore".to_string(),
+            vec!["ABAF11C65A2970B130ABE3C479BE3E4300411886".to_string()],
+        )]);
+        plan.hold_unverifiable(&missing, "deck");
+        assert_eq!(plan.names(), vec!["yay"]);
+        let held: Vec<_> = plan.held.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(held, vec!["linux-xanmod-bore", "linux-xanmod-bore-headers"]);
+        assert!(plan.held[0].reason.contains("ABAF11C6"), "{:?}", plan.held);
     }
 
     const XANMOD: &str = r#"{"version":5,"type":"multiinfo","resultcount":3,

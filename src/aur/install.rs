@@ -37,6 +37,7 @@
 use crate::aur::build;
 use crate::aur::capability::AurCapability;
 use crate::aur::helper::AurHelper;
+use crate::aur::keys;
 use crate::immutable::history;
 use crate::immutable::remove;
 use crate::immutable::update::{run_in_new_set, UpdateOptions};
@@ -124,6 +125,20 @@ pub fn run_aur_install(
     let build_user = user.name.clone();
 
     run_in_new_set(cmd, &update_opts, request, move |cmd, target, _set_id| {
+        // Before the helper downloads anything: it would give up on every
+        // package, after fetching all their sources, over one missing key.
+        let missing = keys::ensure_for_packages(cmd, target, &build_user, &packages)?;
+        if !missing.is_empty() {
+            let lines: Vec<String> = missing
+                .iter()
+                .map(|(base, keys)| format!("{base}: {}", keys::missing_reason(keys, &build_user)))
+                .collect();
+            return Err(DeploytixError::ConfigError(format!(
+                "Cannot verify the sources of:\n  {}",
+                lines.join("\n  ")
+            )));
+        }
+
         let before = history::query_packages(cmd, target);
         build_in_target(cmd, target, helper, &build_user, &packages)?;
 
