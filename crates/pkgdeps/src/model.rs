@@ -127,6 +127,10 @@ pub struct Package {
     pub name: String,
     pub version: String,
     pub repo: String,
+    /// The package base it is built from (`pkgbase`), which split packages
+    /// share. Empty when the source does not say; see [`Package::pkgbase`].
+    #[serde(default)]
+    pub base: String,
     #[serde(default)]
     pub arch: String,
     #[serde(default)]
@@ -165,6 +169,7 @@ impl Package {
             name: name.into(),
             version: version.into(),
             repo: repo.into(),
+            base: String::new(),
             arch: String::new(),
             description: String::new(),
             url: String::new(),
@@ -179,6 +184,16 @@ impl Package {
             replaces: Vec::new(),
             required_by: Vec::new(),
             optional_for: Vec::new(),
+        }
+    }
+
+    /// The package base, or the name when the base is unknown: a package
+    /// that is not split is its own base.
+    pub fn pkgbase(&self) -> &str {
+        if self.base.is_empty() {
+            &self.name
+        } else {
+            &self.base
         }
     }
 }

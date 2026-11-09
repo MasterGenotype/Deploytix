@@ -536,6 +536,8 @@ pub fn parse_pacman_si(text: &str) -> Result<Package> {
         name,
         version,
         repo,
+        // `pacman -Si` does not print the package base.
+        base: String::new(),
         arch: folded.get("Architecture").cloned().unwrap_or_default(),
         description: folded.get("Description").cloned().unwrap_or_default(),
         url: folded.get("URL").cloned().unwrap_or_default(),

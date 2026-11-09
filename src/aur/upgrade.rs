@@ -41,6 +41,12 @@
 //!   (Xen's `/boot/xen.gz`, say) will own them again once rebuilt. The guard
 //!   still runs after the build too, for files a new version adds.
 //!
+//! A hold covers the whole package base. A helper builds a split package by
+//! building its base, so `xen-docs` beside a held `xen` would compile all of
+//! Xen to install the docs, and a kernel's `-headers` beside a pinned kernel
+//! would move the headers past the kernel they are for. Every outdated
+//! package sharing a base with a held one is held with it.
+//!
 //! # Where it runs
 //!
 //! Inside the set `deploytix update` has just run `pacman -Syu` in, and after
@@ -65,6 +71,8 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outdated {
     pub name: String,
+    /// The AUR package base it is built from; split packages share one.
+    pub base: String,
     pub installed: String,
     pub available: String,
 }
@@ -95,16 +103,38 @@ impl UpgradePlan {
         self.outdated.iter().map(|o| o.name.clone()).collect()
     }
 
-    /// Move each outdated package `reason` names into [`Self::held`].
+    /// Move each outdated package `reason` names into [`Self::held`], and
+    /// every outdated package built from the same base with it.
     fn hold_where(&mut self, reason: impl Fn(&Outdated) -> Option<String>) {
         let (held, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.outdated)
             .into_iter()
             .map(|o| (reason(&o), o))
             .partition(|(why, _)| why.is_some());
-        self.outdated = kept.into_iter().map(|(_, o)| o).collect();
-        self.held.extend(held.into_iter().map(|(why, o)| Held {
+        let mut held: Vec<(String, Outdated)> = held
+            .into_iter()
+            .map(|(why, o)| (why.unwrap_or_default(), o))
+            .collect();
+
+        let held_bases: BTreeMap<String, String> = held
+            .iter()
+            .map(|(_, o)| (o.base.clone(), o.name.clone()))
+            .collect();
+        let (siblings, kept): (Vec<_>, Vec<_>) = kept
+            .into_iter()
+            .map(|(_, o)| o)
+            .partition(|o| held_bases.contains_key(&o.base));
+        held.extend(siblings.into_iter().map(|o| {
+            let why = format!(
+                "{} is held back, and both are built from package base {}",
+                held_bases[&o.base], o.base
+            );
+            (why, o)
+        }));
+
+        self.outdated = kept;
+        self.held.extend(held.into_iter().map(|(reason, o)| Held {
             name: o.name,
-            reason: why.unwrap_or_default(),
+            reason,
         }));
     }
 
@@ -196,20 +226,18 @@ fn hold_reason(name: &str, ignored: &[String]) -> Option<String> {
 
 /// Sort `installed` foreign packages against the AUR's metadata for them.
 pub fn plan(installed: &BTreeMap<String, String>, aur: &[Package]) -> UpgradePlan {
-    let available: BTreeMap<&str, &str> = aur
-        .iter()
-        .map(|p| (p.name.as_str(), p.version.as_str()))
-        .collect();
+    let available: BTreeMap<&str, &Package> = aur.iter().map(|p| (p.name.as_str(), p)).collect();
 
     let mut plan = UpgradePlan::default();
     for (name, version) in installed {
         match available.get(name.as_str()) {
             None => plan.not_in_aur.push(name.clone()),
-            Some(aur_version) if vercmp(aur_version, version) == Ordering::Greater => {
+            Some(aur) if vercmp(&aur.version, version) == Ordering::Greater => {
                 plan.outdated.push(Outdated {
                     name: name.clone(),
+                    base: aur.pkgbase().to_string(),
                     installed: version.clone(),
-                    available: aur_version.to_string(),
+                    available: aur.version.clone(),
                 })
             }
             Some(_) => plan.current.push(name.clone()),
@@ -337,6 +365,15 @@ mod tests {
         Package::new(name, version, crate::aur::rpc::AUR_REPO)
     }
 
+    fn outdated(name: &str, base: &str, installed: &str, available: &str) -> Outdated {
+        Outdated {
+            name: name.into(),
+            base: base.into(),
+            installed: installed.into(),
+            available: available.into(),
+        }
+    }
+
     fn installed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -362,6 +399,7 @@ mod tests {
             plan.outdated,
             vec![Outdated {
                 name: "zen-browser-bin".into(),
+                base: "zen-browser-bin".into(),
                 installed: "1.0-1".into(),
                 available: "1.1-1".into(),
             }]
@@ -496,16 +534,8 @@ mod tests {
     fn a_package_that_already_owns_boot_files_is_held_before_building() {
         let mut plan = UpgradePlan {
             outdated: vec![
-                Outdated {
-                    name: "xen".into(),
-                    installed: "4.19-1".into(),
-                    available: "4.21-1".into(),
-                },
-                Outdated {
-                    name: "yay".into(),
-                    installed: "13.0-1".into(),
-                    available: "13.1-1".into(),
-                },
+                outdated("xen", "xen", "4.19-1", "4.21-1"),
+                outdated("yay", "yay", "13.0-1", "13.1-1"),
             ],
             ..Default::default()
         };
@@ -517,6 +547,72 @@ mod tests {
         assert_eq!(plan.held[0].name, "xen");
         assert!(plan.held[0].reason.contains("/boot"), "{:?}", plan.held);
         assert!(!plan.held[0].reason.starts_with("xen:"), "{:?}", plan.held);
+    }
+
+    /// Seen on a real host: xen held for /boot, xen-docs not, so yay compiled
+    /// all of Xen to install the docs.
+    #[test]
+    fn a_split_sibling_of_a_package_held_for_boot_files_is_held_too() {
+        let mut plan = UpgradePlan {
+            outdated: vec![
+                outdated("xen", "xen", "4.19-1", "4.21-1"),
+                outdated("xen-docs", "xen", "4.19-1", "4.21-1"),
+                outdated("yay", "yay", "13.0-1", "13.1-1"),
+            ],
+            ..Default::default()
+        };
+        let lists = remove::parse_file_lists(
+            "PKG xen\n/boot/xen.gz\nPKG xen-docs\n/usr/share/doc/xen/\nPKG yay\n/usr/bin/yay\n",
+        );
+        plan.hold_shared_state(&lists, false);
+        assert_eq!(plan.names(), vec!["yay"]);
+        let docs = plan.held.iter().find(|h| h.name == "xen-docs").unwrap();
+        assert!(docs.reason.contains("xen is held back"), "{:?}", docs);
+    }
+
+    const XANMOD: &str = r#"{"version":5,"type":"multiinfo","resultcount":3,
+        "results":[{"Name":"linux-xanmod-bore","PackageBase":"linux-xanmod-bore","Version":"7.2.12-1"},
+                   {"Name":"linux-xanmod-bore-headers","PackageBase":"linux-xanmod-bore","Version":"7.2.12-1"},
+                   {"Name":"paru","PackageBase":"paru","Version":"2.1-1"}]}"#;
+
+    /// Pinning a kernel by name must not move its headers past it, or DKMS
+    /// builds modules for a kernel that is not installed.
+    #[test]
+    fn ignore_pkg_on_a_kernel_holds_its_headers() {
+        let rpc = AurRpc::new(Canned(Ok(XANMOD)));
+        let plan = check(
+            &rpc,
+            &installed(&[
+                ("linux-xanmod-bore", "7.1.13-1"),
+                ("linux-xanmod-bore-headers", "7.1.13-1"),
+                ("paru", "2.0-1"),
+            ]),
+            &["linux-xanmod-bore".to_string()],
+        )
+        .unwrap();
+        assert_eq!(plan.names(), vec!["paru"]);
+        let held: Vec<_> = plan.held.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(held, vec!["linux-xanmod-bore", "linux-xanmod-bore-headers"]);
+    }
+
+    /// Without a hold, split siblings are rebuilt together as usual.
+    #[test]
+    fn split_siblings_upgrade_together_when_nothing_holds_them() {
+        let rpc = AurRpc::new(Canned(Ok(XANMOD)));
+        let plan = check(
+            &rpc,
+            &installed(&[
+                ("linux-xanmod-bore", "7.1.13-1"),
+                ("linux-xanmod-bore-headers", "7.1.13-1"),
+            ]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.names(),
+            vec!["linux-xanmod-bore", "linux-xanmod-bore-headers"]
+        );
+        assert!(plan.held.is_empty(), "{:?}", plan.held);
     }
 
     #[test]

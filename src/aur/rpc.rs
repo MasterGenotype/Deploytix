@@ -116,6 +116,8 @@ struct InfoResult {
     name: String,
     version: String,
     #[serde(default)]
+    package_base: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default, rename = "URL")]
     url: Option<String>,
@@ -164,6 +166,7 @@ struct RpcResponse {
 impl InfoResult {
     fn into_package(self) -> Package {
         let mut pkg = Package::new(self.name, self.version, AUR_REPO.to_string());
+        pkg.base = self.package_base.unwrap_or_default();
         pkg.description = self.description.unwrap_or_default();
         pkg.url = self.url.unwrap_or_default();
         pkg.licenses = self.license;
