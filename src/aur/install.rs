@@ -39,6 +39,7 @@ use crate::aur::capability::AurCapability;
 use crate::aur::helper::AurHelper;
 use crate::aur::keys;
 use crate::aur::rpc::CurlGet;
+use crate::aur::srccache;
 use crate::aur::srcinfo;
 use crate::immutable::history;
 use crate::immutable::remove;
@@ -142,6 +143,8 @@ pub fn run_aur_install(
                 lines.join("\n  ")
             )));
         }
+
+        srccache::prune(cmd, &srcinfos);
 
         let before = history::query_packages(cmd, target);
         build_in_target(cmd, target, helper, &build_user, &packages)?;

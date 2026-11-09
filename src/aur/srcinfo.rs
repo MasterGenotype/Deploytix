@@ -1,8 +1,9 @@
 //! `.SRCINFO` files from the AUR: what a package base builds from, read before
 //! the helper starts.
 //!
-//! Fetched once per batch for what has to be settled before a build starts:
-//! the PGP keys its sources are signed with ([`crate::aur::keys`]).
+//! Fetched once per batch and shared by everything that settles a build in
+//! advance: the PGP keys its sources are signed with ([`crate::aur::keys`]) and
+//! the cached sources that no longer match it ([`crate::aur::srccache`]).
 
 use crate::aur::rpc::{is_valid_package_name, AurRpc, HttpGet};
 use std::collections::{BTreeMap, BTreeSet};

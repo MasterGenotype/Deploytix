@@ -14,7 +14,9 @@
 //! * [`keyring`] — the keyring builds verify with: deploytix's own, without
 //!   keyboxd, whose locks a chroot's PID namespace strands.
 //! * [`srcinfo`] — *what a base builds from*: its `.SRCINFO`, read once per
-//!   batch for the key check above.
+//!   batch for the checks above and below.
+//! * [`srccache`] — the shared source cache, with files a PKGBUILD no longer
+//!   means removed before building.
 //! * [`rpc`] — *what exists*: a read-only client for the AUR's RPC interface.
 //! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
 //!   composite that resolves a dependency graph spanning the repositories and
@@ -36,6 +38,7 @@ pub mod keys;
 pub mod rpc;
 pub mod search;
 pub mod source;
+pub mod srccache;
 pub mod srcinfo;
 pub mod upgrade;
 

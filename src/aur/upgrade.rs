@@ -64,7 +64,7 @@ use crate::aur::helper::AurHelper;
 use crate::aur::install::build_in_target;
 use crate::aur::keys;
 use crate::aur::rpc::{AurRpc, CurlGet, HttpGet};
-use crate::aur::srcinfo;
+use crate::aur::{srccache, srcinfo};
 use crate::immutable::{history, remove};
 use crate::utils::command::CommandRunner;
 use crate::utils::error::{DeploytixError, Result};
@@ -394,10 +394,12 @@ pub fn upgrade_in_target(
         &read_pacman_conf(cmd, target),
         |s| query(cmd, target, s),
     )?;
-    // Here rather than in `plan_for`: importing keys writes to the keyring,
-    // and the GUI's preview of the plan must stay read-only.
+    // Here rather than in `plan_for`: importing keys writes to the keyring and
+    // pruning writes to the source cache, and the GUI's preview of the plan
+    // must stay read-only.
+    let mut srcinfos = BTreeMap::new();
     if !plan.outdated.is_empty() {
-        let srcinfos = srcinfo::fetch(&CurlGet, &plan.bases());
+        srcinfos = srcinfo::fetch(&CurlGet, &plan.bases());
         let missing = keys::ensure_for_bases(cmd, build_user, &srcinfos)?;
         plan.hold_unverifiable(&missing, build_user);
     }
@@ -423,6 +425,7 @@ pub fn upgrade_in_target(
     for o in &plan.outdated {
         info!("[aur]   {} {} -> {}", o.name, o.installed, o.available);
     }
+    srccache::prune(cmd, &srcinfos);
     let names = plan.names();
     build_in_target(cmd, target, helper, build_user, &names)?;
     Ok(names)
