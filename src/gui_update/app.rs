@@ -3,9 +3,11 @@
 use super::model::Backend;
 use super::panels;
 use super::state::{AppState, Tab};
-use crate::gui::{theme, widgets};
+use super::style;
+use super::ui::{self, Tone};
+use crate::gui::theme;
 use eframe::egui;
-use egui::RichText;
+use egui::{Align, Layout, Margin, RichText};
 
 /// Why the app cannot do anything on this system, if so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +37,7 @@ pub struct UpdateGui {
 
 impl UpdateGui {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        style::apply(&cc.egui_ctx);
         Self {
             state: AppState::default(),
             blocked: Blocked::detect(),
@@ -44,41 +46,182 @@ impl UpdateGui {
     }
 
     fn show_blocked(&self, ui: &mut egui::Ui, reason: Blocked) {
-        widgets::page_heading(ui, "Deploytix Update");
-        match reason {
-            Blocked::NotRoot => {
-                widgets::section(ui, "Administrator access required", |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Building a system update needs root. Launch this from the \
-                             application menu, which asks for authentication, or run it with \
-                             pkexec.",
-                        )
-                        .color(theme::TEXT_SECONDARY),
-                    );
-                });
-            }
+        let (title, text, hint) = match reason {
+            Blocked::NotRoot => (
+                "Administrator access required",
+                "Building a system update needs root. Launch this from the application menu, \
+                 which asks for authentication, or run it with pkexec.",
+                None,
+            ),
             // The package is only installed on immutable deployments, so this
             // is the hand-installed or migrated case rather than the norm.
-            Blocked::NotImmutable => {
-                widgets::section(ui, "Not an immutable system", |ui| {
-                    ui.label(
-                        RichText::new(
-                            "This tool drives deploytix's transactional updates, which only \
-                             exist on an immutable install. This system has a writable root, \
-                             so there are no snapshots to manage.",
-                        )
-                        .color(theme::TEXT_SECONDARY),
-                    );
-                    ui.add_space(theme::SPACING_SM);
-                    ui.label(
-                        RichText::new("Update this system with pacman as usual.")
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
+            Blocked::NotImmutable => (
+                "Not an immutable system",
+                "This tool drives deploytix's transactional updates, which only exist on an \
+                 immutable install. This system has a writable root, so there are no \
+                 snapshots to manage.",
+                Some("Update this system with pacman as usual."),
+            ),
+        };
+        ui.add_space(ui.available_height() * 0.25);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(520.0);
+            ui::card(ui, "Deploytix Update", |ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(style::medium(16.0))
+                        .color(style::TEXT),
+                );
+                ui.add_space(6.0);
+                ui.label(text);
+                if let Some(hint) = hint {
+                    ui.add_space(6.0);
+                    ui::note(ui, hint);
+                }
+            });
+        });
+    }
+
+    /// Title, what is booted and what boots next, and Refresh.
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.set_min_height(30.0);
+            ui.label(
+                RichText::new("Deploytix Update")
+                    .font(style::medium(15.0))
+                    .color(style::TEXT),
+            );
+            if let Some(info) = &self.state.info {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(info.backend.label())
+                        .size(style::SMALL)
+                        .color(style::TEXT_FAINT),
+                );
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refreshing = self.state.refreshing;
+                if ui::button(ui, !refreshing, "Refresh").clicked() {
+                    self.state.start_refresh();
+                }
+                if refreshing {
+                    ui.spinner();
+                }
+                ui.add_space(8.0);
+                if let Some(info) = self.state.info.clone() {
+                    let noun = info.backend.target_noun();
+                    if info.has_staged_update() {
+                        ui::badge(
+                            ui,
+                            &format!("Next boot: {}", describe_target(&info.pointer, noun)),
+                            Tone::Warning,
+                        )
+                        .on_hover_text("An update is staged and takes effect on the next reboot.");
+                    }
+                    ui::badge(
+                        ui,
+                        &format!("Running: {}", describe_target(&info.running, noun)),
+                        Tone::Success,
+                    );
+                }
+            });
+        });
+    }
+
+    fn tabs(&mut self, ui: &mut egui::Ui) {
+        let state = &self.state;
+        let dot = |tab: Tab| match tab {
+            Tab::Progress if state.question.is_some() => Some(style::WARNING),
+            Tab::Progress if state.busy => Some(style::ACCENT),
+            Tab::Progress if state.error.is_some() => Some(style::ERROR),
+            Tab::Aur => state
+                .aur_plan
+                .as_ref()
+                .filter(|p| !p.outdated.is_empty())
+                .map(|_| style::ACCENT),
+            _ => None,
+        };
+        let items: Vec<ui::TabItem> = Tab::ALL
+            .iter()
+            .map(|&tab| ui::TabItem {
+                label: tab.label(),
+                selected: state.tab == tab,
+                dot: dot(tab),
+            })
+            .collect();
+        if let Some(i) = ui::tab_strip(ui, &items) {
+            self.state.tab = Tab::ALL[i];
         }
     }
+
+    /// What is running, and the two options every transaction takes.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let state = &mut self.state;
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            if state.busy {
+                ui.spinner();
+                let status = match state.phase {
+                    Some(phase) => phase.label().to_string(),
+                    None => state.status.clone(),
+                };
+                ui.label(RichText::new(status).color(style::TEXT));
+                if state.tab != Tab::Progress && ui::quiet(ui, true, "View progress").clicked() {
+                    state.tab = Tab::Progress;
+                }
+            } else if let Some(err) = &state.error {
+                ui::swatch(ui, style::ERROR);
+                let first = err.lines().next().unwrap_or_default().to_string();
+                ui.label(RichText::new(first).color(style::ERROR));
+            } else if let Some(done) = &state.finished {
+                ui::swatch(ui, style::SUCCESS);
+                ui.label(RichText::new(done).color(style::SUCCESS));
+            } else {
+                ui::swatch(ui, style::BORDER_STRONG);
+                ui.label(RichText::new("Ready").color(style::TEXT_FAINT));
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(concat!("deploytix ", env!("CARGO_PKG_VERSION")))
+                        .size(style::SMALL)
+                        .color(style::TEXT_FAINT),
+                );
+                ui.add_space(12.0);
+                ui.add_enabled_ui(!state.busy, |ui| {
+                    ui.checkbox(&mut state.reboot_after, "Reboot when done");
+                    ui.add_space(12.0);
+                    ui.add(
+                        egui::DragValue::new(&mut state.keep_sets)
+                            .range(1..=20)
+                            .suffix(" snapshots"),
+                    )
+                    .on_hover_text(
+                        "How many snapshots each transaction keeps; older ones are pruned.",
+                    );
+                    ui.label(RichText::new("Keep").color(style::TEXT_FAINT));
+                });
+            });
+        });
+    }
+}
+
+/// `@` and slot letters need expanding; a set id is dated in the Snapshots tab.
+pub fn describe_target(target: &str, noun: &str) -> String {
+    match target {
+        "@" => "Base install".to_string(),
+        "A" | "B" => format!("Slot {target}"),
+        id => match id.parse::<u64>() {
+            Ok(secs) => super::calendar::local_timestamp(secs),
+            Err(_) => format!("{noun} {id}"),
+        },
+    }
+}
+
+fn bar_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(style::BAR)
+        .inner_margin(Margin::symmetric(16, 0))
 }
 
 impl eframe::App for UpdateGui {
@@ -114,30 +257,36 @@ impl eframe::App for UpdateGui {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
 
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.add_space(theme::SPACING_XS);
-            ui.horizontal(|ui| {
-                for tab in Tab::ALL {
-                    let selected = self.state.tab == tab;
-                    if ui.selectable_label(selected, tab.label()).clicked() {
-                        self.state.tab = tab;
-                    }
-                }
+        egui::TopBottomPanel::top("header")
+            .frame(bar_frame().inner_margin(Margin {
+                left: 16,
+                right: 16,
+                top: 10,
+                bottom: 0,
+            }))
+            .show(ctx, |ui| {
+                self.header(ui);
+                ui.add_space(4.0);
+                self.tabs(ui);
             });
-            ui.add_space(theme::SPACING_XS);
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| match self.state.tab {
-                    Tab::System => panels::system::show(ui, &mut self.state),
-                    Tab::Update => panels::update::show(ui, &mut self.state),
-                    Tab::Aur => panels::aur::show(ui, &mut self.state),
-                    Tab::Snapshots => panels::snapshots::show(ui, &mut self.state),
-                    Tab::Progress => panels::progress::show(ui, &mut self.state),
-                });
-        });
+        egui::TopBottomPanel::bottom("status")
+            .frame(bar_frame().inner_margin(Margin::symmetric(16, 4)))
+            .show(ctx, |ui| self.status_bar(ui));
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(style::BG)
+                    .inner_margin(Margin::same(16)),
+            )
+            .show(ctx, |ui| match self.state.tab {
+                Tab::System => panels::system::show(ui, &mut self.state),
+                Tab::Update => panels::update::show(ui, &mut self.state),
+                Tab::Aur => panels::aur::show(ui, &mut self.state),
+                Tab::Snapshots => panels::snapshots::show(ui, &mut self.state),
+                Tab::Progress => panels::progress::show(ui, &mut self.state),
+            });
     }
 }
 

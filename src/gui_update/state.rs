@@ -1,5 +1,6 @@
 //! State and background workers for the update GUI.
 
+use super::calendar;
 use super::console::{self as pacman_console, ConsoleBuffer, GuiConsole, PendingQuestion, Phase};
 use super::model::{self, Backend, SnapshotRow};
 use super::preview::{self, Preview};
@@ -7,11 +8,13 @@ use crate::aur::capability::{self, AurCapability};
 use crate::aur::install::{run_aur_install, AurInstallOptions};
 use crate::aur::rpc::{AurRpc, CurlGet, SearchBy};
 use crate::aur::search::{rank, RankedHit};
+use crate::aur::upgrade::{self, UpgradePlan};
 use crate::immutable::remove::{self, RemovalPlan, RemoveOptions, RemoveRefusal};
 use crate::immutable::update::{run_update, UpdateOptions};
 use crate::immutable::{boot, detect_devices, history, lvm_ab, rollback, snapshot};
 use crate::utils::command::{CommandRunner, OperationRecord};
 use crate::utils::console::{Answer, ConsoleHandle};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -25,11 +28,15 @@ enum ChannelSlot {
     /// Dependency resolution for the Update tab. Its own channel so a slow
     /// resolve can never displace a running update's messages.
     Resolve,
-    /// Removal preview. Its own channel for the same reason, and because an
-    /// install preview and a removal preview can be in flight together.
-    RemoveResolve,
+    /// Removal preview, one per form. Its own channel for the same reason,
+    /// and because an install preview and a removal preview can be in flight
+    /// together.
+    RemoveResolve(RemoveFormId),
     /// AUR search. Separate again: a search runs while a resolve is in flight.
     Search,
+    /// Which installed AUR packages have updates. A network request, so it
+    /// gets its own channel like the search.
+    AurCheck,
 }
 
 /// How many trailing output lines of each command reach the log pane.
@@ -117,11 +124,13 @@ pub enum Msg {
         rows: Vec<SnapshotRow>,
         /// What this system can do with the AUR, probed alongside the rest.
         capability: AurCapability,
+        /// The foreign packages installed: name to version.
+        aur_installed: BTreeMap<String, String>,
     },
     /// A dependency preview completed.
     Resolved(Box<Preview>),
     /// A removal preview completed, whether pacman agreed to it or not.
-    RemoveResolved(Box<RemovePreview>),
+    RemoveResolved(RemoveFormId, Box<RemovePreview>),
     /// An AUR search completed, ranked best first.
     SearchResults {
         term: String,
@@ -129,6 +138,10 @@ pub enum Msg {
     },
     /// An AUR search failed.
     SearchFailed(String),
+    /// The installed AUR packages were checked for updates.
+    AurChecked(Box<UpgradePlan>),
+    /// The update check could not reach the AUR.
+    AurCheckFailed(String),
     /// A refresh could not read the system.
     RefreshFailed(String),
     /// The operation finished; the string is the user-facing summary.
@@ -164,6 +177,92 @@ impl RemovePreview {
     }
 }
 
+/// Which removal form: the Update tab's, for repository packages, or the AUR
+/// tab's, a checklist of the AUR packages installed here. Both run the same
+/// transaction; they are kept apart so a name picked on one tab never turns up
+/// in the other's removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveFormId {
+    Repo,
+    Aur,
+}
+
+/// A removal form: space-separated names like the install field, the two
+/// pacman flags the CLI exposes, and a preview on its own channel.
+#[derive(Default)]
+pub struct RemoveForm {
+    pub packages: String,
+    pub cascade: bool,
+    pub purge: bool,
+    pub preview: Option<RemovePreview>,
+    pub resolving: bool,
+    pub receiver: Option<Receiver<Msg>>,
+    /// The confirm dialog is showing. The GUI confirms here, before the
+    /// transaction, because the CLI's prompt inside it has no terminal to ask.
+    pub confirm: bool,
+    /// What the last resolve was asked, so [`Self::needs_resolve`] does not
+    /// ask the same thing again every frame.
+    asked: Option<(Vec<String>, bool)>,
+}
+
+impl RemoveForm {
+    /// The names in the form.
+    pub fn targets(&self) -> Vec<String> {
+        model::parse_package_names(&self.packages)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.targets().iter().any(|t| t == name)
+    }
+
+    /// Add `name` to the form, or take it out if it is there.
+    pub fn toggle(&mut self, name: &str) {
+        let mut targets = self.targets();
+        if let Some(i) = targets.iter().position(|t| t == name) {
+            targets.remove(i);
+        } else {
+            targets.push(name.to_string());
+        }
+        self.packages = targets.join(" ");
+    }
+
+    /// Whether the held preview describes what the form now says.
+    pub fn preview_matches(&self) -> bool {
+        match &self.preview {
+            Some(p) => p.targets == self.targets() && p.cascade == self.cascade,
+            None => false,
+        }
+    }
+
+    /// The preview to display, if it is still current.
+    pub fn current_preview(&self) -> Option<&RemovePreview> {
+        if self.preview_matches() {
+            self.preview.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// The plan a removal would run with, if there is a current preview and
+    /// pacman and the guard both accepted it. This is what enables the button:
+    /// nothing in the form, a stale preview, or a refusal all leave it greyed
+    /// out.
+    pub fn plan(&self) -> Option<&RemovalPlan> {
+        self.current_preview().and_then(|p| p.plan())
+    }
+
+    /// The form has moved on from its preview and nothing has been asked
+    /// about what it says now. For a checklist, which has no "done editing"
+    /// moment to resolve on.
+    pub fn needs_resolve(&self) -> bool {
+        let targets = self.targets();
+        !targets.is_empty()
+            && !self.resolving
+            && !self.preview_matches()
+            && self.asked.as_ref() != Some(&(targets, self.cascade))
+    }
+}
+
 /// Whole application state.
 pub struct AppState {
     pub tab: Tab,
@@ -173,6 +272,8 @@ pub struct AppState {
     pub rows: Vec<SnapshotRow>,
     /// Target whose package list is expanded in the Snapshots tab.
     pub expanded: Option<String>,
+    /// The Snapshots calendar's month and selected day.
+    pub snapshot_view: calendar::View,
 
     /// What this system can do with the AUR. `None` until the first refresh.
     pub capability: Option<AurCapability>,
@@ -182,8 +283,6 @@ pub struct AppState {
     pub selected_files: Vec<PathBuf>,
     pub keep_sets: usize,
     pub reboot_after: bool,
-    /// The full upgrade also rebuilds outdated AUR packages.
-    pub upgrade_aur: bool,
 
     // File browser
     pub browser_open: bool,
@@ -221,17 +320,10 @@ pub struct AppState {
     pub resolving: bool,
     pub resolve_receiver: Option<Receiver<Msg>>,
 
-    // Remove form. Space-separated names like the install field; the two
-    // pacman flags the CLI exposes; and a preview on its own channel.
-    pub remove_packages: String,
-    pub remove_cascade: bool,
-    pub remove_purge: bool,
-    pub remove_preview: Option<RemovePreview>,
-    pub remove_resolving: bool,
-    pub remove_receiver: Option<Receiver<Msg>>,
-    /// The confirm dialog is showing. The GUI confirms here, before the
-    /// transaction, because the CLI's prompt inside it has no terminal to ask.
-    pub confirm_remove: bool,
+    /// The Update tab's removal form, for repository packages.
+    pub remove: RemoveForm,
+    /// The AUR tab's, for the AUR packages installed here.
+    pub aur_remove: RemoveForm,
 
     // AUR tab.
     pub aur_query: String,
@@ -243,6 +335,13 @@ pub struct AppState {
     pub aur_searching: bool,
     pub aur_error: Option<String>,
     pub search_receiver: Option<Receiver<Msg>>,
+    /// The foreign packages installed, name to version, from the last refresh.
+    pub aur_installed: BTreeMap<String, String>,
+    /// What `deploytix update --aur` would rebuild, from the last check.
+    pub aur_plan: Option<UpgradePlan>,
+    pub aur_checking: bool,
+    pub aur_check_error: Option<String>,
+    pub aur_check_receiver: Option<Receiver<Msg>>,
 }
 
 impl Default for AppState {
@@ -252,12 +351,12 @@ impl Default for AppState {
             info: None,
             rows: Vec::new(),
             expanded: None,
+            snapshot_view: calendar::View::default(),
             capability: None,
             repo_packages: String::new(),
             selected_files: Vec::new(),
             keep_sets: UpdateOptions::default().keep_sets,
             reboot_after: false,
-            upgrade_aur: false,
             browser_open: false,
             browser_dir: default_browse_dir(),
             confirm_rollback: None,
@@ -278,13 +377,8 @@ impl Default for AppState {
             preview: None,
             resolving: false,
             resolve_receiver: None,
-            remove_packages: String::new(),
-            remove_cascade: false,
-            remove_purge: false,
-            remove_preview: None,
-            remove_resolving: false,
-            remove_receiver: None,
-            confirm_remove: false,
+            remove: RemoveForm::default(),
+            aur_remove: RemoveForm::default(),
             aur_query: String::new(),
             aur_results_term: String::new(),
             aur_results: Vec::new(),
@@ -292,6 +386,11 @@ impl Default for AppState {
             aur_searching: false,
             aur_error: None,
             search_receiver: None,
+            aur_installed: BTreeMap::new(),
+            aur_plan: None,
+            aur_checking: false,
+            aur_check_error: None,
+            aur_check_receiver: None,
         }
     }
 }
@@ -323,8 +422,10 @@ impl AppState {
             ChannelSlot::Operation,
             ChannelSlot::Refresh,
             ChannelSlot::Resolve,
-            ChannelSlot::RemoveResolve,
+            ChannelSlot::RemoveResolve(RemoveFormId::Repo),
+            ChannelSlot::RemoveResolve(RemoveFormId::Aur),
             ChannelSlot::Search,
+            ChannelSlot::AurCheck,
         ] {
             changed |= self.pump_one(slot);
         }
@@ -340,8 +441,9 @@ impl AppState {
             ChannelSlot::Operation => self.receiver.as_ref(),
             ChannelSlot::Refresh => self.refresh_receiver.as_ref(),
             ChannelSlot::Resolve => self.resolve_receiver.as_ref(),
-            ChannelSlot::RemoveResolve => self.remove_receiver.as_ref(),
+            ChannelSlot::RemoveResolve(id) => self.remove_form(id).receiver.as_ref(),
             ChannelSlot::Search => self.search_receiver.as_ref(),
+            ChannelSlot::AurCheck => self.aur_check_receiver.as_ref(),
         };
         if let Some(rx) = rx {
             loop {
@@ -380,13 +482,18 @@ impl AppState {
                     self.resolve_receiver = None;
                     self.resolving = false;
                 }
-                ChannelSlot::RemoveResolve => {
-                    self.remove_receiver = None;
-                    self.remove_resolving = false;
+                ChannelSlot::RemoveResolve(id) => {
+                    let form = self.remove_form_mut(id);
+                    form.receiver = None;
+                    form.resolving = false;
                 }
                 ChannelSlot::Search => {
                     self.search_receiver = None;
                     self.aur_searching = false;
+                }
+                ChannelSlot::AurCheck => {
+                    self.aur_check_receiver = None;
+                    self.aur_checking = false;
                 }
             }
         }
@@ -417,10 +524,20 @@ impl AppState {
                 info,
                 rows,
                 capability,
+                aur_installed,
             } => {
                 self.info = Some(info);
                 self.rows = rows;
                 self.capability = Some(capability);
+                // A package removed since drops out of the checklist too.
+                self.aur_remove.packages = self
+                    .aur_remove
+                    .targets()
+                    .into_iter()
+                    .filter(|n| aur_installed.contains_key(n))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.aur_installed = aur_installed;
                 self.refresh_error = None;
                 self.refreshing = false;
             }
@@ -428,9 +545,10 @@ impl AppState {
                 self.preview = Some(*p);
                 self.resolving = false;
             }
-            Msg::RemoveResolved(p) => {
-                self.remove_preview = Some(*p);
-                self.remove_resolving = false;
+            Msg::RemoveResolved(id, p) => {
+                let form = self.remove_form_mut(id);
+                form.preview = Some(*p);
+                form.resolving = false;
             }
             Msg::SearchResults { term, hits } => {
                 self.aur_results_term = term;
@@ -442,6 +560,15 @@ impl AppState {
                 self.aur_error = Some(e);
                 self.aur_searching = false;
             }
+            Msg::AurChecked(plan) => {
+                self.aur_plan = Some(*plan);
+                self.aur_check_error = None;
+                self.aur_checking = false;
+            }
+            Msg::AurCheckFailed(e) => {
+                self.aur_check_error = Some(e);
+                self.aur_checking = false;
+            }
             Msg::RefreshFailed(e) => {
                 self.refresh_error = Some(e);
                 self.refreshing = false;
@@ -451,7 +578,9 @@ impl AppState {
                 self.busy = false;
                 self.question = None;
                 self.phase = None;
-                // The snapshot list is stale the moment an update lands.
+                // The snapshot list is stale the moment an update lands, and
+                // so is what the AUR check said was outdated.
+                self.aur_plan = None;
                 self.start_refresh();
             }
             Msg::Error(e) => {
@@ -547,6 +676,7 @@ impl AppState {
                     info,
                     rows,
                     capability: capability::probe(&cmd, ""),
+                    aur_installed: upgrade::installed_on_host(),
                 },
                 Err(e) => Msg::RefreshFailed(e.to_string()),
             };
@@ -614,79 +744,70 @@ impl AppState {
 
     // ── Removal ──
 
-    /// The names typed into the remove field.
-    pub fn remove_targets(&self) -> Vec<String> {
-        model::parse_package_names(&self.remove_packages)
+    pub fn remove_form(&self, id: RemoveFormId) -> &RemoveForm {
+        match id {
+            RemoveFormId::Repo => &self.remove,
+            RemoveFormId::Aur => &self.aur_remove,
+        }
     }
 
-    /// The pacman flags the remove form currently asks for. `assume_yes` is on
+    pub fn remove_form_mut(&mut self, id: RemoveFormId) -> &mut RemoveForm {
+        match id {
+            RemoveFormId::Repo => &mut self.remove,
+            RemoveFormId::Aur => &mut self.aur_remove,
+        }
+    }
+
+    /// The pacman flags a remove form currently asks for. `assume_yes` is on
     /// because the GUI confirms in its own dialog before the transaction
     /// starts; the CLI prompt inside it would have no terminal to ask on.
-    pub fn remove_options(&self) -> RemoveOptions {
+    pub fn remove_options(&self, id: RemoveFormId) -> RemoveOptions {
+        let form = self.remove_form(id);
         RemoveOptions {
             keep_sets: self.keep_sets,
             reboot: self.reboot_after,
-            cascade: self.remove_cascade,
-            purge: self.remove_purge,
+            cascade: form.cascade,
+            purge: form.purge,
             assume_yes: true,
         }
     }
 
-    /// Resolve the typed removal in the background.
+    /// Resolve a form's removal in the background.
     ///
     /// Read-only: `pacman -Rs --print` runs no transaction and takes no lock,
     /// and the file-list and kernel queries only read the database. Runs
     /// against the live system, which is what the set a removal builds is a
     /// snapshot of (unless an update is already staged — the transaction
     /// re-resolves inside its own set, so this is advisory either way).
-    pub fn start_remove_resolve(&mut self) {
-        let targets = self.remove_targets();
+    pub fn start_remove_resolve(&mut self, id: RemoveFormId) {
+        let opts = self.remove_options(id);
+        let form = self.remove_form_mut(id);
+        let targets = form.targets();
         if targets.is_empty() {
-            self.remove_preview = None;
+            form.preview = None;
             return;
         }
-        if self.remove_resolving {
+        if form.resolving {
             return;
         }
-        self.remove_resolving = true;
+        form.resolving = true;
+        form.asked = Some((targets.clone(), opts.cascade));
         let (tx, rx) = channel();
-        self.remove_receiver = Some(rx);
-        let opts = self.remove_options();
+        form.receiver = Some(rx);
         let cascade = opts.cascade;
 
         thread::spawn(move || {
             let cmd = CommandRunner::new(false);
             let result = remove::preview_removal(&cmd, &targets, &opts);
-            let _ = tx.send(Msg::RemoveResolved(Box::new(RemovePreview {
-                targets,
-                cascade,
-                result,
-            })));
+            let _ = tx.send(Msg::RemoveResolved(
+                id,
+                Box::new(RemovePreview {
+                    targets,
+                    cascade,
+                    result,
+                }),
+            ));
         });
-    }
-
-    /// Whether the held removal preview describes what the form now says.
-    pub fn remove_preview_matches(&self) -> bool {
-        match &self.remove_preview {
-            Some(p) => p.targets == self.remove_targets() && p.cascade == self.remove_cascade,
-            None => false,
-        }
-    }
-
-    /// The removal preview to display, if it is still current.
-    pub fn current_remove_preview(&self) -> Option<&RemovePreview> {
-        if self.remove_preview_matches() {
-            self.remove_preview.as_ref()
-        } else {
-            None
-        }
-    }
-
-    /// The plan a removal would run with, if there is a current preview and
-    /// pacman and the guard both accepted it. This is what enables the button:
-    /// nothing typed, a stale preview, or a refusal all leave it greyed out.
-    pub fn remove_plan(&self) -> Option<&RemovalPlan> {
-        self.current_remove_preview().and_then(|p| p.plan())
     }
 
     /// Why a removal cannot start on this system, or `None` when it can.
@@ -697,26 +818,27 @@ impl AppState {
         }
     }
 
-    /// Run a transactional removal of the typed packages in the background.
+    /// Run a transactional removal of a form's packages in the background.
     ///
-    /// Only meaningful after [`Self::remove_plan`] returned `Some`; the panel
+    /// Only meaningful after [`RemoveForm::plan`] returned `Some`; the panel
     /// gates the button on that, and this re-checks so a stray click cannot
     /// start a transaction with nothing in it.
-    pub fn start_remove(&mut self) {
-        let names = self.remove_targets();
-        if names.is_empty() || self.remove_plan().is_none() {
+    pub fn start_remove(&mut self, id: RemoveFormId) {
+        let names = self.remove_form(id).targets();
+        if names.is_empty() || self.remove_form(id).plan().is_none() {
             return;
         }
         if let Some(why) = self.remove_refusal() {
             self.error = Some(why.to_string());
             return;
         }
-        let opts = self.remove_options();
+        let opts = self.remove_options(id);
         let tx = self.begin("Building removal...");
         self.logs.clear();
-        self.confirm_remove = false;
+        let form = self.remove_form_mut(id);
+        form.confirm = false;
         // Described the pre-removal system; stale the moment the set is built.
-        self.remove_preview = None;
+        form.preview = None;
         self.tab = Tab::Progress;
 
         thread::spawn(move || {
@@ -740,6 +862,39 @@ impl AppState {
                 }
             }
         });
+    }
+
+    // ── AUR ──
+
+    /// Ask the AUR which installed packages have updates, in the background.
+    ///
+    /// The same plan `deploytix update --aur` makes, holds included, worked
+    /// out against the running system. Advisory: the transaction plans again
+    /// inside the set it builds.
+    pub fn start_aur_check(&mut self) {
+        if self.aur_checking {
+            return;
+        }
+        self.aur_checking = true;
+        self.aur_check_error = None;
+        let (tx, rx) = channel();
+        self.aur_check_receiver = Some(rx);
+
+        thread::spawn(move || {
+            let msg = match upgrade::preview_on_host() {
+                Ok(plan) => Msg::AurChecked(Box::new(plan)),
+                Err(e) => Msg::AurCheckFailed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    /// Upgrade the system and rebuild the AUR packages that have updates, as
+    /// `deploytix update --aur`. The repository upgrade is not optional: the
+    /// builds link against the set's libraries, so they run after
+    /// `pacman -Syu` in the same set.
+    pub fn start_aur_upgrade(&mut self) {
+        self.start_update(Vec::new(), true);
     }
 
     /// Search the AUR in the background.
@@ -1184,6 +1339,7 @@ mod tests {
             },
             rows: Vec::new(),
             capability: AurCapability::default(),
+            aur_installed: BTreeMap::new(),
         })
         .unwrap();
         state.pump();
@@ -1354,10 +1510,10 @@ mod tests {
     #[test]
     fn remove_targets_split_on_whitespace_and_an_empty_form_is_nothing() {
         let mut state = AppState::default();
-        state.remove_packages = "  linux \n linux-headers\t".into();
-        assert_eq!(state.remove_targets(), vec!["linux", "linux-headers"]);
-        state.remove_packages = "   ".into();
-        assert!(state.remove_targets().is_empty());
+        state.remove.packages = "  linux \n linux-headers\t".into();
+        assert_eq!(state.remove.targets(), vec!["linux", "linux-headers"]);
+        state.remove.packages = "   ".into();
+        assert!(state.remove.targets().is_empty());
     }
 
     /// The GUI confirms in its own dialog, so the transaction must not stop to
@@ -1365,11 +1521,11 @@ mod tests {
     #[test]
     fn remove_options_assume_yes_and_carry_the_form_flags() {
         let mut state = AppState::default();
-        state.remove_cascade = true;
-        state.remove_purge = true;
+        state.remove.cascade = true;
+        state.remove.purge = true;
         state.keep_sets = 7;
         state.reboot_after = true;
-        let opts = state.remove_options();
+        let opts = state.remove_options(RemoveFormId::Repo);
         assert!(opts.assume_yes);
         assert!(opts.cascade);
         assert!(opts.purge);
@@ -1380,19 +1536,19 @@ mod tests {
     #[test]
     fn a_removal_preview_for_different_input_is_not_shown() {
         let mut state = AppState::default();
-        state.remove_packages = "vim".into();
-        state.remove_preview = Some(accepted(&["neovim"], false));
-        assert!(state.current_remove_preview().is_none());
-        assert!(state.remove_plan().is_none());
+        state.remove.packages = "vim".into();
+        state.remove.preview = Some(accepted(&["neovim"], false));
+        assert!(state.remove.current_preview().is_none());
+        assert!(state.remove.plan().is_none());
 
-        state.remove_packages = "neovim".into();
-        assert!(state.current_remove_preview().is_some());
-        assert!(state.remove_plan().is_some());
+        state.remove.packages = "neovim".into();
+        assert!(state.remove.current_preview().is_some());
+        assert!(state.remove.plan().is_some());
 
         // --cascade changes what pacman resolves, so flipping it stales the
         // preview even with the same names.
-        state.remove_cascade = true;
-        assert!(state.current_remove_preview().is_none());
+        state.remove.cascade = true;
+        assert!(state.remove.current_preview().is_none());
     }
 
     /// A refused preview is current — its blockers must be shown — but it is
@@ -1400,26 +1556,26 @@ mod tests {
     #[test]
     fn a_refused_preview_shows_its_blockers_but_yields_no_plan() {
         let mut state = AppState::default();
-        state.remove_packages = "linux".into();
-        state.remove_preview = Some(RemovePreview {
+        state.remove.packages = "linux".into();
+        state.remove.preview = Some(RemovePreview {
             targets: vec!["linux".into()],
             cascade: false,
             result: Err(RemoveRefusal::Protected(vec!["linux: only kernel".into()])),
         });
-        let p = state.current_remove_preview().expect("current");
+        let p = state.remove.current_preview().expect("current");
         assert_eq!(p.blockers(), vec!["linux: only kernel".to_string()]);
-        assert!(state.remove_plan().is_none());
+        assert!(state.remove.plan().is_none());
     }
 
     #[test]
     fn clearing_the_remove_field_clears_the_preview_without_a_worker() {
         let mut state = AppState::default();
-        state.remove_preview = Some(accepted(&["vim"], false));
-        state.remove_packages = String::new();
-        state.start_remove_resolve();
-        assert!(state.remove_preview.is_none());
-        assert!(!state.remove_resolving);
-        assert!(state.remove_receiver.is_none());
+        state.remove.preview = Some(accepted(&["vim"], false));
+        state.remove.packages = String::new();
+        state.start_remove_resolve(RemoveFormId::Repo);
+        assert!(state.remove.preview.is_none());
+        assert!(!state.remove.resolving);
+        assert!(state.remove.receiver.is_none());
     }
 
     /// Without an accepted, current plan there is nothing to run: a stray
@@ -1427,17 +1583,17 @@ mod tests {
     #[test]
     fn a_removal_without_a_plan_does_not_start() {
         let mut state = AppState::default();
-        state.remove_packages = "vim".into();
-        state.start_remove();
+        state.remove.packages = "vim".into();
+        state.start_remove(RemoveFormId::Repo);
         assert!(!state.busy);
         assert!(state.receiver.is_none());
 
-        state.remove_preview = Some(RemovePreview {
+        state.remove.preview = Some(RemovePreview {
             targets: vec!["vim".into()],
             cascade: false,
             result: Err(RemoveRefusal::NothingToRemove),
         });
-        state.start_remove();
+        state.start_remove(RemoveFormId::Repo);
         assert!(
             !state.busy,
             "a refused preview must not start a transaction"
@@ -1455,9 +1611,9 @@ mod tests {
         });
         assert_eq!(state.remove_refusal(), Some(remove::LVM_AB_REFUSAL));
 
-        state.remove_packages = "vim".into();
-        state.remove_preview = Some(accepted(&["vim"], false));
-        state.start_remove();
+        state.remove.packages = "vim".into();
+        state.remove.preview = Some(accepted(&["vim"], false));
+        state.start_remove(RemoveFormId::Repo);
         assert!(!state.busy);
         assert!(
             state
@@ -1480,18 +1636,128 @@ mod tests {
         state.busy = true;
 
         let (rm_tx, rm_rx) = channel();
-        state.remove_receiver = Some(rm_rx);
-        state.remove_resolving = true;
+        state.remove.receiver = Some(rm_rx);
+        state.remove.resolving = true;
         rm_tx
-            .send(Msg::RemoveResolved(Box::new(accepted(&["vim"], false))))
+            .send(Msg::RemoveResolved(
+                RemoveFormId::Repo,
+                Box::new(accepted(&["vim"], false)),
+            ))
             .unwrap();
         op_tx.send(Msg::Log("update output".into())).unwrap();
         state.pump();
 
         assert_eq!(state.logs, vec!["update output"]);
-        assert!(state.remove_preview.is_some());
-        assert!(!state.remove_resolving);
+        assert!(state.remove.preview.is_some());
+        assert!(!state.remove.resolving);
         assert!(state.busy, "a preview must not end the operation");
+    }
+
+    /// The Update and AUR tabs each have a form; a preview for one must
+    /// land in that one, or a name ticked on one tab would be removed from
+    /// the other's button.
+    #[test]
+    fn the_two_removal_forms_keep_their_previews_apart() {
+        let mut state = AppState::default();
+        state.remove.packages = "vim".into();
+        state.aur_remove.packages = "yay".into();
+        let (tx, rx) = channel();
+        state.aur_remove.receiver = Some(rx);
+        state.aur_remove.resolving = true;
+        tx.send(Msg::RemoveResolved(
+            RemoveFormId::Aur,
+            Box::new(accepted(&["yay"], false)),
+        ))
+        .unwrap();
+        state.pump();
+
+        assert!(state.aur_remove.plan().is_some());
+        assert!(!state.aur_remove.resolving);
+        assert!(state.remove.preview.is_none());
+    }
+
+    #[test]
+    fn the_aur_checklist_toggles_names_in_its_form() {
+        let mut form = RemoveForm::default();
+        form.toggle("yay");
+        form.toggle("zen-browser-bin");
+        assert_eq!(form.targets(), vec!["yay", "zen-browser-bin"]);
+        assert!(form.contains("yay"));
+        form.toggle("yay");
+        assert_eq!(form.targets(), vec!["zen-browser-bin"]);
+    }
+
+    /// A checklist has no "done editing" moment, so the panel asks whenever
+    /// the form has moved on. It must not ask the same thing every frame.
+    #[test]
+    fn a_checklist_resolves_once_per_change() {
+        let mut form = RemoveForm::default();
+        assert!(!form.needs_resolve(), "an empty form has nothing to ask");
+        form.toggle("yay");
+        assert!(form.needs_resolve());
+        form.asked = Some((vec!["yay".into()], false));
+        assert!(!form.needs_resolve(), "already asked about exactly this");
+        form.toggle("paru");
+        assert!(form.needs_resolve());
+    }
+
+    /// A package removed since the last refresh cannot stay ticked.
+    #[test]
+    fn a_refresh_drops_uninstalled_packages_from_the_aur_checklist() {
+        let mut state = AppState::default();
+        state.aur_remove.packages = "yay gone-pkg".into();
+        let (tx, rx) = channel();
+        state.refresh_receiver = Some(rx);
+        tx.send(Msg::Refreshed {
+            info: SystemInfo {
+                backend: Backend::Btrfs,
+                running: "100".into(),
+                pointer: "100".into(),
+            },
+            rows: Vec::new(),
+            capability: AurCapability::default(),
+            aur_installed: [("yay".to_string(), "12.4.2-1".to_string())].into(),
+        })
+        .unwrap();
+        state.pump();
+        assert_eq!(state.aur_remove.targets(), vec!["yay"]);
+        assert_eq!(state.aur_installed.len(), 1);
+    }
+
+    #[test]
+    fn a_finished_transaction_stales_the_aur_update_check() {
+        let mut state = AppState::default();
+        let (tx, rx) = channel();
+        state.aur_check_receiver = Some(rx);
+        state.aur_checking = true;
+        tx.send(Msg::AurChecked(Box::default())).unwrap();
+        state.pump();
+        assert!(state.aur_plan.is_some());
+        assert!(!state.aur_checking);
+
+        let (tx, rx) = channel();
+        state.receiver = Some(rx);
+        state.busy = true;
+        tx.send(Msg::Finished("done".into())).unwrap();
+        state.pump();
+        assert!(state.aur_plan.is_none(), "what was outdated has changed");
+    }
+
+    #[test]
+    fn a_failed_aur_check_is_kept_and_ends_the_check() {
+        let mut state = AppState::default();
+        let (tx, rx) = channel();
+        state.aur_check_receiver = Some(rx);
+        state.aur_checking = true;
+        tx.send(Msg::AurCheckFailed("Could not resolve host".into()))
+            .unwrap();
+        state.pump();
+        assert_eq!(
+            state.aur_check_error.as_deref(),
+            Some("Could not resolve host")
+        );
+        assert!(!state.aur_checking);
+        assert!(state.aur_plan.is_none());
     }
 
     #[test]

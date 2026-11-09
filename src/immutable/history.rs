@@ -378,14 +378,19 @@ pub fn records_by_target(records: &[UpdateRecord]) -> HashMap<String, UpdateReco
 
 /// Format unix seconds as `YYYY-MM-DD HH:MM` (UTC).
 ///
-/// Hand-rolled rather than pulling in a date crate for one label: this is
-/// Howard Hinnant's civil-from-days algorithm, valid across the range any
-/// filesystem timestamp can hold.
+/// Hand-rolled rather than pulling in a date crate for one label; see
+/// [`civil_from_days`].
 pub fn format_timestamp(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (hour, minute) = (rem / 3600, (rem % 3600) / 60);
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02}")
+}
 
+/// The proleptic Gregorian `(year, month, day)` of a day counted from
+/// 1970-01-01. Howard Hinnant's civil-from-days algorithm, valid across the
+/// range any filesystem timestamp can hold.
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -396,8 +401,19 @@ pub fn format_timestamp(secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
 
-    format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02}")
+/// The inverse of [`civil_from_days`]: days from 1970-01-01 to `y-m-d`.
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let (m, d) = (i64::from(m), i64::from(d));
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]
@@ -625,5 +641,15 @@ mod tests {
         assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13");
         // A leap day, which the civil-from-days shift is easy to get wrong on.
         assert_eq!(format_timestamp(1_709_164_800), "2024-02-29 00:00");
+    }
+
+    #[test]
+    fn civil_dates_round_trip() {
+        for days in [-719_468, -1, 0, 1, 19_675, 20_765, 2_932_896] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days, "{y}-{m}-{d}");
+        }
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
     }
 }

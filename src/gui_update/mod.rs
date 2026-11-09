@@ -8,13 +8,17 @@
 //! a hand-installed or migrated system.
 //!
 //! Kept separate from [`crate::gui`], which is the fullscreen install wizard.
-//! Only `theme` and `widgets` are shared.
+//! Only the accent colour and the display scaling in `theme` are shared; the
+//! updater's look is [`style`], built from the parts in [`ui`].
 
 mod app;
+pub mod calendar;
 mod console;
 pub mod model;
 mod panels;
 pub mod preview;
 pub mod state;
+mod style;
+mod ui;
 
 pub use app::{Blocked, UpdateGui};

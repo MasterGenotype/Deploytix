@@ -4,6 +4,7 @@
 //! as pure functions so it can be tested without a display, a root shell or an
 //! immutable filesystem.
 
+use super::calendar;
 use crate::immutable::history::{self, UpdateRecord};
 use crate::utils::command::OperationRecord;
 use std::collections::HashMap;
@@ -63,8 +64,8 @@ pub struct SnapshotRow {
     pub is_running: bool,
     /// The boot pointer selects this, but the system has not rebooted into it.
     pub is_staged: bool,
-    /// Newer updates exist than the one that built this. Rolling back here
-    /// leaves the shared pacman DB describing packages this set does not have.
+    /// Newer updates exist than the one that built this, which a rollback
+    /// here leaves in place to roll forward to.
     pub has_newer_updates: bool,
 }
 
@@ -74,16 +75,25 @@ impl SnapshotRow {
         match self.target.as_str() {
             "@" => "Base install".to_string(),
             "A" | "B" => format!("Slot {}", self.target),
-            id => match &self.record {
-                Some(r) => history::format_timestamp(r.started_at),
-                // A set with no record still sorts and displays by its id,
-                // which is the unix second it was created.
-                None => id
-                    .parse::<u64>()
-                    .map(history::format_timestamp)
-                    .unwrap_or_else(|_| id.to_string()),
-            },
+            id => self
+                .created_at()
+                .map(calendar::local_timestamp)
+                .unwrap_or_else(|| id.to_string()),
         }
+    }
+
+    /// When this restore point was made, in unix seconds: when the update
+    /// that built it started, or for a set with no record, its id, which is
+    /// the second it was created. `None` for the base install, and for a slot
+    /// no update has been recorded against.
+    pub fn created_at(&self) -> Option<u64> {
+        if self.target == "@" {
+            return None;
+        }
+        if let Some(r) = &self.record {
+            return Some(r.started_at);
+        }
+        self.target.parse::<u64>().ok()
     }
 
     /// Short status badge, or empty when the row is just history.
@@ -156,13 +166,7 @@ pub fn build_snapshot_rows(
 
 /// Sort key for a row: when it came into being, in unix seconds.
 fn sort_key(row: &SnapshotRow) -> u64 {
-    if row.target == "@" {
-        return 0;
-    }
-    if let Some(ref r) = row.record {
-        return r.started_at;
-    }
-    row.target.parse::<u64>().unwrap_or(0)
+    row.created_at().unwrap_or(0)
 }
 
 /// The A/B slot currently booted, from `/proc/cmdline`.
@@ -313,7 +317,7 @@ mod tests {
         assert!(orphan.record.is_none());
         assert!(orphan.detail().contains("No record"));
         // Its id is a unix second, so it can still be dated for the user.
-        assert_eq!(orphan.title(), history::format_timestamp(100));
+        assert_eq!(orphan.title(), calendar::local_timestamp(100));
     }
 
     #[test]

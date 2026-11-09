@@ -1,345 +1,331 @@
-//! Update actions: full upgrade, repo packages, local package files, and
-//! package removal.
+//! Repository packages: the full upgrade, installing packages and local
+//! package files, and removing packages. AUR packages have their own tab.
 
-use crate::gui::{theme, widgets};
 use crate::gui_update::model;
-use crate::gui_update::state::AppState;
+use crate::gui_update::state::{AppState, RemoveFormId};
+use crate::gui_update::style;
+use crate::gui_update::ui::{self, Tone};
 use crate::immutable::remove::RemovalPlan;
 use egui::{RichText, Ui};
 use std::path::PathBuf;
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
-    widgets::page_heading(ui, "Update");
-
     if state.busy {
-        widgets::info_text(
+        ui::callout(
             ui,
-            "An operation is already running — see the Progress tab.",
+            Tone::Accent,
+            "An operation is running. These controls come back when it finishes.",
         );
-        return;
+        ui.add_space(style::GAP);
     }
-
-    widgets::section(ui, "Full system upgrade", |ui| {
-        ui.label(
-            RichText::new("Upgrade every package, into a new snapshot.")
-                .color(theme::TEXT_SECONDARY),
-        );
-        ui.add_space(theme::SPACING_SM);
-        let aur = show_aur_upgrade_option(ui, state);
-        ui.add_space(theme::SPACING_SM);
-        if widgets::primary_button(ui, "Upgrade everything").clicked() {
-            // No arguments is what `deploytix update` treats as a full upgrade.
-            state.start_update(Vec::new(), aur);
-        }
+    let busy = state.busy;
+    ui.add_enabled_ui(!busy, |ui| {
+        ui::panes(ui, &[1.0, 1.3, 1.3], |i, ui| match i {
+            0 => ui::scrolling(ui, "update-upgrade", |ui| upgrade_card(ui, state)),
+            1 => ui::scrolling(ui, "update-install", |ui| install_card(ui, state)),
+            _ => ui::scrolling(ui, "update-remove", |ui| {
+                remove_card(
+                    ui,
+                    state,
+                    RemoveFormId::Repo,
+                    "Remove packages",
+                    "AUR packages are removed from the AUR tab.",
+                );
+            }),
+        });
     });
 
-    ui.add_space(theme::SPACING_SM);
+    if state.browser_open {
+        show_file_browser(ui, state);
+    }
+    if state.remove.confirm {
+        show_remove_confirm(ui, state, RemoveFormId::Repo);
+    }
+}
 
-    widgets::section(ui, "Install packages", |ui| {
+fn upgrade_card(ui: &mut Ui, state: &mut AppState) {
+    ui::card(ui, "Full system upgrade", |ui| {
         ui.label(
-            RichText::new("Repository packages, separated by spaces:").color(theme::TEXT_SECONDARY),
+            RichText::new("Upgrade every repository package")
+                .font(style::medium(15.0))
+                .color(style::TEXT),
         );
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut state.repo_packages)
-                .hint_text("vim git neovim")
-                .desired_width(f32::INFINITY),
+        ui.add_space(4.0);
+        ui.label(
+            "Builds a new snapshot with everything upgraded. The running system is not \
+             touched; the upgrade takes effect when you reboot into it.",
         );
+        ui.add_space(12.0);
+        if ui::primary(ui, true, "Upgrade system").clicked() {
+            // No arguments is what `deploytix update` treats as a full upgrade.
+            state.start_update(Vec::new(), false);
+        }
+        ui.add_space(8.0);
+        ui::note(
+            ui,
+            "To rebuild AUR packages in the same snapshot, upgrade from the AUR tab instead.",
+        );
+    });
+}
+
+fn install_card(ui: &mut Ui, state: &mut AppState) {
+    ui::card(ui, "Install packages", |ui| {
+        ui::label(ui, "Repository packages");
+        let field = ui::field(ui, &mut state.repo_packages, "vim git neovim");
         // Resolve when editing stops, not per keystroke: each resolve spawns
         // pacman, and doing that on every character would be a subprocess per
         // letter typed.
         if field.lost_focus() || (field.changed() && !state.repo_packages.ends_with(' ')) {
             state.start_resolve();
         }
-
+        ui::note(ui, "Separate names with spaces.");
         show_preview(ui, state);
 
-        ui.add_space(theme::SPACING_SM);
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Local package files:").color(theme::TEXT_SECONDARY));
-            if ui.button("Add file...").clicked() {
-                state.browser_open = true;
-            }
+            ui::label(ui, "Local package files");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui::quiet(ui, true, "Add file…").clicked() {
+                    state.browser_open = true;
+                }
+            });
         });
-
         if state.selected_files.is_empty() {
-            ui.label(
-                RichText::new("none selected")
-                    .color(theme::TEXT_MUTED)
-                    .size(11.0),
-            );
+            ui::note(ui, "None selected.");
         } else {
             let mut remove: Option<usize> = None;
             for (i, path) in state.selected_files.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.small_button("\u{2715}").clicked() {
-                        remove = Some(i);
-                    }
-                    ui.label(RichText::new(path.to_string_lossy()).monospace().size(11.0));
-                });
+                ui::row(
+                    ui,
+                    |ui| {
+                        if ui::icon_button(ui, ui::Icon::Cross, "Take this file off").clicked() {
+                            remove = Some(i);
+                        }
+                    },
+                    |ui| {
+                        ui::truncated(
+                            ui,
+                            RichText::new(path.to_string_lossy())
+                                .monospace()
+                                .color(style::TEXT),
+                        );
+                    },
+                );
             }
             if let Some(i) = remove {
                 state.selected_files.remove(i);
             }
         }
 
-        ui.add_space(theme::SPACING_SM);
+        ui.add_space(12.0);
+        ui::rule(ui);
+        ui.add_space(12.0);
         let ready = state.has_selection();
-        if widgets::primary_button_enabled(ui, ready, "Install selected").clicked() {
+        if ui::primary(ui, ready, "Install selected").clicked() {
             let args = state.update_args();
             state.start_update(args, false);
         }
         if !ready {
-            ui.label(
-                RichText::new("Enter a package name or add a file to enable this.")
-                    .color(theme::TEXT_MUTED)
-                    .size(11.0),
-            );
+            ui::note(ui, "Enter a package name or add a file to enable this.");
         }
     });
-
-    ui.add_space(theme::SPACING_SM);
-
-    show_remove_section(ui, state);
-
-    ui.add_space(theme::SPACING_SM);
-
-    widgets::section(ui, "Options", |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Snapshots to keep:").color(theme::TEXT_SECONDARY));
-            ui.add(egui::DragValue::new(&mut state.keep_sets).range(1..=20));
-        });
-        ui.checkbox(
-            &mut state.reboot_after,
-            "Reboot automatically when finished",
-        );
-    });
-
-    if state.browser_open {
-        show_file_browser(ui, state);
-    }
-    if state.confirm_remove {
-        show_remove_confirm(ui, state);
-    }
 }
 
-/// The opt-in to rebuild outdated AUR packages after the upgrade, and whether
-/// it is in effect.
-///
-/// Off by default and labelled with its cost: a repository upgrade takes
-/// minutes, a build can take an hour. Greyed out with the reason the AUR tab
-/// and `deploytix update --aur` would give when this system cannot build.
-fn show_aur_upgrade_option(ui: &mut Ui, state: &mut AppState) -> bool {
-    const LABEL: &str = "Also rebuild AUR packages that have updates";
-    if state.capability.is_none() {
-        ui.add_enabled(false, egui::Checkbox::new(&mut false, LABEL));
-        return false;
-    }
-    if let Some(why) = state.aur_refusal() {
-        ui.add_enabled(false, egui::Checkbox::new(&mut false, LABEL));
-        ui.label(RichText::new(why).color(theme::TEXT_MUTED).size(11.0));
-        return false;
-    }
-    ui.checkbox(&mut state.upgrade_aur, LABEL);
-    ui.label(
-        RichText::new(
-            "Compiled on this machine after the upgrade, in the same snapshot. \
-             This can take a long time.",
-        )
-        .color(theme::TEXT_MUTED)
-        .size(11.0),
-    );
-    state.upgrade_aur
-}
-
-/// The removal form: names, the two pacman flags, a preview of what `-Rs`
-/// would actually take out, and the button.
+/// A removal form: the names, the two pacman flags, a preview of what `-Rs`
+/// would actually take out, and the button. The AUR tab draws the same form
+/// around its checklist of installed AUR packages.
 ///
 /// Same transaction as the CLI's `deploytix remove`: a new snapshot set with
 /// the packages gone, activated on reboot. The package database lives inside
 /// the set, so it records the removal and becomes the live database when that
 /// set boots; the running system's read-only copy is left alone until then.
-fn show_remove_section(ui: &mut Ui, state: &mut AppState) {
-    widgets::section(ui, "Remove packages", |ui| {
-        if let Some(why) = state.remove_refusal() {
-            ui.label(RichText::new(why).color(theme::WARNING));
-            return;
-        }
+pub fn remove_card(ui: &mut Ui, state: &mut AppState, id: RemoveFormId, title: &str, hint: &str) {
+    ui::card(ui, title, |ui| remove_form(ui, state, id, hint));
+}
 
-        ui.label(
-            RichText::new("Installed packages to remove, separated by spaces:")
-                .color(theme::TEXT_SECONDARY),
-        );
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut state.remove_packages)
-                .hint_text("linux-lts nano")
-                .desired_width(f32::INFINITY),
-        );
+/// The body of [`remove_card`], for a caller with a card of its own.
+pub fn remove_form(ui: &mut Ui, state: &mut AppState, id: RemoveFormId, hint: &str) {
+    if let Some(why) = state.remove_refusal() {
+        ui::callout(ui, Tone::Warning, why);
+        return;
+    }
+
+    let form = state.remove_form_mut(id);
+    let mut edited = false;
+    if id == RemoveFormId::Repo {
+        ui::label(ui, "Installed packages");
+        let field = ui::field(ui, &mut form.packages, "linux-lts nano");
         // As for installs: resolve when editing pauses, not per keystroke.
         // Each resolve is three pacman queries.
-        let flags_changed = ui
-            .checkbox(
-                &mut state.remove_cascade,
-                "Also remove packages that depend on these (pacman -Rc)",
-            )
-            .changed();
-        ui.checkbox(
-            &mut state.remove_purge,
-            "Also delete configuration files instead of keeping .pacsave copies (pacman -Rn)",
-        );
-        if field.lost_focus()
-            || (field.changed() && !state.remove_packages.ends_with(' '))
-            || flags_changed
-        {
-            state.start_remove_resolve();
-        }
+        edited = field.lost_focus() || (field.changed() && !form.packages.ends_with(' '));
+        ui::note(ui, hint);
+        ui.add_space(6.0);
+    }
+    let flags_changed = ui
+        .checkbox(
+            &mut form.cascade,
+            "Also remove packages that depend on these (-Rc)",
+        )
+        .changed();
+    ui.checkbox(
+        &mut form.purge,
+        "Delete configuration files instead of keeping .pacsave copies (-Rn)",
+    );
+    if edited || flags_changed || form.needs_resolve() {
+        state.start_remove_resolve(id);
+    }
 
-        show_remove_preview(ui, state);
+    show_remove_preview(ui, state, id);
 
-        ui.add_space(theme::SPACING_SM);
-        let ready = state.remove_plan().is_some();
-        if widgets::primary_button_enabled(ui, ready, "Remove selected").clicked() {
-            state.confirm_remove = true;
-        }
-        if !ready {
-            let hint = if state.remove_targets().is_empty() {
-                "Enter a package name to enable this."
-            } else if state.remove_resolving {
-                "Checking what would be removed..."
-            } else {
-                "Fix the problems above to enable this."
-            };
-            ui.label(RichText::new(hint).color(theme::TEXT_MUTED).size(11.0));
-        }
-    });
+    ui.add_space(12.0);
+    ui::rule(ui);
+    ui.add_space(12.0);
+    let form = state.remove_form(id);
+    let ready = form.plan().is_some();
+    let label = match form.targets().len() {
+        0 | 1 => "Remove selected".to_string(),
+        n => format!("Remove {n} packages"),
+    };
+    if ui::danger(ui, ready, &label).clicked() {
+        state.remove_form_mut(id).confirm = true;
+    }
+    if !ready {
+        let form = state.remove_form(id);
+        let hint = if form.targets().is_empty() {
+            match id {
+                RemoveFormId::Repo => "Enter a package name to enable this.",
+                RemoveFormId::Aur => "Tick the packages to remove.",
+            }
+        } else if form.resolving {
+            "Checking what would be removed…"
+        } else {
+            "Fix the problems above to enable this."
+        };
+        ui::note(ui, hint);
+    }
 }
 
 /// What `pacman -Rs --print` says, vetted by the same guard the transaction
 /// uses, so the greyed-out button and the CLI can never disagree about why.
-fn show_remove_preview(ui: &mut Ui, state: &AppState) {
-    if state.remove_targets().is_empty() {
+fn show_remove_preview(ui: &mut Ui, state: &AppState, id: RemoveFormId) {
+    let form = state.remove_form(id);
+    if form.targets().is_empty() {
         return;
     }
-    if state.remove_resolving && state.current_remove_preview().is_none() {
-        ui.label(
-            RichText::new("Checking what would be removed...")
-                .color(theme::TEXT_MUTED)
-                .size(11.0),
-        );
+    ui.add_space(8.0);
+    if form.resolving && form.current_preview().is_none() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui::note(ui, "Checking what would be removed…");
+        });
         return;
     }
-    let Some(preview) = state.current_remove_preview() else {
+    let Some(preview) = form.current_preview() else {
         return;
     };
 
-    ui.add_space(theme::SPACING_XS);
     match preview.plan() {
         Some(plan) => {
-            ui.label(
-                RichText::new(format!("{} to remove", plan.resolved.len()))
-                    .color(theme::TEXT_SECONDARY),
-            );
+            ui::label(ui, &format!("{} to remove", plan.resolved.len()));
             show_plan_details(ui, plan);
-            ui.label(
-                RichText::new(
-                    "Resolved against the running system; the removal re-checks inside the \
-                     snapshot it builds.",
-                )
-                .color(theme::TEXT_MUTED)
-                .size(11.0),
+            ui::note(
+                ui,
+                "Resolved against the running system; the removal re-checks inside the \
+                 snapshot it builds.",
             );
         }
-        None => {
+        None => ui::callout_with(ui, Tone::Error, |ui| {
             ui.label(
-                RichText::new("\u{26a0} Cannot remove")
-                    .color(theme::ERROR)
-                    .strong(),
+                RichText::new("Cannot remove")
+                    .font(style::medium(13.0))
+                    .color(style::ERROR),
             );
             for reason in preview.blockers() {
-                ui.label(RichText::new(reason).color(theme::ERROR).size(11.0));
+                ui.label(RichText::new(reason).color(style::ERROR));
             }
-        }
+        }),
     }
 }
 
 /// The resolved list and the kernel notes, shared by the preview and the
 /// confirm dialog so both describe the same thing.
 fn show_plan_details(ui: &mut Ui, plan: &RemovalPlan) {
-    egui::ScrollArea::vertical()
-        .id_salt(ui.id().with("remove-plan"))
-        .max_height(160.0)
-        .auto_shrink([false, true])
+    egui::Frame::new()
+        .fill(style::INSET)
+        .corner_radius(style::RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            for name in &plan.resolved {
-                let colour = if plan.kernels_removed.contains(name) {
-                    theme::WARNING
-                } else {
-                    theme::ERROR
-                };
-                ui.label(
-                    RichText::new(format!("- {name}"))
-                        .monospace()
-                        .size(11.0)
-                        .color(colour),
-                );
-            }
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt(ui.id().with("remove-plan"))
+                .max_height(160.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for name in &plan.resolved {
+                        let colour = if plan.kernels_removed.contains(name) {
+                            style::WARNING
+                        } else {
+                            style::ERROR
+                        };
+                        ui.label(RichText::new(format!("− {name}")).monospace().color(colour));
+                    }
+                });
         });
     // Kernel removals are the loud case: they touch the shared /boot, which
     // is the one thing a snapshot cannot roll back.
     for note in &plan.notes {
-        ui.label(
-            RichText::new(format!("\u{26a0} {note}"))
-                .color(theme::WARNING)
-                .size(11.0),
-        );
+        ui.add_space(4.0);
+        ui::callout(ui, Tone::Warning, note);
     }
 }
 
 /// The confirmation the CLI asks for on the terminal, asked here instead.
-fn show_remove_confirm(ui: &mut Ui, state: &mut AppState) {
+pub fn show_remove_confirm(ui: &mut Ui, state: &mut AppState, id: RemoveFormId) {
     // A preview that went stale while the dialog was open must not be run.
-    let Some(plan) = state.remove_plan().cloned() else {
-        state.confirm_remove = false;
+    let Some(plan) = state.remove_form(id).plan().cloned() else {
+        state.remove_form_mut(id).confirm = false;
         return;
     };
 
+    let title = match id {
+        RemoveFormId::Repo => "Remove packages?",
+        RemoveFormId::Aur => "Remove AUR packages?",
+    };
     let mut open = true;
-    egui::Window::new("Remove packages?")
+    egui::Window::new(title)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .default_width(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(480.0)
         .show(ui.ctx(), |ui| {
             ui.label(
                 RichText::new(format!(
-                    "Remove {} package(s) into a new snapshot?",
+                    "Remove {} package(s) into a new snapshot",
                     plan.resolved.len()
                 ))
-                .strong()
-                .size(14.0),
+                .font(style::medium(15.0))
+                .color(style::TEXT),
             );
-            ui.add_space(theme::SPACING_XS);
+            ui.add_space(8.0);
             show_plan_details(ui, &plan);
-            ui.add_space(theme::SPACING_XS);
+            ui.add_space(8.0);
             ui.label(
-                RichText::new(
-                    "The running system is untouched until you reboot. Rolling back to the \
-                     current snapshot restores the packages.",
-                )
-                .color(theme::TEXT_SECONDARY),
+                "The running system is untouched until you reboot. Rolling back to the \
+                 current snapshot restores the packages.",
             );
-
-            ui.add_space(theme::SPACING_MD);
+            ui.add_space(14.0);
             ui.horizontal(|ui| {
-                if widgets::primary_button(ui, "Remove").clicked() {
-                    state.start_remove();
+                if ui::danger(ui, true, "Remove").clicked() {
+                    state.start_remove(id);
                 }
-                if ui.button("Cancel").clicked() {
-                    state.confirm_remove = false;
+                if ui::button(ui, true, "Cancel").clicked() {
+                    state.remove_form_mut(id).confirm = false;
                 }
             });
         });
     if !open {
-        state.confirm_remove = false;
+        state.remove_form_mut(id).confirm = false;
     }
 }
 
@@ -355,10 +341,11 @@ fn show_file_browser(ui: &mut Ui, state: &mut AppState) {
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_size([560.0, 420.0])
         .show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
-                if ui.button("\u{2191} Up").clicked() {
+                if ui::button(ui, true, "\u{2191} Up").clicked() {
                     if let Some(parent) = state.browser_dir.parent() {
                         state.browser_dir = parent.to_path_buf();
                     }
@@ -366,15 +353,14 @@ fn show_file_browser(ui: &mut Ui, state: &mut AppState) {
                 ui.label(
                     RichText::new(state.browser_dir.to_string_lossy())
                         .monospace()
-                        .size(11.0)
-                        .color(theme::TEXT_SECONDARY),
+                        .color(style::TEXT_DIM),
                 );
             });
             ui.separator();
 
             let (dirs, files) = read_dir_split(&state.browser_dir);
             if dirs.is_empty() && files.is_empty() {
-                widgets::info_text(ui, "No packages or subdirectories here.");
+                ui::note(ui, "No packages or subdirectories here.");
             }
 
             egui::ScrollArea::vertical()
@@ -443,11 +429,11 @@ fn read_dir_split(dir: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// flickers on every keystroke.
 fn show_preview(ui: &mut Ui, state: &AppState) {
     if state.resolving && state.current_preview().is_none() {
-        ui.label(
-            RichText::new("Resolving dependencies...")
-                .color(theme::TEXT_MUTED)
-                .size(11.0),
-        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui::note(ui, "Resolving dependencies…");
+        });
         return;
     }
 
@@ -455,54 +441,52 @@ fn show_preview(ui: &mut Ui, state: &AppState) {
         return;
     };
 
-    ui.add_space(theme::SPACING_XS);
-    let colour = if preview.needs_attention() {
-        theme::WARNING
+    ui.add_space(6.0);
+    let tone = if preview.needs_attention() {
+        Tone::Warning
     } else {
-        theme::TEXT_SECONDARY
+        Tone::Neutral
     };
-    ui.label(RichText::new(preview.summary()).color(colour));
+    ui::callout_with(ui, tone, |ui| {
+        let colour = if tone == Tone::Warning {
+            style::WARNING
+        } else {
+            style::TEXT
+        };
+        ui.label(RichText::new(preview.summary()).color(colour));
 
-    // AUR packages are built rather than downloaded, so they need a helper and
-    // take far longer. Saying so before staging is the whole point.
-    if preview.needs_helper() {
-        let ready = state
-            .capability
-            .as_ref()
-            .map(|c| c.is_ready())
-            .unwrap_or(false);
-        let text = format!("Built from source: {}", preview.aur.join(", "));
-        ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(11.0));
-        if !ready {
-            let why = state
+        // AUR packages are built rather than downloaded, so they need a helper
+        // and take far longer. Saying so before staging is the whole point.
+        if preview.needs_helper() {
+            let ready = state
                 .capability
                 .as_ref()
-                .and_then(|c| c.blockers().first().map(|b| b.to_string()))
-                .unwrap_or_else(|| "AUR support is unavailable.".to_string());
-            ui.label(
-                RichText::new(format!("\u{26a0} {why}"))
-                    .color(theme::WARNING)
-                    .size(11.0),
-            );
+                .map(|c| c.is_ready())
+                .unwrap_or(false);
+            ui::note(ui, format!("Built from source: {}", preview.aur.join(", ")));
+            if !ready {
+                let why = state
+                    .capability
+                    .as_ref()
+                    .and_then(|c| c.blockers().first().map(|b| b.to_string()))
+                    .unwrap_or_else(|| "AUR support is unavailable.".to_string());
+                ui.label(RichText::new(why).color(style::WARNING));
+            }
         }
-    }
 
-    // Removals are the loud case: on a read-only root, a package removed to
-    // satisfy a conflict is the hardest outcome to walk back.
-    if let Some(plan) = &preview.plan {
-        if !plan.to_remove.is_empty() {
-            ui.label(
-                RichText::new(format!(
-                    "\u{26a0} Would remove: {}",
-                    plan.to_remove.join(", ")
-                ))
-                .color(theme::WARNING)
-                .size(11.0),
-            );
+        // Removals are the loud case: on a read-only root, a package removed
+        // to satisfy a conflict is the hardest outcome to walk back.
+        if let Some(plan) = &preview.plan {
+            if !plan.to_remove.is_empty() {
+                ui.label(
+                    RichText::new(format!("Would remove: {}", plan.to_remove.join(", ")))
+                        .color(style::WARNING),
+                );
+            }
         }
-    }
 
-    for note in &preview.notes {
-        ui.label(RichText::new(note).color(theme::TEXT_MUTED).size(11.0));
-    }
+        for note in &preview.notes {
+            ui::note(ui, note.as_str());
+        }
+    });
 }

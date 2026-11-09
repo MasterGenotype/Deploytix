@@ -271,17 +271,60 @@ pub fn check<H: HttpGet>(
     Ok(plan)
 }
 
+/// Sort `installed` against the AUR and hold back everything that must not be
+/// built: [`check`], then the shared-state guard on what is left.
+///
+/// `run` answers a read-only query against the system being planned for (the
+/// set, or the running system for a preview); `pacman_conf` is that system's.
+pub fn plan_for<H: HttpGet>(
+    rpc: &AurRpc<H>,
+    installed: &BTreeMap<String, String>,
+    pacman_conf: &str,
+    run: impl Fn(&str) -> Result<String>,
+) -> Result<UpgradePlan> {
+    let ignored = ignored_packages(pacman_conf);
+    let mut plan = check(rpc, installed, &ignored)?;
+    if !plan.outdated.is_empty() {
+        let lists = remove::parse_file_lists(&run(&remove::file_list_cmd(&plan.names()))?);
+        let encrypted = std::path::Path::new(crate::immutable::ROOT_FS_DEVICE).exists();
+        plan.hold_shared_state(&lists, encrypted);
+    }
+    Ok(plan)
+}
+
+/// The foreign packages installed on the running system.
+pub fn installed_on_host() -> BTreeMap<String, String> {
+    history::parse_package_list(&host_query(FOREIGN_QUERY))
+}
+
+/// What `deploytix update --aur` would rebuild if it ran now, worked out
+/// against the running system. Read-only; the update GUI shows it before
+/// anything is built. The transaction plans again inside the set it builds,
+/// which differs from this only when an update is already staged.
+pub fn preview_on_host() -> Result<UpgradePlan> {
+    let installed = installed_on_host();
+    let conf = std::fs::read_to_string("/etc/pacman.conf").unwrap_or_default();
+    plan_for(&AurRpc::new(CurlGet), &installed, &conf, |s| {
+        Ok(host_query(s))
+    })
+}
+
+/// Run a read-only query on the running system. A failure reads as no output.
+fn host_query(script: &str) -> String {
+    std::process::Command::new("sh")
+        .args(["-c", script])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
 /// Run a read-only query against the set at `target`.
 ///
 /// A dry run mounts nothing, so it asks the running system instead: the
 /// closest thing to what the set would hold, and harmless to read.
 fn query(cmd: &CommandRunner, target: &str, script: &str) -> Result<String> {
     if cmd.is_dry_run() {
-        return Ok(std::process::Command::new("sh")
-            .args(["-c", script])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default());
+        return Ok(host_query(script));
     }
     Ok(match cmd.run_in_chroot(target, script)? {
         Some(out) => String::from_utf8_lossy(&out.stdout).to_string(),
@@ -320,15 +363,12 @@ pub fn upgrade_in_target(
         "[aur] Checking {} foreign package(s) against the AUR",
         installed.len()
     );
-    let ignored = ignored_packages(&read_pacman_conf(cmd, target));
-    let mut plan = check(&AurRpc::new(CurlGet), &installed, &ignored)?;
-
-    if !plan.outdated.is_empty() {
-        let lists =
-            remove::parse_file_lists(&query(cmd, target, &remove::file_list_cmd(&plan.names()))?);
-        let encrypted = std::path::Path::new(crate::immutable::ROOT_FS_DEVICE).exists();
-        plan.hold_shared_state(&lists, encrypted);
-    }
+    let plan = plan_for(
+        &AurRpc::new(CurlGet),
+        &installed,
+        &read_pacman_conf(cmd, target),
+        |s| query(cmd, target, s),
+    )?;
 
     if !plan.not_in_aur.is_empty() {
         info!(

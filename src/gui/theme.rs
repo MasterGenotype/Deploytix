@@ -139,8 +139,9 @@ pub fn apply(ctx: &egui::Context) {
 pub const WIZARD_REFERENCE: egui::Vec2 = egui::vec2(2560.0, 1440.0);
 
 /// Logical size the transactional updater is laid out for. It is a windowed
-/// utility, not a fullscreen wizard, so its reference is its own design size.
-pub const UPDATER_REFERENCE: egui::Vec2 = egui::vec2(1200.0, 900.0);
+/// utility, not a fullscreen wizard, so its reference is its own design size:
+/// a landscape window whose tabs lay their panes out side by side.
+pub const UPDATER_REFERENCE: egui::Vec2 = egui::vec2(1320.0, 820.0);
 
 /// Below this the text stops being readable; above it a large display just
 /// wastes space on enormous controls.
@@ -351,8 +352,8 @@ mod tests {
         assert!(UPDATER_REFERENCE.x < WIZARD_REFERENCE.x);
         assert!(UPDATER_REFERENCE.y < WIZARD_REFERENCE.y);
 
-        // Its default 900x700 window should not be driven to the floor.
-        let z = fit_zoom_factor(points_for(vec2(900.0, 700.0), 1.0), 1.0, UPDATER_REFERENCE);
+        // Its minimum 960x600 window should not be driven to the floor.
+        let z = fit_zoom_factor(points_for(vec2(960.0, 600.0), 1.0), 1.0, UPDATER_REFERENCE);
         assert!(z > MIN_ZOOM, "updater window pinned at the floor: {z}");
     }
 }
