@@ -25,9 +25,11 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 .color(theme::TEXT_SECONDARY),
         );
         ui.add_space(theme::SPACING_SM);
+        let aur = show_aur_upgrade_option(ui, state);
+        ui.add_space(theme::SPACING_SM);
         if widgets::primary_button(ui, "Upgrade everything").clicked() {
             // No arguments is what `deploytix update` treats as a full upgrade.
-            state.start_update(Vec::new());
+            state.start_update(Vec::new(), aur);
         }
     });
 
@@ -84,7 +86,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         let ready = state.has_selection();
         if widgets::primary_button_enabled(ui, ready, "Install selected").clicked() {
             let args = state.update_args();
-            state.start_update(args);
+            state.start_update(args, false);
         }
         if !ready {
             ui.label(
@@ -118,6 +120,35 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     if state.confirm_remove {
         show_remove_confirm(ui, state);
     }
+}
+
+/// The opt-in to rebuild outdated AUR packages after the upgrade, and whether
+/// it is in effect.
+///
+/// Off by default and labelled with its cost: a repository upgrade takes
+/// minutes, a build can take an hour. Greyed out with the reason the AUR tab
+/// and `deploytix update --aur` would give when this system cannot build.
+fn show_aur_upgrade_option(ui: &mut Ui, state: &mut AppState) -> bool {
+    const LABEL: &str = "Also rebuild AUR packages that have updates";
+    if state.capability.is_none() {
+        ui.add_enabled(false, egui::Checkbox::new(&mut false, LABEL));
+        return false;
+    }
+    if let Some(why) = state.aur_refusal() {
+        ui.add_enabled(false, egui::Checkbox::new(&mut false, LABEL));
+        ui.label(RichText::new(why).color(theme::TEXT_MUTED).size(11.0));
+        return false;
+    }
+    ui.checkbox(&mut state.upgrade_aur, LABEL);
+    ui.label(
+        RichText::new(
+            "Compiled on this machine after the upgrade, in the same snapshot. \
+             This can take a long time.",
+        )
+        .color(theme::TEXT_MUTED)
+        .size(11.0),
+    );
+    state.upgrade_aur
 }
 
 /// The removal form: names, the two pacman flags, a preview of what `-Rs`

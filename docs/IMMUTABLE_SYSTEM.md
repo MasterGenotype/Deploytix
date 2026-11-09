@@ -142,8 +142,10 @@ deploytix update                 # full pacman -Syu into a new set
 deploytix update vim git         # sync/upgrade and also install these
 deploytix update --keep 5        # retain 5 previous sets when pruning (default 3)
 deploytix update --reboot        # reboot automatically once staged
+deploytix update --aur           # ...then rebuild AUR packages that have updates
 deploytix -n update              # dry-run: print the plan, change nothing
 deploytix remove <pkg>...        # pacman -Rs into a new set (see below)
+deploytix aur <pkg>...           # build named AUR packages into a new set
 ```
 
 What it does:
@@ -168,6 +170,32 @@ What it does:
 
 The running system is never modified, so an interrupted or failed update is a
 no-op.
+
+### AUR packages: `--aur`
+
+`deploytix update --aur` adds a step between `pacman -Syu` and `mkinitcpio -P`,
+in the same set: every *foreign* package (`pacman -Qm`) that the AUR has at a
+newer version (pacman's own `vercmp` ordering) is rebuilt with whichever helper
+is installed, as the same unprivileged build user `deploytix aur` uses. Running
+after the repository upgrade means the builds link against the new libraries.
+A `deploytix -n update --aur` prints the list it would build.
+
+Skipped, and named in the log:
+
+- foreign packages the AUR does not have (local `.pkg.tar.zst` builds);
+- packages `IgnorePkg` names in the set's `pacman.conf`;
+- deploytix's own `[deploytix]`-repo packages (`gamescope-git` is a fork; the
+  AUR's is upstream's, and a pacman hook aborts any install of it that
+  `deploytix-update-gamescope` did not start);
+- packages whose installed version already owns files in the shared `/boot`
+  (e.g. `xen`'s `xen.gz`). They are caught before building because every
+  build goes into one helper invocation, so one refusal would throw away all
+  of them. The usual post-build check still runs, for files a new version adds.
+
+VCS packages (`-git`) are rebuilt only when their AUR version passes the
+installed one, as with a helper run without `--devel`. If the AUR cannot be
+reached, or any build fails, the whole set is discarded, repository upgrades
+included. It is btrfs-only, like `deploytix aur`. Code: `src/aur/upgrade.rs`.
 
 > **API filesystems in the update chroot.** `artools-base` (which provides
 > `artix-chroot`) is a host/ISO dependency and is *not* installed into deployed

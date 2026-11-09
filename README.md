@@ -108,7 +108,8 @@ deploytix deps <subcommand>                         # Package dependency trackin
 deploytix generate-desktop-file [--de kde] [-o f]   # Generate .desktop launcher
 
 # Immutable-root systems (see "Living with a Deployed System")
-deploytix update [pkgs...] [--keep N] [--reboot]    # Transactional update
+deploytix update [pkgs...] [--keep N] [--reboot] [--aur]  # Transactional update
+deploytix aur <pkgs...> [--keep N] [--reboot]       # Build AUR packages into a new set
 deploytix rollback [id|@] [--list] [--reboot]       # Roll back to a snapshot set
 
 # Global flags
@@ -165,7 +166,7 @@ This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Ex
 
 - **`/` and `/usr` are read-only.** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks into `/usr`, so they're covered too. `/etc` is a **writable** subvolume (`@etc`); `/var` and `/home` are writable and persistent. Stray writes to the rest of `/` (e.g. `/tmp`, `/root`) go to an **ephemeral overlay** and are cleared on reboot.
 - **You don't run `pacman -Syu` directly** — `/usr` is read-only, so it can't succeed anyway. Interactive shells get a friendly nudge toward `deploytix update` before it even tries; use `deploytix update` instead.
-- **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically.
+- **Updates are transactional and atomic.** `sudo deploytix update` builds a *new* snapshot set from the current one, runs the upgrade **inside** it, and only switches to it on the **next reboot**. If an update fails midway, the half-built set is discarded and your running system is untouched. Add package names to install them (`deploytix update firefox`), `--keep N` to control how many old sets are retained, `--reboot` to reboot automatically, `--aur` to also rebuild every installed AUR package that has an update, in the same set.
 - **Rollback is instant and reversible.** `sudo deploytix rollback --list` shows your snapshot sets; `sudo deploytix rollback <id>` (or `@` for the base install) repoints the next boot. Nothing is deleted, so you can roll "forward" again. Each set restores `{@, @usr, @etc}` together, so the whole OS state is consistent — no "new config on old binaries" skew.
 - **Everyday example:**
 

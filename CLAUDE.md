@@ -156,7 +156,7 @@ deploytix list-disks [--all]                 # List available disks
 deploytix validate <config>                  # Validate config file
 deploytix generate-config [-o file]          # Generate sample config
 deploytix cleanup [--device] [--wipe]        # Unmount and optionally wipe
-deploytix update [pkgs...] [--keep N] [--reboot]   # Transactional update (immutable root)
+deploytix update [pkgs...] [--keep N] [--reboot] [--aur]  # Transactional update (immutable root); --aur also rebuilds outdated AUR packages
 deploytix rollback [id|@] [--list] [--reboot]      # Roll back to a snapshot set
 ```
 

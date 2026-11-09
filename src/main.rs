@@ -272,6 +272,11 @@ enum Commands {
         /// Reboot automatically once the update is staged.
         #[arg(long)]
         reboot: bool,
+
+        /// Also rebuild every installed AUR package the AUR has a newer
+        /// version of, in the same snapshot set (btrfs backend only).
+        #[arg(long)]
+        aur: bool,
     },
 
     /// Build and install AUR packages (immutable root): compile them into a
@@ -431,8 +436,9 @@ fn main() -> Result<()> {
             packages,
             keep,
             reboot,
+            aur,
         }) => {
-            cmd_update(packages, keep, reboot, cli.dry_run)?;
+            cmd_update(packages, keep, reboot, aur, cli.dry_run)?;
         }
         Some(Commands::Aur {
             packages,
@@ -548,7 +554,13 @@ fn cmd_install(
 }
 
 /// `deploytix update` — transactional system update.
-fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -> Result<()> {
+fn cmd_update(
+    packages: Vec<String>,
+    keep: usize,
+    reboot: bool,
+    aur: bool,
+    dry_run: bool,
+) -> Result<()> {
     use deploytix::immutable::backend;
     use deploytix::immutable::update::UpdateOptions;
     use deploytix::utils::command::CommandRunner;
@@ -571,6 +583,7 @@ fn cmd_update(packages: Vec<String>, keep: usize, reboot: bool, dry_run: bool) -
         &UpdateOptions {
             keep_sets: keep,
             reboot,
+            aur,
         },
     )?;
     Ok(())

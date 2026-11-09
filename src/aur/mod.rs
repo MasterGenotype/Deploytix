@@ -13,6 +13,8 @@
 //! * [`source`] — AUR packages as a `pkgdeps` metadata source, and the
 //!   composite that resolves a dependency graph spanning the repositories and
 //!   the AUR together.
+//! * [`upgrade`] — *what is out of date*: installed AUR packages the AUR has a
+//!   newer version of, for `deploytix update --aur`.
 //!
 //! Nothing here starts a transaction. Building on an immutable root goes
 //! through [`crate::immutable::update::run_in_new_set`] like every other
@@ -26,6 +28,7 @@ pub mod install;
 pub mod rpc;
 pub mod search;
 pub mod source;
+pub mod upgrade;
 
 pub use capability::{AurCapability, Blocker, BuildUser, BuildUserSource};
 pub use helper::AurHelper;

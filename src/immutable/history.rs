@@ -63,6 +63,10 @@ pub enum Request {
     Remove(Vec<String>),
     /// `deploytix aur` — AUR package names, built from source in the set.
     Aur(Vec<String>),
+    /// `deploytix update --aur` — the repository request it wraps, followed by
+    /// rebuilding every installed AUR package that had an update. Which ones
+    /// were rebuilt is in the record's changes.
+    WithAurUpgrade(Box<Request>),
     /// Both in one transaction.
     Mixed {
         packages: Vec<String>,
@@ -94,6 +98,7 @@ impl Request {
             Self::LocalFiles(f) => format!("Local package: {}", f.join(", ")),
             Self::Remove(p) => format!("Remove: {}", p.join(", ")),
             Self::Aur(p) => format!("AUR build: {}", p.join(", ")),
+            Self::WithAurUpgrade(r) => format!("{} + AUR upgrades", r.summary()),
             Self::Mixed { packages, files } => {
                 format!(
                     "Install: {} + local: {}",
@@ -539,6 +544,14 @@ mod tests {
                 files: vec!["b.pkg.tar.zst".into()]
             }
         );
+    }
+
+    #[test]
+    fn an_aur_upgrade_keeps_the_request_it_wraps() {
+        let r = Request::WithAurUpgrade(Box::new(Request::FullUpgrade));
+        assert_eq!(r.summary(), "Full system upgrade + AUR upgrades");
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), r);
     }
 
     // ── store ──

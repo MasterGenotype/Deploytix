@@ -275,6 +275,11 @@ pub fn run_update(
     extra_packages: &[String],
     opts: &UpdateOptions,
 ) -> Result<()> {
+    if opts.aur {
+        return Err(DeploytixError::ConfigError(
+            crate::aur::install::LVM_AB_REFUSAL.to_string(),
+        ));
+    }
     let _lock = update::acquire_update_lock(cmd)?;
     let state = read_state()?;
     let vg = state.vg.clone();

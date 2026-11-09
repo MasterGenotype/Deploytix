@@ -182,6 +182,8 @@ pub struct AppState {
     pub selected_files: Vec<PathBuf>,
     pub keep_sets: usize,
     pub reboot_after: bool,
+    /// The full upgrade also rebuilds outdated AUR packages.
+    pub upgrade_aur: bool,
 
     // File browser
     pub browser_open: bool,
@@ -255,6 +257,7 @@ impl Default for AppState {
             selected_files: Vec::new(),
             keep_sets: UpdateOptions::default().keep_sets,
             reboot_after: false,
+            upgrade_aur: false,
             browser_open: false,
             browser_dir: default_browse_dir(),
             confirm_rollback: None,
@@ -843,8 +846,9 @@ impl AppState {
         });
     }
 
-    /// Run a transactional update in the background.
-    pub fn start_update(&mut self, args: Vec<String>) {
+    /// Run a transactional update in the background. `aur` also rebuilds the
+    /// installed AUR packages that have updates, as `deploytix update --aur`.
+    pub fn start_update(&mut self, args: Vec<String>, aur: bool) {
         let tx = self.begin("Building update...");
         self.logs.clear();
         self.console.clear();
@@ -859,13 +863,19 @@ impl AppState {
         let opts = UpdateOptions {
             keep_sets: self.keep_sets,
             reboot: self.reboot_after,
+            aur,
         };
 
         thread::spawn(move || {
             let console: ConsoleHandle = Arc::new(Mutex::new(GuiConsole::new(tx.clone())));
             let cmd = command_runner_logging_to(&tx).with_console(console);
             let backend = Backend::detect();
-            let _ = tx.send(Msg::Status("Running the update...".to_string()));
+            let status = if aur {
+                "Running the update, then building AUR packages — this can take a long time."
+            } else {
+                "Running the update..."
+            };
+            let _ = tx.send(Msg::Status(status.to_string()));
 
             let result = match backend {
                 Some(Backend::LvmAb) => lvm_ab::run_update(&cmd, &args, &opts),
@@ -1234,7 +1244,7 @@ mod tests {
             targets: vec!["vim".into()],
             ..Default::default()
         });
-        state.start_update(vec!["vim".to_string()]);
+        state.start_update(vec!["vim".to_string()], false);
         assert!(
             state.preview.is_none(),
             "the preview described the pre-update system"

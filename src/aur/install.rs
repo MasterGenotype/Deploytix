@@ -61,18 +61,18 @@ impl Default for AurInstallOptions {
     }
 }
 
+/// Why the LVM A/B backend turns down every AUR build, including the one
+/// `deploytix update --aur` would run.
+pub const LVM_AB_REFUSAL: &str = "Building AUR packages is not implemented for the LVM A/B \
+     backend. Running the btrfs path here would build into a root that is not the one that boots.";
+
 /// Why an AUR install cannot proceed, as a user-facing message.
 ///
 /// Separated from the transaction so the GUI can grey out its button with the
 /// same reason the CLI would print, rather than the two drifting apart.
 pub fn refusal_reason(cap: &AurCapability, is_lvm_ab: bool) -> Option<String> {
     if is_lvm_ab {
-        return Some(
-            "Building AUR packages is not implemented for the LVM A/B backend. \
-             Running the btrfs path here would build into a root that is not the \
-             one that boots."
-                .to_string(),
-        );
+        return Some(LVM_AB_REFUSAL.to_string());
     }
     cap.blockers().first().map(|b| b.to_string())
 }
@@ -117,41 +117,15 @@ pub fn run_aur_install(
     let update_opts = UpdateOptions {
         keep_sets: opts.keep_sets,
         reboot: opts.reboot,
+        ..UpdateOptions::default()
     };
     let request = history::Request::Aur(packages.to_vec());
     let packages = packages.to_vec();
     let build_user = user.name.clone();
 
     run_in_new_set(cmd, &update_opts, request, move |cmd, target, _set_id| {
-        info!(
-            "[aur] Building {} package(s) with {helper} as {build_user}",
-            packages.len()
-        );
-
-        // Scratch first: without it the build lands on the chroot's tmpfs,
-        // which the kernel caps at half of RAM.
-        build::ensure_build_root(cmd, target, &build_user)?;
-
         let before = history::query_packages(cmd, target);
-        cmd.run_in_chroot(target, &build_cmd(helper, &build_user, &packages))?;
-
-        // A build that installs into /boot or replaces the kernel affects every
-        // snapshot set at once, because /boot is shared and not snapshotted.
-        // Checked after the build, when the file lists exist, and before the
-        // set is activated -- returning Err here throws the set away.
-        let lists = match cmd.run_in_chroot(target, &remove::file_list_cmd(&packages))? {
-            Some(o) => remove::parse_file_lists(&String::from_utf8_lossy(&o.stdout)),
-            None => Vec::new(),
-        };
-        let encrypted = std::path::Path::new(crate::immutable::ROOT_FS_DEVICE).exists();
-        if let Err(blocked) = remove::check_protected(&lists, encrypted) {
-            warn!("[aur] Refusing to activate a set that touches shared boot state");
-            return Err(DeploytixError::ConfigError(format!(
-                "These packages write to state shared by every snapshot set, \
-                 which no rollback can undo:\n  {}",
-                blocked.join("\n  ")
-            )));
-        }
+        build_in_target(cmd, target, helper, &build_user, &packages)?;
 
         // The initramfs is shared too, so regenerate it inside the set: if the
         // build broke it, this fails and the transaction is discarded.
@@ -160,6 +134,52 @@ pub fn run_aur_install(
         let after = history::query_packages(cmd, target);
         Ok(history::diff(&before, &after))
     })
+}
+
+/// Build and install `packages` into the set mounted at `target`, and refuse
+/// the result if it writes to state every set shares.
+///
+/// The part of an AUR transaction that is about the AUR, without the
+/// transaction around it: `deploytix aur` runs it on its own, and
+/// `deploytix update --aur` runs it after `pacman -Syu` in the same set.
+/// Returning `Err` throws the set away, so nothing here can reach the running
+/// system. The caller regenerates the initramfs.
+pub(crate) fn build_in_target(
+    cmd: &CommandRunner,
+    target: &str,
+    helper: AurHelper,
+    build_user: &str,
+    packages: &[String],
+) -> Result<()> {
+    info!(
+        "[aur] Building {} package(s) with {helper} as {build_user}",
+        packages.len()
+    );
+
+    // Scratch first: without it the build lands on the chroot's tmpfs,
+    // which the kernel caps at half of RAM.
+    build::ensure_build_root(cmd, target, build_user)?;
+
+    cmd.run_in_chroot(target, &build_cmd(helper, build_user, packages))?;
+
+    // A build that installs into /boot or replaces the kernel affects every
+    // snapshot set at once, because /boot is shared and not snapshotted.
+    // Checked after the build, when the file lists exist, and before the
+    // set is activated -- returning Err here throws the set away.
+    let lists = match cmd.run_in_chroot(target, &remove::file_list_cmd(packages))? {
+        Some(o) => remove::parse_file_lists(&String::from_utf8_lossy(&o.stdout)),
+        None => Vec::new(),
+    };
+    let encrypted = std::path::Path::new(crate::immutable::ROOT_FS_DEVICE).exists();
+    if let Err(blocked) = remove::check_protected(&lists, encrypted) {
+        warn!("[aur] Refusing to activate a set that touches shared boot state");
+        return Err(DeploytixError::ConfigError(format!(
+            "These packages write to state shared by every snapshot set, \
+             which no rollback can undo:\n  {}",
+            blocked.join("\n  ")
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

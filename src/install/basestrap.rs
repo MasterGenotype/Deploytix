@@ -294,7 +294,7 @@ const CUSTOM_PKG_PREFIXES: &[&str] = &[
 ];
 
 /// All custom package names that may live in the [deploytix] repo.
-const CUSTOM_PACKAGE_NAMES: &[&str] = &[
+pub(crate) const CUSTOM_PACKAGE_NAMES: &[&str] = &[
     "deploytix-git",
     "deploytix-gui-git",
     "deploytix-update-gui-git",

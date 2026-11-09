@@ -22,8 +22,10 @@
 //!    bind-mounted so state and the kernel/initramfs are shared, and the
 //!    `WRITABLE_BIND_PATHS` reproduced so `/opt` & co. land where the booted
 //!    system will look for them).
-//! 3. Run `pacman -Syu` (or install the requested packages) and regenerate the
-//!    initramfs *inside the set* via `artix-chroot`.
+//! 3. Run `pacman -Syu` (or install the requested packages), with `--aur` then
+//!    rebuild the installed AUR packages that have updates
+//!    ([`crate::aur::upgrade`]), and regenerate the initramfs *inside the set*
+//!    via `artix-chroot`.
 //! 4. On success, point the default boot entry at the new set and regenerate
 //!    grub.cfg; the change takes effect on the next reboot. On failure, delete
 //!    the half-built set and leave the running system untouched.
@@ -56,6 +58,9 @@ pub struct UpdateOptions {
     pub keep_sets: usize,
     /// Reboot automatically after a successful update.
     pub reboot: bool,
+    /// After the repository upgrade, rebuild every installed AUR package the
+    /// AUR has a newer version of, in the same set (see [`crate::aur::upgrade`]).
+    pub aur: bool,
 }
 
 impl Default for UpdateOptions {
@@ -63,6 +68,7 @@ impl Default for UpdateOptions {
         Self {
             keep_sets: 3,
             reboot: false,
+            aur: false,
         }
     }
 }
@@ -298,6 +304,10 @@ pub(crate) fn sets_to_prune(
 }
 
 /// Delete sets older than the newest `keep`, never touching `running` or `keep_id`.
+///
+/// Leftovers of a create or delete that failed part-way go too, whatever
+/// `keep` is: they are not sets, and listing them on every prune is what
+/// retries a delete that failed.
 pub(crate) fn prune_sets(
     cmd: &CommandRunner,
     devices: &ImmutableDevices,
@@ -306,7 +316,16 @@ pub(crate) fn prune_sets(
     keep_id: &str,
 ) -> Result<()> {
     let sets = snapshot::list_sets(cmd, &devices.root_fs)?;
-    for id in sets_to_prune(&sets, keep, running, keep_id) {
+    let mut doomed = sets_to_prune(&sets, keep, running, keep_id);
+    match snapshot::list_leftovers(cmd, devices) {
+        Ok(leftovers) => doomed.extend(
+            leftovers
+                .into_iter()
+                .filter(|id| id != running && id != keep_id),
+        ),
+        Err(e) => warn!("[immutable] Could not list leftover sets: {}", e),
+    }
+    for id in doomed {
         if let Err(e) = snapshot::delete_set(cmd, devices, &id) {
             warn!("[immutable] Failed to prune set {}: {}", id, e);
         }
@@ -475,6 +494,40 @@ where
     }
 }
 
+/// The helper and build user an `--aur` update will build with, or why it
+/// cannot.
+///
+/// Asked before the transaction so a system that cannot build fails without
+/// snapshotting anything, with the same reason `deploytix aur` gives. The probe
+/// only reads (`[ -x ]` tests and a `pacman -Qg`), so a dry run runs it for
+/// real: a preview that always reported "no AUR helper" would be no preview.
+fn aur_builder(cmd: &CommandRunner) -> Result<(crate::aur::AurHelper, String)> {
+    use crate::aur::{capability, install};
+
+    let cap = if cmd.is_dry_run() {
+        capability::probe(&CommandRunner::new(false), "")
+    } else {
+        capability::probe(cmd, "")
+    };
+    if let Some(reason) = install::refusal_reason(&cap, false) {
+        return Err(DeploytixError::ConfigError(format!(
+            "cannot upgrade AUR packages: {reason}"
+        )));
+    }
+    match (cap.helper, cap.build_user) {
+        (Some(helper), Some(user)) => {
+            info!(
+                "[aur] AUR packages will be rebuilt with {helper} as {}",
+                user.name
+            );
+            Ok((helper, user.name))
+        }
+        _ => Err(DeploytixError::ConfigError(
+            "cannot upgrade AUR packages: no AUR helper or build user available".to_string(),
+        )),
+    }
+}
+
 /// Perform a transactional update.
 pub fn run_update(
     cmd: &CommandRunner,
@@ -482,8 +535,14 @@ pub fn run_update(
     opts: &UpdateOptions,
 ) -> Result<()> {
     let (local_files, repo_names) = classify_args(extra_packages);
-    let request = history::Request::classify(&repo_names, &local_files);
+    let mut request = history::Request::classify(&repo_names, &local_files);
     let requested: Vec<String> = extra_packages.to_vec();
+    let aur = if opts.aur {
+        request = history::Request::WithAurUpgrade(Box::new(request));
+        Some(aur_builder(cmd)?)
+    } else {
+        None
+    };
 
     run_in_new_set(cmd, opts, request, move |cmd, target, _id| {
         // Local .pkg.tar.zst files are copied into the shared /var so the
@@ -496,6 +555,10 @@ pub fn run_update(
         info!("[immutable] Running pacman in {}", target);
         for pac in pacman_cmds(&staged, &repo_names) {
             cmd.run_pacman_in_chroot(target, &pac)?;
+        }
+        // After pacman, so the builds link against the upgraded libraries.
+        if let Some((helper, build_user)) = &aur {
+            crate::aur::upgrade::upgrade_in_target(cmd, target, *helper, build_user)?;
         }
         let after = history::query_packages(cmd, target);
         // Regenerate the (shared) initramfs from within the updated set.
@@ -647,6 +710,11 @@ mod tests {
             "the staged set must survive"
         );
         assert_eq!(doomed, ids(&["2", "3"]));
+    }
+
+    #[test]
+    fn the_aur_upgrade_is_opt_in() {
+        assert!(!UpdateOptions::default().aur);
     }
 
     #[test]

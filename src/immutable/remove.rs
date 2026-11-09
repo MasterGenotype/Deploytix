@@ -857,6 +857,7 @@ fn into_update_opts(opts: &RemoveOptions) -> UpdateOptions {
     UpdateOptions {
         keep_sets: opts.keep_sets,
         reboot: opts.reboot,
+        ..UpdateOptions::default()
     }
 }
 

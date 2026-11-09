@@ -6,6 +6,10 @@
 //! them behind one button would mean a control whose cost varies by three
 //! orders of magnitude depending on what was typed into it.
 //!
+//! Upgrading the AUR packages already installed is the exception, and lives on
+//! the Update tab: it has to run after `pacman -Syu` in the same set, so it is
+//! an opt-in checkbox on the full upgrade, labelled with what it costs.
+//!
 //! Search results are ranked locally (see [`crate::aur::search`]) because the
 //! AUR's own search is an unordered substring match.
 

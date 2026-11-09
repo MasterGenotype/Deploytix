@@ -15,6 +15,8 @@
 //!   conflicts, and reverse-dep walking.
 //! * [`graph`] — Graphviz DOT output equivalent to `pactree -s -g`.
 //! * [`cli`] — the `deploytix deps …` subcommand handlers.
+//! * [`version`] — pacman's version ordering (`vercmp`), for deciding whether
+//!   one package version supersedes another.
 //! * [`error`] — this crate's own [`error::Error`]; the installer converts it
 //!   at the boundary rather than this crate importing the installer's.
 
@@ -25,6 +27,7 @@ pub mod model;
 pub mod pacman;
 pub mod resolver;
 pub mod source;
+pub mod version;
 
 pub use error::{Error, Result};
 pub use model::DepClosure;
