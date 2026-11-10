@@ -169,7 +169,21 @@ Until it lands in the `hhd-git` build, deploytix carries the fix locally:
 `install_hhd` runs the helper once after `yay` installs `hhd-git`.
 
 **`hhd-git` is an AUR package, so pacman owns its files and every rebuild
-reverts the patch.** After any `yay -S hhd-git` or an update that rebuilt it,
+reverts the patch.** The symptom is the crash loop above, but only while
+Steam's gamepad UI is up (gamescope / Game Mode): that is when hhd asks for the
+touchpad. While hhd's emulated DualSense is down, the raw controller shows
+through as a "Generic X-Box pad", so Steam appears to flip the controller to
+Xbox. Desktop mode is unaffected.
+
+On an **immutable root** this is handled for you: every `deploytix update`
+(including `--aur`, which rebuilds `hhd-git` whenever the AUR has a newer
+commit), `deploytix aur` and `deploytix remove` transaction re-applies the
+patches inside the set it builds, before activating it
+(`reapply_hhd_patches` in `src/install/packages.rs`). Running the helper by
+hand there cannot work: it writes into `/usr`, which is read-only on the
+running system.
+
+On a **mutable** system, after any `yay -S hhd-git` or update that rebuilt it,
 re-apply with:
 
 ```bash

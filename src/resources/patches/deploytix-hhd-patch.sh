@@ -7,7 +7,9 @@
 # every rebuild of that package overwrites them and reverts the patches. This
 # script re-applies them, and deploytix runs it once at install time.
 #
-# Run it again after any `yay -S hhd-git` / `pacman -Syu` that rebuilt hhd:
+# On an immutable root deploytix also runs it inside every update/aur/remove
+# transaction; running it by hand there fails, since /usr is read-only. On a
+# mutable system, run it again after any `yay -S hhd-git` that rebuilt hhd:
 #
 #     sudo deploytix-hhd-patch
 #

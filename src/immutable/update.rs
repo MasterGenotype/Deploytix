@@ -433,7 +433,13 @@ where
         // installs. Must run after the /var rbind above, which is what the
         // bind covers, and before pacman writes a single entry.
         pacman_db::ensure_in_target(cmd, &target);
-        body(cmd, &target, &id)
+        let changes = body(cmd, &target, &id)?;
+        // Any of the bodies can reinstall `hhd-git` (`--aur`, `deploytix aur`,
+        // a local package), which reverts deploytix's patches to it — and on
+        // this read-only system the set being built is the only place they can
+        // be put back.
+        crate::install::packages::reapply_hhd_patches(cmd, &target);
+        Ok(changes)
     })();
 
     // Always release the chroot mounts and clear the package staging dir.

@@ -1750,6 +1750,49 @@ fn apply_hhd_patches(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     Ok(())
 }
 
+/// Re-apply [`HHD_PATCHES`] to a transactional set or slot, after its package
+/// changes and before it is activated.
+///
+/// Every rebuild of `hhd-git` reinstalls its files and so reverts the patches
+/// — and `deploytix update --aur` rebuilds it whenever the AUR has a newer
+/// commit. On a mutable system the user can run `deploytix-hhd-patch` after
+/// the fact; on an immutable root they cannot, because the helper writes into
+/// `/usr`, which is read-only on the running system. The only place left to
+/// repair it is the set being built, so every transaction does.
+///
+/// Only a target that was given the helper at install time (it had hhd) and
+/// still has hhd installed is touched; anything else is a no-op. The patches
+/// and helper are rewritten from this binary first, so a deploytix update that
+/// changes a patch reaches existing machines. Best-effort, like the install:
+/// failing to patch is a reason to warn, not to discard the set.
+pub fn reapply_hhd_patches(cmd: &CommandRunner, target: &str) {
+    if HHD_PATCHES.is_empty() {
+        return;
+    }
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would re-apply deploytix's hhd patches in {target}");
+        return;
+    }
+    let helper = std::path::Path::new(target).join(HHD_PATCH_HELPER_PATH);
+    if !helper.exists() || !hhd_installed_in(target) {
+        return;
+    }
+    if let Err(e) = apply_hhd_patches(cmd, target) {
+        warn!("  Could not re-apply deploytix's hhd patches: {e}");
+    }
+}
+
+/// Whether `root` has hhd installed, under whichever Python it was built for.
+fn hhd_installed_in(root: &str) -> bool {
+    let Ok(entries) = fs::read_dir(std::path::Path::new(root).join("usr/lib")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_string_lossy().starts_with("python3")
+            && entry.path().join("site-packages/hhd").is_dir()
+    })
+}
+
 /// Write the HHD service file for the configured init system.
 ///
 /// HHD needs to run **as root** — it writes to sysfs, /dev/uinput, ACPI
@@ -2484,6 +2527,49 @@ mod hhd_patch_tests {
     fn helper_install_path_is_on_the_default_path() {
         assert_eq!(HHD_PATCH_HELPER_PATH, "usr/bin/deploytix-hhd-patch");
         assert!(HHD_PATCH_HELPER.contains(HHD_PATCH_DIR));
+    }
+
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("deploytix-hhd-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("scratch root");
+        root
+    }
+
+    #[test]
+    fn hhd_is_found_under_any_python3() {
+        let root = scratch_root("found");
+        assert!(!hhd_installed_in(&root.to_string_lossy()));
+        fs::create_dir_all(root.join("usr/lib/python3.99/site-packages/hhd")).unwrap();
+        assert!(hhd_installed_in(&root.to_string_lossy()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every transaction calls this, on every machine: one that never had hhd
+    /// must not gain patch files or a helper from it.
+    #[test]
+    fn reapply_leaves_a_target_without_the_helper_alone() {
+        let root = scratch_root("nohelper");
+        fs::create_dir_all(root.join("usr/lib/python3.99/site-packages/hhd")).unwrap();
+        reapply_hhd_patches(&CommandRunner::new(false), &root.to_string_lossy());
+        assert!(!root.join(HHD_PATCH_HELPER_PATH).exists());
+        assert!(!root.join(HHD_PATCH_DIR).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A transaction that removed hhd leaves the helper behind; running it then
+    /// would only fail with "no installed hhd found".
+    #[test]
+    fn reapply_skips_a_target_whose_hhd_was_removed() {
+        let root = scratch_root("removed");
+        let helper = root.join(HHD_PATCH_HELPER_PATH);
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::write(&helper, "stale").unwrap();
+        reapply_hhd_patches(&CommandRunner::new(false), &root.to_string_lossy());
+        // Not rewritten from this binary: the function returned before
+        // touching anything.
+        assert_eq!(fs::read_to_string(&helper).unwrap(), "stale");
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

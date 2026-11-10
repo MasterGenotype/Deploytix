@@ -366,6 +366,10 @@ pub fn run_update(
             cmd.run_pacman_in_chroot(&t, &pac)?;
         }
         let after = history::query_packages(cmd, &t);
+        // A local `hhd-git` package reverts deploytix's patches to it, and the
+        // running slot's /usr is a read-only verity image the helper cannot
+        // write — so they go back in here, before the slot is sealed.
+        crate::install::packages::reapply_hhd_patches(cmd, &t);
         cmd.run_in_chroot(&t, "mkinitcpio -P")?;
         Ok(history::diff(&before, &after))
     })();
