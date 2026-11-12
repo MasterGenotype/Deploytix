@@ -691,15 +691,18 @@ mod tests {
             .expect("session launches gamemode");
         assert!(probe < launch);
 
-        // The probe must test for client-only artifacts. steamwebhelper (the
-        // CEF renderer) is 64-bit, but steamui.so is dlmopen'd by the 32-bit
-        // legacy `steam` binary and lands in ubuntu12_32 -- confirmed against
-        // a real client install, where ubuntu12_64/steamui.so never exists
-        // even fully updated. The bootstrap tarball already provides the
-        // ubuntu12_32 *launcher*, so this must check the .so file inside it,
-        // not just the directory, which the bootstrap tarball also has.
-        assert!(s.contains("ubuntu12_64/steamwebhelper"));
-        assert!(s.contains("ubuntu12_32/steamui.so"));
+        // The probe must test for client-only files, by name, not pin the
+        // directory they happen to live in this month. The 2026-11 steamrt64
+        // client moved both into steamrt64/ and deleted ubuntu12_64/, and a
+        // probe pinned to ubuntu12_64/steamwebhelper sent every boot down the
+        // windowed bootstrap path. Behaviour is covered by
+        // the_client_probe_accepts_every_known_layout.
+        assert!(s.contains("_has_client_file \"$_d\" steamwebhelper -x"));
+        assert!(s.contains("_has_client_file \"$_d\" steamui.so -s"));
+        assert!(
+            !s.contains("ubuntu12_64/") && !s.contains("ubuntu12_32/"),
+            "probe must not pin a client directory"
+        );
 
         // The bootstrap run is the plain client; the Deck flags are exactly
         // what has no UI to draw yet.
@@ -721,6 +724,75 @@ mod tests {
         // Steam is single-instance via ~/.steam/steam.pipe, so the bootstrap
         // client must be gone before the gamemode launch.
         assert!(body.contains("steam.pipe"));
+    }
+
+    /// Run the session script's own client probe against fake Steam roots.
+    /// Each layout is a list of (path under the Steam root, executable).
+    fn client_probe_passes(layout: &[(&str, bool)]) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+
+        let s = STEAM_GAMESCOPE_SESSION;
+        let start = s.find("_has_client_file() {").expect("probe helper exists");
+        let end = s[start..]
+            .find("\nif ! _steam_client_installed; then")
+            .expect("probe is followed by the bootstrap")
+            + start;
+        let probe = &s[start..end];
+
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "deploytix-client-probe-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let root = home.join(".local/share/Steam");
+        for (rel, exec) in layout {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"client").unwrap();
+            let mode = if *exec { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("set -e\n{probe}\n_steam_client_installed"))
+            .env("HOME", &home)
+            .status()
+            .expect("sh runs");
+        std::fs::remove_dir_all(&home).unwrap();
+        status.success()
+    }
+
+    #[test]
+    fn the_client_probe_accepts_every_known_layout() {
+        // Pre-2026-11 client.
+        assert!(client_probe_passes(&[
+            ("ubuntu12_64/steamwebhelper", true),
+            ("ubuntu12_32/steamui.so", false),
+        ]));
+        // 2026-11 steamrt64 client, as found on a live install after the
+        // client deleted ubuntu12_64/ (ubuntu12_32/steamui.so may or may not
+        // survive; it must not matter).
+        assert!(client_probe_passes(&[
+            ("steamrt64/steam", true),
+            ("steamrt64/steamwebhelper", true),
+            ("steamrt64/steamui.so", false),
+        ]));
+        // Bootstrap tarball only: the 32-bit launcher, no client.
+        assert!(!client_probe_passes(&[
+            ("steam.sh", true),
+            ("ubuntu12_32/steam", true),
+        ]));
+        // Half a download is not a client.
+        assert!(!client_probe_passes(&[("steamrt64/steamwebhelper", true)]));
+        assert!(!client_probe_passes(&[("steamrt64/steamui.so", false)]));
+        // A renderer that is not executable is not a renderer.
+        assert!(!client_probe_passes(&[
+            ("steamrt64/steamwebhelper", false),
+            ("steamrt64/steamui.so", false),
+        ]));
     }
 
     /// Steam runs session-select and throws away its exit code, so a rejected

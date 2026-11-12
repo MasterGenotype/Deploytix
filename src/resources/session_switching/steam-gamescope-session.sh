@@ -235,8 +235,8 @@ if ! ip route show default 2>/dev/null | grep -q .; then
 fi
 
 # The distro steam package ships only the bootstrap tarball: steam.sh and the
-# 32-bit launcher. The gamepad UI itself is ubuntu12_64/steamwebhelper plus
-# steamui.so, and those arrive only with the client Steam downloads on its
+# 32-bit launcher. The gamepad UI itself is steamwebhelper (the CEF renderer)
+# plus steamui.so, and those arrive only with the client Steam downloads on its
 # first real run. Launching -gamepadui before that download has happened gives
 # Steam nothing to draw, so it exits within seconds.
 #
@@ -245,14 +245,30 @@ fi
 # was disabled -- do it here, with a plain windowed steam, before gamemode is
 # attempted. No -gamepadui/-steamdeck flags: this is the ordinary client, which
 # is what bootstraps correctly.
+#
+# Match the two files by name in any directory one level below the Steam root,
+# never by a fixed directory: which directory they live in is the client's
+# business, and it has already moved once.
+#   before 2026-11: ubuntu12_64/steamwebhelper + ubuntu12_32/steamui.so
+#   2026-11 steamrt64 client (build 1794424036): steamrt64/steamwebhelper +
+#     steamrt64/steamui.so, and the client deletes ubuntu12_64/ outright.
+# The fixed-path version of this check failed from the day the client moved:
+# every boot then ran windowed Steam for the full 15-minute bootstrap below,
+# during which Steam is not in SteamOS mode, so "Switch to Desktop" never calls
+# steamos-session-select and Decky has no gamepad UI to inject into. Neither
+# file is in the bootstrap tarball, so a name match cannot be fooled by it.
+_has_client_file() { # <steam root> <file name> <test operator>
+    for _f in "$1"/*/"$2"; do
+        [ "$3" "$_f" ] && return 0
+    done
+    return 1
+}
+
 _steam_client_installed() {
     for _d in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.steam/root"; do
         [ -d "$_d" ] || continue
-        # steamwebhelper (the CEF renderer) is 64-bit; steamui.so is dlmopen'd
-        # by the 32-bit legacy `steam` binary and ships in ubuntu12_32, not
-        # ubuntu12_64 -- confirmed against a real, fully-updated client install.
-        [ -x "$_d/ubuntu12_64/steamwebhelper" ] || continue
-        [ -s "$_d/ubuntu12_32/steamui.so" ] || continue
+        _has_client_file "$_d" steamwebhelper -x || continue
+        _has_client_file "$_d" steamui.so -s || continue
         return 0
     done
     return 1
