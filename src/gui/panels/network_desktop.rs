@@ -363,11 +363,48 @@ pub(crate) fn show_sections(
                     );
                 }
                 ui.add_space(theme::SPACING_XS);
+
+                // Automatic snapshots — mutable installs only; an immutable
+                // root is snapshotted by `deploytix update` instead.
+                if !packages.immutable_root {
+                    ui.checkbox(
+                        &mut packages.install_snap_pac,
+                        "snap-pac: snapshot before/after every pacman transaction (recommended)",
+                    );
+                    if packages.install_snap_pac {
+                        widgets::info_text(
+                            ui,
+                            "Each install/update/removal gets a bootable rollback point in \
+                             the grub-btrfs menu; the last 10 transactions are kept. \
+                             snap-pac comes from Arch [extra], which is enabled on the \
+                             target for it.",
+                        );
+                    }
+                    ui.checkbox(
+                        &mut packages.weekly_snapshots,
+                        "Weekly snapshot of / (never hourly)",
+                    );
+                    if packages.weekly_snapshots {
+                        widgets::info_text(
+                            ui,
+                            "One snapshot per week via cron (cronie is installed and \
+                             enabled), the last 4 kept. snapper's hourly timeline stays off.",
+                        );
+                    }
+                    ui.add_space(theme::SPACING_XS);
+                } else {
+                    packages.install_snap_pac = false;
+                    packages.weekly_snapshots = false;
+                }
             } else {
                 packages.immutable_root = false;
+                packages.install_snap_pac = false;
+                packages.weekly_snapshots = false;
             }
         } else {
             packages.install_grub_btrfs = false;
+            packages.install_snap_pac = false;
+            packages.weekly_snapshots = false;
             if !use_lvm_thin {
                 packages.immutable_root = false;
             }

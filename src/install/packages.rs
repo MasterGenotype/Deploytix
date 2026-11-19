@@ -348,7 +348,7 @@ const WINE_PACKAGES_ARCH_EXTRA: &[&str] = &["wine-mono", "wine-gecko"];
 /// Installs `artix-archlinux-support` (available from Artix repos),
 /// populates the Arch keyring, appends `[extra]` to the chroot's
 /// pacman.conf, and refreshes the package database.
-fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+pub(crate) fn ensure_arch_repos_in_chroot(cmd: &CommandRunner, install_root: &str) -> Result<()> {
     // Install artix-archlinux-support which provides the Arch mirrorlist
     // and keyring.  This package is in Artix's own repos.
     info!("Installing artix-archlinux-support in chroot");

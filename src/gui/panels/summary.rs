@@ -199,6 +199,26 @@ pub fn show(
                             "Disabled"
                         },
                     );
+                    if packages.install_grub_btrfs && !packages.immutable_root {
+                        row(
+                            ui,
+                            "snap-pac",
+                            if packages.install_snap_pac {
+                                "Enabled (pre/post snapshot per pacman transaction, last 10 kept)"
+                            } else {
+                                "Disabled"
+                            },
+                        );
+                        row(
+                            ui,
+                            "Weekly snapshots",
+                            if packages.weekly_snapshots {
+                                "Enabled (one per week via cronie, last 4 kept; never hourly)"
+                            } else {
+                                "Disabled (no timeline snapshots)"
+                            },
+                        );
+                    }
                     row(
                         ui,
                         "Immutable root",

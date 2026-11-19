@@ -219,6 +219,9 @@ pub struct PackagesState {
     pub install_session_switching: bool,
     pub install_btrfs_tools: bool,
     pub install_grub_btrfs: bool,
+    /// snap-pac + weekly timeline: mutable grub-btrfs installs only.
+    pub install_snap_pac: bool,
+    pub weekly_snapshots: bool,
     pub immutable_root: bool,
     pub sysctl_gaming_tweaks: bool,
     pub sysctl_network_performance: bool,
@@ -275,6 +278,8 @@ impl Default for PackagesState {
             install_session_switching: false,
             install_btrfs_tools: false,
             install_grub_btrfs: false,
+            install_snap_pac: false,
+            weekly_snapshots: false,
             immutable_root: false,
             sysctl_gaming_tweaks: false,
             sysctl_network_performance: false,

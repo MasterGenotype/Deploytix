@@ -160,6 +160,13 @@ A conventional system: `/` is read-write, you update with `pacman -Syu`, and the
 
 `snapper` takes read-only snapshots of `/` (`@`) and GRUB grows an **"Artix Linux snapshots"** submenu. If an update breaks the system you can pick an older snapshot from GRUB to boot into it. Booting a read-only snapshot layers a **disk-backed ephemeral overlay** over it, so the system is usable but changes made while booted into a snapshot are discarded on reboot. `/usr`, `/var`, and `/home` remain live. This is a recovery aid, not full immutability.
 
+Two optional, opt-in automations decide *when* those snapshots get taken (mutable installs only — an immutable root is snapshotted by `deploytix update` instead, and validation refuses them there):
+
+- **`install_snap_pac`** — installs [snap-pac](https://github.com/wesbarnett/snap-pac) (from Arch `[extra]`, which is enabled on the target for it), so every pacman install/update/removal gets a pre/post snapshot pair to roll back to. The last 10 transactions are kept.
+- **`weekly_snapshots`** — one timeline snapshot of `/` per week from `/etc/cron.weekly`, the last 4 kept.
+
+snapper's own **hourly** timeline is always switched off on these installs (`TIMELINE_CREATE="no"`), so snapshots never pile up by the hour. Turning on either automation installs and enables **cronie** for the chosen init, which also runs the daily cleanup that enforces those limits — runit, OpenRC, s6 and dinit have no systemd timers to do it.
+
 ### Transactional immutable root (`immutable_root`)
 
 This is the flagship mode — openSUSE MicroOS/Aeon-style semantics on Artix. Expect the following:
@@ -275,6 +282,8 @@ install_gaming = true          # Steam, gamescope (Bazzite fork)
 install_session_switching = true  # gamescope ↔ desktop via greetd
 install_btrfs_tools = true     # snapper, btrfs-assistant (via yay)
 install_grub_btrfs = true      # snapshot boot menu + snapper root config (btrfs only)
+install_snap_pac = true        # snapshot around every pacman transaction (mutable only)
+weekly_snapshots = true        # one snapshot of / per week via cronie (mutable only)
 immutable_root = false         # transactional read-only root (needs grub_btrfs or lvm_thin)
 sysctl_gaming_tweaks = true    # vm.max_map_count, swappiness, etc.
 sysctl_network_performance = true  # BBR, fq, larger buffers

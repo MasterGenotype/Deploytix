@@ -77,8 +77,163 @@ pub fn install_grub_btrfs(
     write_grub_btrfsd_service(cmd, config, install_root)?;
     regenerate_grub_cfg(cmd, config, install_root)?;
 
+    // Mutable installs only. An immutable root's recovery model is the
+    // `deploytix update` snapshot sets, and its snapper config is left alone.
+    if config.mutable_grub_btrfs() {
+        apply_snapper_policy(cmd, install_root)?;
+        write_snapper_cron(cmd, config, install_root)?;
+        // Last, so snap-pac's hooks only fire for transactions after this
+        // one rather than for the rest of the installer's package work.
+        if config.packages.install_snap_pac {
+            install_snap_pac(cmd, install_root)?;
+        }
+    }
+
     info!("grub-btrfs installation complete");
     Ok(true)
+}
+
+/// snapper root-config values for mutable grub-btrfs installs.
+///
+/// - **No hourly timeline, ever.** snapper's packaged cron/timer jobs create a
+///   timeline snapshot every hour while `TIMELINE_CREATE` is on; it is turned
+///   off so that installing a cron daemon later cannot start that. The weekly
+///   snapshot comes from [`WEEKLY_TIMELINE_SCRIPT`] instead.
+/// - **Timeline cleanup keeps the last 4 weekly snapshots** and nothing else.
+/// - **Number cleanup bounds snap-pac**: each pacman transaction makes a
+///   pre/post pair, so 20 is the last 10 transactions.
+pub const SNAPPER_POLICY: &[(&str, &str)] = &[
+    ("TIMELINE_CREATE", "no"),
+    ("TIMELINE_CLEANUP", "yes"),
+    ("TIMELINE_LIMIT_HOURLY", "0"),
+    ("TIMELINE_LIMIT_DAILY", "0"),
+    ("TIMELINE_LIMIT_WEEKLY", "4"),
+    ("TIMELINE_LIMIT_MONTHLY", "0"),
+    ("TIMELINE_LIMIT_YEARLY", "0"),
+    ("NUMBER_CLEANUP", "yes"),
+    ("NUMBER_LIMIT", "20"),
+    ("NUMBER_LIMIT_IMPORTANT", "10"),
+];
+
+const SNAPPER_ROOT_CONFIG: &str = "/etc/snapper/configs/root";
+
+/// cron.weekly job: one timeline snapshot of `/`. cronie's anacron runs
+/// cron.weekly, so a machine that was off on the day catches up next boot.
+pub const WEEKLY_TIMELINE_SCRIPT: &str = "#!/bin/sh\n\
+# Written by deploytix: one snapper timeline snapshot of / per week.\n\
+# snapper's own hourly timeline is off (TIMELINE_CREATE=\"no\").\n\
+exec snapper --no-dbus -c root create --cleanup-algorithm timeline --description weekly\n";
+const WEEKLY_TIMELINE_PATH: &str = "/etc/cron.weekly/deploytix-snapper-timeline";
+
+/// cron.daily job: apply the cleanup limits in [`SNAPPER_POLICY`]. Written
+/// whenever snap-pac or the weekly timeline is on; without it snap-pac pairs
+/// accumulate without bound on an init with no snapper timer.
+pub const DAILY_CLEANUP_SCRIPT: &str = "#!/bin/sh\n\
+# Written by deploytix: enforce the snapper root-config cleanup limits.\n\
+snapper --no-dbus -c root cleanup number\n\
+snapper --no-dbus -c root cleanup timeline\n\
+snapper --no-dbus -c root cleanup empty-pre-post\n";
+const DAILY_CLEANUP_PATH: &str = "/etc/cron.daily/deploytix-snapper-cleanup";
+
+/// Set `KEY="value"` lines in a snapper config: replace an existing
+/// assignment in place, append any key that is absent. Comments and other
+/// keys are left untouched.
+pub fn set_snapper_vars(content: &str, vars: &[(&str, &str)]) -> String {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    for (key, value) in vars {
+        let assignment = format!("{key}=\"{value}\"");
+        let prefix = format!("{key}=");
+        match lines
+            .iter_mut()
+            .find(|l| l.trim_start().starts_with(&prefix))
+        {
+            Some(line) => *line = assignment,
+            None => lines.push(assignment),
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Write [`SNAPPER_POLICY`] into the root snapper config.
+fn apply_snapper_policy(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("Applying snapper policy: no hourly timeline, last 4 weekly, last 10 pacman pairs");
+
+    if cmd.is_dry_run() {
+        println!(
+            "  [dry-run] Would set in {}: {}",
+            SNAPPER_ROOT_CONFIG,
+            SNAPPER_POLICY
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        return Ok(());
+    }
+
+    let path = format!("{install_root}{SNAPPER_ROOT_CONFIG}");
+    let content = fs::read_to_string(&path)?;
+    fs::write(&path, set_snapper_vars(&content, SNAPPER_POLICY))?;
+    Ok(())
+}
+
+/// Write the cron jobs that drive snapper on an init with no systemd timers.
+/// cronie itself is installed and enabled by the services phase
+/// (`DeploymentConfig::needs_snapper_cron`).
+fn write_snapper_cron(
+    cmd: &CommandRunner,
+    config: &DeploymentConfig,
+    install_root: &str,
+) -> Result<()> {
+    if !config.needs_snapper_cron() {
+        return Ok(());
+    }
+
+    let mut jobs = vec![(DAILY_CLEANUP_PATH, DAILY_CLEANUP_SCRIPT)];
+    if config.packages.weekly_snapshots {
+        jobs.push((WEEKLY_TIMELINE_PATH, WEEKLY_TIMELINE_SCRIPT));
+    }
+
+    for (rel, script) in jobs {
+        if cmd.is_dry_run() {
+            println!("  [dry-run] Would write cron job {rel}");
+            continue;
+        }
+        let path = format!("{install_root}{rel}");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, script)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        info!("  Written cron job: {rel}");
+    }
+    Ok(())
+}
+
+/// Install snap-pac (Arch `[extra]`; not in the Artix repos), enabling the
+/// Arch repo on the target first. Declining the transaction in interactive
+/// review is not fatal: the system just has no per-transaction snapshots.
+fn install_snap_pac(cmd: &CommandRunner, install_root: &str) -> Result<()> {
+    info!("Installing snap-pac (snapper pre/post snapshots around pacman)");
+
+    if cmd.is_dry_run() {
+        println!("  [dry-run] Would enable Arch [extra] on the target and install snap-pac");
+        return Ok(());
+    }
+
+    crate::install::packages::ensure_arch_repos_in_chroot(cmd, install_root)?;
+    let installed = pacman_install_chroot_reviewed_status(
+        cmd,
+        install_root,
+        "snap-pac (pacman snapshots)",
+        vec!["snap-pac".to_string()],
+    )?;
+    if !installed {
+        warn!("snap-pac install was declined — pacman transactions will not be snapshotted");
+    }
+    Ok(())
 }
 
 /// Regenerate grub.cfg now that grub-btrfs is installed, so the snapshot
@@ -565,6 +720,62 @@ fn write_grub_btrfsd_service(
 mod tests {
     use super::*;
     use crate::config::{DeploymentConfig, Filesystem, InitSystem, SecureBootMethod};
+
+    // ── snapper policy + cron jobs ────────────────────────────────────────
+
+    /// The shape of snapper's shipped config template: comments, quoted
+    /// values, the keys the policy rewrites.
+    const SNAPPER_TEMPLATE: &str = "# subvolume to snapshot\n\
+SUBVOLUME=\"/\"\n\
+\n\
+# create hourly snapshots\n\
+TIMELINE_CREATE=\"yes\"\n\
+TIMELINE_LIMIT_HOURLY=\"10\"\n\
+TIMELINE_LIMIT_DAILY=\"10\"\n\
+NUMBER_LIMIT=\"50\"\n";
+
+    #[test]
+    fn snapper_policy_replaces_existing_keys_and_appends_missing_ones() {
+        let out = set_snapper_vars(SNAPPER_TEMPLATE, SNAPPER_POLICY);
+        assert!(out.contains("SUBVOLUME=\"/\""));
+        assert!(out.contains("# create hourly snapshots"));
+        assert!(out.contains("TIMELINE_CREATE=\"no\""));
+        assert!(!out.contains("TIMELINE_CREATE=\"yes\""));
+        assert!(out.contains("TIMELINE_LIMIT_HOURLY=\"0\""));
+        assert!(out.contains("TIMELINE_LIMIT_WEEKLY=\"4\""));
+        assert!(out.contains("NUMBER_LIMIT=\"20\""));
+        for (key, _) in SNAPPER_POLICY {
+            let n = out
+                .lines()
+                .filter(|l| l.starts_with(&format!("{key}=")))
+                .count();
+            assert_eq!(n, 1, "{key} must be set exactly once");
+        }
+    }
+
+    #[test]
+    fn snapper_policy_is_idempotent() {
+        let once = set_snapper_vars(SNAPPER_TEMPLATE, SNAPPER_POLICY);
+        assert_eq!(set_snapper_vars(&once, SNAPPER_POLICY), once);
+    }
+
+    #[test]
+    fn policy_never_creates_hourly_or_daily_timeline_snapshots() {
+        let get = |k: &str| SNAPPER_POLICY.iter().find(|(key, _)| *key == k).unwrap().1;
+        assert_eq!(get("TIMELINE_CREATE"), "no");
+        assert_eq!(get("TIMELINE_LIMIT_HOURLY"), "0");
+        assert_eq!(get("TIMELINE_LIMIT_DAILY"), "0");
+    }
+
+    #[test]
+    fn cron_jobs_target_the_root_config_without_dbus() {
+        assert!(WEEKLY_TIMELINE_SCRIPT.starts_with("#!/bin/sh\n"));
+        assert!(WEEKLY_TIMELINE_SCRIPT
+            .contains("snapper --no-dbus -c root create --cleanup-algorithm timeline"));
+        for algo in ["number", "timeline", "empty-pre-post"] {
+            assert!(DAILY_CLEANUP_SCRIPT.contains(&format!("-c root cleanup {algo}")));
+        }
+    }
 
     fn base_config() -> DeploymentConfig {
         let mut config = DeploymentConfig::sample();

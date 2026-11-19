@@ -92,6 +92,13 @@ fn build_service_list(config: &DeploymentConfig) -> Vec<String> {
         services.push("elogind".to_string());
     }
 
+    // cronie — runs the weekly snapper timeline snapshot and the cleanup that
+    // keeps snap-pac's pre/post pairs bounded. Neither inits' timers nor
+    // systemd's exist here, so without a cron daemon both silently never run.
+    if config.needs_snapper_cron() {
+        services.push("cronie".to_string());
+    }
+
     services
 }
 
@@ -257,6 +264,22 @@ mod tests {
             .position(|s| s == "NetworkManager")
             .expect("NetworkManager enabled");
         assert!(iwd < nm, "iwd must be enabled before NetworkManager");
+    }
+
+    #[test]
+    fn cronie_follows_snapshot_automation_on_mutable_installs_only() {
+        let mut cfg = config();
+        cfg.packages.install_grub_btrfs = true;
+        assert!(!build_service_list(&cfg).contains(&"cronie".to_string()));
+
+        cfg.packages.weekly_snapshots = true;
+        let services = build_service_list(&cfg);
+        assert!(services.contains(&"cronie".to_string()));
+        assert!(build_service_packages(&services, &InitSystem::Runit)
+            .contains(&"cronie-runit".to_string()));
+
+        cfg.packages.immutable_root = true;
+        assert!(!build_service_list(&cfg).contains(&"cronie".to_string()));
     }
 
     #[test]

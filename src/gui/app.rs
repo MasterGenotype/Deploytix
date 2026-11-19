@@ -143,6 +143,8 @@ impl DeploytixGui {
                 install_session_switching: self.packages.install_session_switching,
                 install_btrfs_tools: self.packages.install_btrfs_tools,
                 install_grub_btrfs: self.packages.install_grub_btrfs,
+                install_snap_pac: self.packages.install_snap_pac,
+                weekly_snapshots: self.packages.weekly_snapshots,
                 immutable_root: self.packages.immutable_root,
                 sysctl_gaming_tweaks: self.packages.sysctl_gaming_tweaks,
                 sysctl_network_performance: self.packages.sysctl_network_performance,

@@ -315,6 +315,24 @@ pub struct PackagesConfig {
     /// Requires: btrfs filesystem + subvolumes; incompatible with use_lvm_thin.
     #[serde(default)]
     pub install_grub_btrfs: bool,
+    /// Install snap-pac: pacman hooks that take a snapper pre/post snapshot
+    /// pair around every pacman transaction, so each install/update/removal
+    /// has a bootable rollback point in the grub-btrfs menu. snap-pac lives in
+    /// Arch's `[extra]` repo, which is enabled on the target for it.
+    ///
+    /// Non-immutable installs only: an immutable root refuses direct pacman
+    /// and is snapshotted by `deploytix update` instead.
+    /// Requires: install_grub_btrfs = true, immutable_root = false.
+    #[serde(default)]
+    pub install_snap_pac: bool,
+    /// Take one snapper timeline snapshot of `/` per week (cron.weekly), keeping
+    /// the last four. Snapper's own hourly timeline is always switched off on
+    /// non-immutable grub-btrfs installs, so this is the only timeline source.
+    ///
+    /// Non-immutable installs only (same reasoning as `install_snap_pac`).
+    /// Requires: install_grub_btrfs = true, immutable_root = false.
+    #[serde(default)]
+    pub weekly_snapshots: bool,
     /// Transactional immutable root with a read-only, integrity-checked OS and
     /// atomic updates via `deploytix update` (applied on reboot); direct
     /// `pacman -Syu` on the live system is blocked. Two backends, selected by the
@@ -895,6 +913,20 @@ impl DeploymentConfig {
         self.packages.immutable_root && self.disk.use_lvm_thin
     }
 
+    /// Whether the snapper snapshot policy for a **mutable** grub-btrfs
+    /// install applies (hourly timeline off, bounded limits). Immutable
+    /// roots keep their own `deploytix update` snapshot model untouched.
+    pub fn mutable_grub_btrfs(&self) -> bool {
+        self.packages.install_grub_btrfs && !self.packages.immutable_root
+    }
+
+    /// Whether a cron daemon is needed for snapper housekeeping: the weekly
+    /// timeline snapshot, and cleanup so snap-pac pairs stay bounded.
+    pub fn needs_snapper_cron(&self) -> bool {
+        self.mutable_grub_btrfs()
+            && (self.packages.install_snap_pac || self.packages.weekly_snapshots)
+    }
+
     /// Serialise the config to TOML and write it to `path`, creating
     /// any missing parent directories.  Used by the post-install
     /// extras step to persist user-entered extras for later re-runs.
@@ -1328,6 +1360,23 @@ impl DeploymentConfig {
             false
         };
 
+        // Automatic snapshots for mutable grub-btrfs installs. Immutable roots
+        // are snapshotted by `deploytix update`, so neither is offered there.
+        let (install_snap_pac, weekly_snapshots) = if install_grub_btrfs && !immutable_root {
+            let snap_pac = prompt_confirm(
+                "Install snap-pac? (snapper snapshot before/after every pacman transaction, \
+                 from Arch [extra])",
+                true,
+            )?;
+            let weekly = prompt_confirm(
+                "Take a weekly snapshot of / ? (one per week via cron, last 4 kept; never hourly)",
+                true,
+            )?;
+            (snap_pac, weekly)
+        } else {
+            (false, false)
+        };
+
         // sysctl gaming tweaks (standalone — no prerequisites)
         let sysctl_gaming_tweaks = prompt_confirm(
             "Apply gaming sysctl performance tweaks? (vm.max_map_count, swappiness, etc.)",
@@ -1462,6 +1511,8 @@ impl DeploymentConfig {
                 install_session_switching,
                 install_btrfs_tools,
                 install_grub_btrfs,
+                install_snap_pac,
+                weekly_snapshots,
                 immutable_root,
                 sysctl_gaming_tweaks,
                 sysctl_network_performance,
@@ -1944,8 +1995,35 @@ impl DeploymentConfig {
         }
 
         self.validate_immutable_backend()?;
+        self.validate_snapshot_automation()?;
         self.validate_hibernation()?;
 
+        Ok(())
+    }
+
+    /// snap-pac and the weekly timeline are for mutable grub-btrfs installs.
+    /// An immutable root refuses direct pacman (so snap-pac would never fire)
+    /// and is snapshotted by `deploytix update`, which is the whole of its
+    /// recovery model. Device-independent, so unit-testable on its own.
+    fn validate_snapshot_automation(&self) -> Result<()> {
+        for (enabled, name) in [
+            (self.packages.install_snap_pac, "install_snap_pac"),
+            (self.packages.weekly_snapshots, "weekly_snapshots"),
+        ] {
+            if !enabled {
+                continue;
+            }
+            if !self.packages.install_grub_btrfs {
+                return Err(DeploytixError::ValidationError(format!(
+                    "{name} requires install_grub_btrfs = true (snapper root config + snapshot boot entries)"
+                )));
+            }
+            if self.packages.immutable_root {
+                return Err(DeploytixError::ValidationError(format!(
+                    "{name} is for mutable installs only: an immutable root is snapshotted by `deploytix update`"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -2078,6 +2156,71 @@ mod tests {
     #[test]
     fn lvm_ab_backend_rules_pass() {
         assert!(lvm_ab_config().validate_immutable_backend().is_ok());
+    }
+
+    // ── snapshot automation (snap-pac, weekly timeline) ──────────────────────
+
+    fn mutable_grub_btrfs_config() -> DeploymentConfig {
+        let mut c = DeploymentConfig::sample();
+        c.disk.use_subvolumes = true;
+        c.packages.install_grub_btrfs = true;
+        c.packages.immutable_root = false;
+        c
+    }
+
+    #[test]
+    fn snapshot_automation_is_allowed_on_mutable_grub_btrfs() {
+        let mut c = mutable_grub_btrfs_config();
+        c.packages.install_snap_pac = true;
+        c.packages.weekly_snapshots = true;
+        assert!(c.validate_snapshot_automation().is_ok());
+        assert!(c.mutable_grub_btrfs());
+        assert!(c.needs_snapper_cron());
+    }
+
+    #[test]
+    fn snapshot_automation_requires_grub_btrfs() {
+        for snap_pac in [true, false] {
+            let mut c = DeploymentConfig::sample();
+            c.packages.install_grub_btrfs = false;
+            c.packages.install_snap_pac = snap_pac;
+            c.packages.weekly_snapshots = !snap_pac;
+            let err = c.validate_snapshot_automation().unwrap_err().to_string();
+            assert!(err.contains("requires install_grub_btrfs"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn snapshot_automation_is_refused_on_immutable_roots() {
+        for snap_pac in [true, false] {
+            let mut c = mutable_grub_btrfs_config();
+            c.packages.immutable_root = true;
+            c.packages.install_snap_pac = snap_pac;
+            c.packages.weekly_snapshots = !snap_pac;
+            let err = c.validate_snapshot_automation().unwrap_err().to_string();
+            assert!(err.contains("mutable installs only"), "got: {err}");
+            assert!(!c.needs_snapper_cron());
+        }
+    }
+
+    #[test]
+    fn cron_is_only_needed_when_an_automation_is_on() {
+        let c = mutable_grub_btrfs_config();
+        assert!(c.mutable_grub_btrfs());
+        assert!(!c.needs_snapper_cron());
+    }
+
+    #[test]
+    fn old_configs_without_the_fields_default_to_off() {
+        let toml = toml::to_string(&DeploymentConfig::sample()).unwrap();
+        let stripped: String = toml
+            .lines()
+            .filter(|l| !l.starts_with("install_snap_pac") && !l.starts_with("weekly_snapshots"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let c: DeploymentConfig = toml::from_str(&stripped).unwrap();
+        assert!(!c.packages.install_snap_pac);
+        assert!(!c.packages.weekly_snapshots);
     }
 
     // ── hibernation ──────────────────────────────────────────────────────────
