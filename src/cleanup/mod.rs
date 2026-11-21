@@ -31,11 +31,24 @@ impl Cleaner {
             if wipe { ", wipe" } else { "" }
         );
 
-        // Unmount all filesystems
-        self.unmount_all()?;
+        // Unmount all filesystems, then close any LUKS containers. Both carry
+        // on past a failure so as much as possible is released, then report
+        // what is still held.
+        let mut held = self.unmount_all();
+        held.extend(self.close_encrypted_volumes());
 
-        // Close any LUKS containers
-        self.close_encrypted_volumes()?;
+        if !held.is_empty() {
+            // A busy filesystem or an open container on the target: wiping
+            // now would rewrite the partition table under live mappings.
+            return Err(DeploytixError::CommandFailed {
+                command: "cleanup".to_string(),
+                stderr: format!(
+                    "still in use after cleanup: {}{}",
+                    held.join(", "),
+                    if wipe { "; not wiping the device" } else { "" }
+                ),
+            });
+        }
 
         // Wipe if requested
         if wipe {
@@ -52,8 +65,10 @@ impl Cleaner {
         Ok(())
     }
 
-    /// Unmount all filesystems under install root
-    fn unmount_all(&self) -> Result<()> {
+    /// Unmount all filesystems under install root.
+    ///
+    /// Returns the mount points still mounted afterwards (empty in dry-run).
+    fn unmount_all(&self) -> Vec<String> {
         info!("Unmounting all filesystems under {}", INSTALL_ROOT);
 
         // Disable swap devices that were set up for the installation
@@ -69,23 +84,14 @@ impl Cleaner {
 
         // Get mount points under install root
         let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-        let mut mount_points: Vec<&str> = mounts
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[1].starts_with(INSTALL_ROOT) {
-                    Some(parts[1])
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut mount_points = mounts_under(&mounts, INSTALL_ROOT);
 
         // Sort by depth (deepest first)
         mount_points.sort_by_key(|b| std::cmp::Reverse(b.matches('/').count()));
 
         // Unmount each
-        for mp in mount_points {
+        for mp in &mount_points {
+            let mp = mp.as_str();
             info!("Unmounting {}", mp);
             if let Err(e) = self.cmd.run("umount", &[mp]) {
                 tracing::warn!("Failed to unmount {}: {} (trying lazy unmount)", mp, e);
@@ -95,7 +101,16 @@ impl Cleaner {
             }
         }
 
-        Ok(())
+        if self.cmd.is_dry_run() {
+            return Vec::new();
+        }
+        // A lazy unmount detaches the mount even while it is busy; whatever
+        // still holds it then keeps its LUKS container open, which
+        // close_encrypted_volumes reports.
+        mounts_under(
+            &fs::read_to_string("/proc/mounts").unwrap_or_default(),
+            INSTALL_ROOT,
+        )
     }
 
     /// Close any open LUKS encrypted volumes
@@ -106,7 +121,9 @@ impl Cleaner {
     /// (e.g. `Crypt-Root-1`) are closed, as well as any temporary
     /// dm mappings left behind by interrupted `cryptsetup luksFormat`
     /// operations.
-    fn close_encrypted_volumes(&self) -> Result<()> {
+    ///
+    /// Returns the mappings still open afterwards (empty in dry-run).
+    fn close_encrypted_volumes(&self) -> Vec<String> {
         info!("Closing any open LUKS encrypted volumes");
 
         // Kill orphaned cryptsetup processes first (they hold dm mappings open)
@@ -119,7 +136,7 @@ impl Cleaner {
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-") {
+                    if is_cleanup_mapping(&name) {
                         Some(name)
                     } else {
                         None
@@ -137,7 +154,10 @@ impl Cleaner {
             }
         }
 
-        Ok(())
+        if self.cmd.is_dry_run() {
+            return Vec::new();
+        }
+        open_cleanup_mappings(mapper_dir)
     }
 
     /// Kill orphaned `cryptsetup` processes (PPID == 1) that may be holding
@@ -252,31 +272,130 @@ impl Cleaner {
         let script_path = script_path.as_str();
         fs::write(script_path, script)?;
 
-        let result = std::process::Command::new("sfdisk")
+        let sfdisk = std::process::Command::new("sfdisk")
             .arg(device)
             .stdin(fs::File::open(script_path)?)
             .output();
 
         let _ = fs::remove_file(script_path);
 
-        if let Ok(output) = result {
-            if !output.status.success() {
-                // Fall back to fdisk with piped stdin (no shell interpolation)
-                let _ = std::process::Command::new("fdisk")
-                    .arg(device)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| {
-                        if let Some(ref mut stdin) = child.stdin {
-                            use std::io::Write;
-                            let _ = stdin.write_all(b"g\nw\n");
-                        }
-                        child.wait()
-                    });
+        let sfdisk_err = match sfdisk {
+            Ok(out) if out.status.success() => None,
+            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(sfdisk_err) = sfdisk_err {
+            tracing::warn!(
+                "sfdisk could not write a blank GPT ({}); trying fdisk",
+                sfdisk_err
+            );
+            // Piped stdin, no shell interpolation.
+            let fdisk = std::process::Command::new("fdisk")
+                .arg(device)
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        stdin.write_all(b"g\nw\n")?;
+                    }
+                    child.wait_with_output()
+                });
+            match fdisk {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    return Err(DeploytixError::PartitionError(format!(
+                        "could not write a blank GPT to {device}: sfdisk: {sfdisk_err}; fdisk: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )))
+                }
+                Err(e) => {
+                    return Err(DeploytixError::PartitionError(format!(
+                        "could not write a blank GPT to {device}: sfdisk: {sfdisk_err}; fdisk: {e}"
+                    )))
+                }
             }
         }
 
         info!("Partition table wiped and blank GPT created on {}", device);
         Ok(())
+    }
+}
+
+/// Mount points in `mounts` (the text of `/proc/mounts`) at or under `root`.
+fn mounts_under(mounts: &str, root: &str) -> Vec<String> {
+    mounts
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|mp| *mp == root || mp.starts_with(&format!("{root}/")))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a `/dev/mapper` name is one cleanup is responsible for closing.
+fn is_cleanup_mapping(name: &str) -> bool {
+    name.starts_with("Crypt-") || name.starts_with("temporary-cryptsetup-")
+}
+
+/// The cleanup-owned mappings present in `mapper_dir`.
+fn open_cleanup_mappings(mapper_dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(mapper_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| is_cleanup_mapping(n))
+        .map(|n| format!("/dev/mapper/{n}"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mounts_under_takes_the_root_and_below_only() {
+        let mounts = "/dev/sda2 / ext4 rw 0 0\n\
+                      /dev/mapper/Crypt-Root /install btrfs rw 0 0\n\
+                      /dev/sdb1 /install/boot/efi vfat rw 0 0\n\
+                      /dev/sdc1 /installer ext4 rw 0 0\n";
+        assert_eq!(
+            mounts_under(mounts, "/install"),
+            vec!["/install", "/install/boot/efi"]
+        );
+    }
+
+    #[test]
+    fn only_deploytix_mappings_are_cleanups_business() {
+        assert!(is_cleanup_mapping("Crypt-Root"));
+        assert!(is_cleanup_mapping("Crypt-Root-1"));
+        assert!(is_cleanup_mapping("temporary-cryptsetup-1234"));
+        assert!(!is_cleanup_mapping("control"));
+        assert!(!is_cleanup_mapping("luks-1234"));
+    }
+
+    #[test]
+    fn open_mappings_lists_only_cleanup_owned_names() {
+        let dir = std::env::temp_dir().join(format!("deploytix-mapper-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for n in ["control", "Crypt-Root", "Crypt-Home", "luks-x"] {
+            fs::write(dir.join(n), "").unwrap();
+        }
+        let open = open_cleanup_mappings(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            open,
+            vec!["/dev/mapper/Crypt-Home", "/dev/mapper/Crypt-Root"]
+        );
+    }
+
+    #[test]
+    fn dry_run_cleanup_reports_nothing_held() {
+        let c = Cleaner::new(true);
+        assert!(c.close_encrypted_volumes().is_empty());
     }
 }
