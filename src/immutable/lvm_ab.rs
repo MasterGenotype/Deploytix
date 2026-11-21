@@ -362,9 +362,9 @@ pub fn run_update(
         // this slot's build rather than the shared /var's last state.
         let before = history::query_packages(cmd, &t);
         info!("[lvm-ab] Running pacman in slot {}", target);
-        for pac in update::pacman_cmds(&staged, &repo_names) {
-            cmd.run_pacman_in_chroot(&t, &pac)?;
-        }
+        // `--aur` is refused on this backend above, so nothing here asks for
+        // an upgrade beyond what an empty request means.
+        update::run_pacman_cmds(cmd, &t, &staged, &repo_names, false)?;
         let after = history::query_packages(cmd, &t);
         // A local `hhd-git` package reverts deploytix's patches to it, and the
         // running slot's /usr is a read-only verity image the helper cannot
@@ -375,6 +375,7 @@ pub fn run_update(
     })();
 
     // Always release the chroot mounts and clear the package staging dir.
+    update::stop_chroot_stragglers(cmd, &target_dir(&target));
     let _ = cmd.run("sh", &["-c", &unmount_target_cmd(&target)]);
     if !cmd.is_dry_run() {
         let _ = std::fs::remove_dir_all(update::PKG_STAGE_DIR);

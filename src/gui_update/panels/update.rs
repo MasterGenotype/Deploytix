@@ -78,7 +78,11 @@ fn install_card(ui: &mut Ui, state: &mut AppState) {
         if field.lost_focus() || (field.changed() && !state.repo_packages.ends_with(' ')) {
             state.start_resolve();
         }
-        ui::note(ui, "Separate names with spaces.");
+        ui::note(
+            ui,
+            "Separate names with spaces. Installs only these and what they need; \
+             nothing already installed is upgraded. Use Upgrade system for that.",
+        );
         show_preview(ui, state);
 
         ui.add_space(12.0);

@@ -259,9 +259,13 @@ enum Commands {
     },
 
     /// Transactional system update (immutable root): build a new snapshot set,
-    /// upgrade inside it, and activate it on reboot.
+    /// upgrade or install inside it, and activate it on reboot.
+    ///
+    /// With no packages, upgrades the whole system. With packages, installs
+    /// only those (and the dependencies they lack) and upgrades nothing else.
     Update {
-        /// Extra packages to install on top of a full sync/upgrade.
+        /// Packages to install, without upgrading anything already installed.
+        /// Omit them for a full system upgrade.
         #[arg(trailing_var_arg = true)]
         packages: Vec<String>,
 

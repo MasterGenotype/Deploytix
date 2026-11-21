@@ -83,7 +83,7 @@ canonicalize the dm-verity root device.
 
 ```
 deploytix update                 # full pacman -Syu into the inactive slot
-deploytix update vim git         # also install these
+deploytix update vim git         # install only these; nothing is upgraded
 deploytix update ./pkg/*.pkg.tar.zst   # install local package files (pacman -U)
 deploytix update --reboot        # reboot automatically once staged
 deploytix -n update              # dry-run: print the plan, change nothing
@@ -93,8 +93,10 @@ What it does (active = A → target = B):
 
 1. Mounts `root_b` read-write and `rsync`s the running root tree into it
    (`--delete`, excluding `/var`, `/home`, `/boot` and pseudo-filesystems).
-2. `artix-chroot`s the slot and runs `pacman -Syu` (+ requested packages; local
-   `.pkg.tar.zst` files go through `pacman -U`) and `mkinitcpio -P`.
+2. `artix-chroot`s the slot and runs `pacman -Syu` with no packages named, or
+   `pacman -S <names>` (install only, no upgrade — see `IMMUTABLE_SYSTEM.md`,
+   *Installing without upgrading*); local `.pkg.tar.zst` files go through
+   `pacman -U`. Then `mkinitcpio -P`.
    pacman's questions go to the user, as on the btrfs backend (see
    `IMMUTABLE_SYSTEM.md`, *Updating*).
 3. Freezes the slot and `veritysetup format`s a fresh hash tree → new root hash.

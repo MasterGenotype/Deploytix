@@ -22,7 +22,8 @@
 //!    bind-mounted so state and the kernel/initramfs are shared, and the
 //!    `WRITABLE_BIND_PATHS` reproduced so `/opt` & co. land where the booted
 //!    system will look for them).
-//! 3. Run `pacman -Syu` (or install the requested packages), with `--aur` then
+//! 3. Run `pacman -Syu` for a system upgrade, or `pacman -S` / `-U` to install
+//!    just the requested packages without upgrading anything; with `--aur` then
 //!    rebuild the installed AUR packages that have updates
 //!    ([`crate::aur::upgrade`]), and regenerate the initramfs *inside the set*
 //!    via `artix-chroot`.
@@ -130,6 +131,69 @@ pub fn unmount_set_cmd(id: &str) -> String {
     format!("umount -R {target} 2>/dev/null || true; rmdir {target} 2>/dev/null || true")
 }
 
+/// Processes whose root directory is `target` or inside it, as (pid, name).
+///
+/// Read from `/proc/<pid>/root`, which names the directory a process was
+/// chrooted into — so this finds exactly what a chroot under `target` started
+/// and left running, and nothing of the host's.
+fn processes_rooted_in(target: &str) -> Vec<(i32, String)> {
+    let target = std::path::Path::new(target);
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/root"))
+                .map(|root| root.starts_with(target))
+                .unwrap_or(false)
+        })
+        .map(|pid| {
+            let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|n| n.trim().to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            (pid, name)
+        })
+        .collect()
+}
+
+/// Stop whatever the transaction left running inside `target`, naming each.
+///
+/// A package's install script or hook can start a process that outlives
+/// pacman (a daemon, an agent). It keeps the chroot's `/proc` busy, so
+/// `artix-chroot`'s own teardown reports "target is busy" and the set's mounts
+/// cannot all be released. Sent `SIGTERM`, given a few seconds, then
+/// `SIGKILL`: nothing started inside a set that is not booted yet has any
+/// business outliving the transaction. Called before the set is unmounted.
+pub(crate) fn stop_chroot_stragglers(cmd: &CommandRunner, target: &str) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    if cmd.is_dry_run() {
+        return;
+    }
+    let found = processes_rooted_in(target);
+    if found.is_empty() {
+        return;
+    }
+    for (pid, name) in &found {
+        warn!(
+            "[immutable] {name} (pid {pid}) was still running inside {target} after the \
+             transaction; stopping it so the set can be unmounted"
+        );
+        let _ = kill(Pid::from_raw(*pid), Signal::SIGTERM);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !processes_rooted_in(target).is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for (pid, name) in processes_rooted_in(target) {
+        warn!("[immutable] {name} (pid {pid}) ignored SIGTERM; killing it");
+        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+}
+
 /// Staging dir under the shared `/var` (rbind-mounted into the set) where local
 /// package files are copied so the chroot can reach them by absolute path.
 pub const PKG_STAGE_DIR: &str = "/var/cache/deploytix-update";
@@ -159,8 +223,19 @@ pub fn classify_args(extra: &[String]) -> (Vec<String>, Vec<String>) {
 /// Build the ordered pacman invocation(s) for a transaction. `staged_files` are
 /// absolute paths valid *inside the chroot*; `names` are repo package names.
 ///
-/// - nothing → full `pacman -Syu`;
-/// - repo names → `pacman -Syu <names>`;
+/// A system upgrade happens only when one was asked for — `upgrade` (which
+/// `--aur` sets: rebuilding AUR packages is itself an upgrade), or a request
+/// with nothing in it, which is what `deploytix update` and the updater's
+/// *Upgrade system* button send:
+///
+/// - nothing, or `upgrade` → `pacman -Syu [<names>]`;
+/// - repo names → `pacman -S <names>`: no database refresh and no `-u`, so
+///   only the named packages and whatever dependencies they lack are
+///   installed, resolved against the package lists of the last system
+///   upgrade. Everything already installed keeps the version it has. Refreshing
+///   the lists (`-Sy`) without upgrading would be the unsupported partial
+///   upgrade: a new package can pull in a newer shared library that the
+///   installed packages were not built against;
 /// - local files → `pacman -U <files>` (no DB sync, so it works offline /
 ///   without configured repos — which is why `-Syu <file>` failed with a
 ///   "missing database" error).
@@ -170,20 +245,78 @@ pub fn classify_args(extra: &[String]) -> (Vec<String>, Vec<String>) {
 /// questions. `--color never` keeps escape codes out from around those
 /// questions (a `Color` line in pacman.conf would otherwise add them), and
 /// `--noprogressbar` keeps the transcript to lines.
-pub fn pacman_cmds(staged_files: &[String], names: &[String]) -> Vec<String> {
+pub fn pacman_cmds(staged_files: &[String], names: &[String], upgrade: bool) -> Vec<String> {
     const PACMAN: &str = "pacman --noprogressbar --color never";
     let mut cmds = Vec::new();
-    if staged_files.is_empty() && names.is_empty() {
-        cmds.push(format!("{PACMAN} -Syu"));
-        return cmds;
-    }
-    if !names.is_empty() {
-        cmds.push(format!("{PACMAN} -Syu {}", names.join(" ")));
+    if upgrade || (staged_files.is_empty() && names.is_empty()) {
+        let mut c = format!("{PACMAN} -Syu");
+        for n in names {
+            c.push(' ');
+            c.push_str(n);
+        }
+        cmds.push(c);
+    } else if !names.is_empty() {
+        cmds.push(format!("{PACMAN} -S {}", names.join(" ")));
     }
     if !staged_files.is_empty() {
         cmds.push(format!("{PACMAN} -U {}", staged_files.join(" ")));
     }
     cmds
+}
+
+/// Whether a pacman command from [`pacman_cmds`] installs without upgrading.
+fn is_install_only(command: &str) -> bool {
+    command.contains(" -S ")
+}
+
+/// What an install-only transaction's failure most likely means, when its
+/// transcript says so.
+///
+/// An install resolves against the package lists of the last system upgrade.
+/// Once those are old enough, the mirror has moved on: the version they name
+/// is gone (a 404), or a package added since is not in them at all. Neither is
+/// fixed by retrying — only by upgrading first, which is the user's call.
+pub(crate) fn stale_lists_hint(transcript: &str) -> Option<&'static str> {
+    let t = transcript.to_ascii_lowercase();
+    if t.contains("failed retrieving file")
+        || t.contains("failed to retrieve some files")
+        || t.contains("404")
+        || t.contains("target not found")
+    {
+        Some(
+            "Installing does not upgrade the system, so packages are looked up in the \
+             package lists from the last system upgrade. Those lists look out of date: the \
+             mirror no longer has the version they name, or the package is newer than \
+             them. Run a system upgrade first, then install.",
+        )
+    } else {
+        None
+    }
+}
+
+/// Run [`pacman_cmds`] inside `target`, explaining an install-only failure that
+/// out-of-date package lists account for.
+pub(crate) fn run_pacman_cmds(
+    cmd: &CommandRunner,
+    target: &str,
+    staged_files: &[String],
+    names: &[String],
+    upgrade: bool,
+) -> Result<()> {
+    for pac in pacman_cmds(staged_files, names, upgrade) {
+        match cmd.run_pacman_in_chroot(target, &pac) {
+            Ok(_) => {}
+            Err(DeploytixError::CommandFailed { command, stderr }) if is_install_only(&pac) => {
+                let stderr = match stale_lists_hint(&stderr) {
+                    Some(hint) => format!("{stderr}\n\n{hint}"),
+                    None => stderr,
+                };
+                return Err(DeploytixError::CommandFailed { command, stderr });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Copy local package files into the shared `/var` staging dir so `pacman -U`
@@ -442,7 +575,10 @@ where
         Ok(changes)
     })();
 
-    // Always release the chroot mounts and clear the package staging dir.
+    // Always release the chroot mounts and clear the package staging dir —
+    // after stopping anything the transaction left running in there, which
+    // would otherwise hold the mounts busy.
+    stop_chroot_stragglers(cmd, &target_dir(&id));
     let _ = cmd.run("sh", &["-c", &unmount_set_cmd(&id)]);
     if !cmd.is_dry_run() {
         let _ = std::fs::remove_dir_all(PKG_STAGE_DIR);
@@ -543,6 +679,9 @@ pub fn run_update(
     let (local_files, repo_names) = classify_args(extra_packages);
     let mut request = history::Request::classify(&repo_names, &local_files);
     let requested: Vec<String> = extra_packages.to_vec();
+    // `--aur` rebuilds against upgraded libraries, so it upgrades the system;
+    // a plain install never does (see `pacman_cmds`).
+    let upgrade = opts.aur;
     let aur = if opts.aur {
         request = history::Request::WithAurUpgrade(Box::new(request));
         Some(aur_builder(cmd)?)
@@ -559,9 +698,7 @@ pub fn run_update(
         // this set rather than whatever the shared /var last recorded.
         let before = history::query_packages(cmd, target);
         info!("[immutable] Running pacman in {}", target);
-        for pac in pacman_cmds(&staged, &repo_names) {
-            cmd.run_pacman_in_chroot(target, &pac)?;
-        }
+        run_pacman_cmds(cmd, target, &staged, &repo_names, upgrade)?;
         // After pacman, so the builds link against the upgraded libraries.
         if let Some((helper, build_user)) = &aur {
             crate::aur::upgrade::upgrade_in_target(cmd, target, *helper, build_user)?;
@@ -633,6 +770,13 @@ mod tests {
     }
 
     #[test]
+    fn nothing_on_the_host_is_rooted_in_an_unused_target() {
+        // This test process and the rest of the host are rooted at `/`, so a
+        // target that nothing is chrooted into must find nothing to stop.
+        assert!(processes_rooted_in("/run/deploytix-update/no-such-set").is_empty());
+    }
+
+    #[test]
     fn unmount_cmd_is_recursive_and_safe() {
         let s = unmount_set_cmd("42");
         assert!(s.contains("umount -R /run/deploytix-update/42"));
@@ -643,19 +787,20 @@ mod tests {
     fn pacman_cmds_full_upgrade_vs_repo_names_vs_local_files() {
         // No args → full upgrade.
         assert_eq!(
-            pacman_cmds(&[], &[]),
+            pacman_cmds(&[], &[], false),
             vec!["pacman --noprogressbar --color never -Syu"]
         );
-        // Repo names → -S.
+        // Repo names → install only: no refresh, no upgrade.
         assert_eq!(
-            pacman_cmds(&[], &["vim".to_string(), "git".to_string()]),
-            vec!["pacman --noprogressbar --color never -Syu vim git"]
+            pacman_cmds(&[], &["vim".to_string(), "git".to_string()], false),
+            vec!["pacman --noprogressbar --color never -S vim git"]
         );
         // Local files → -U (no DB sync).
         assert_eq!(
             pacman_cmds(
                 &["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()],
-                &[]
+                &[],
+                false
             ),
             vec![
                 "pacman --noprogressbar --color never -U /var/cache/deploytix-update/a.pkg.tar.zst"
@@ -663,12 +808,60 @@ mod tests {
         );
     }
 
+    /// Installing must never refresh the package lists or upgrade what is
+    /// already installed: that is only for an explicit system upgrade.
+    #[test]
+    fn installing_never_upgrades_the_system() {
+        let staged = ["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()];
+        for c in pacman_cmds(&staged, &["vim".to_string()], false) {
+            assert!(!c.contains("-Sy"), "{c}");
+            assert!(!c.contains("-Su"), "{c}");
+        }
+    }
+
+    /// An explicit upgrade (`--aur`) still upgrades, and installs the names in
+    /// the same transaction.
+    #[test]
+    fn an_explicit_upgrade_upgrades_and_installs_together() {
+        assert_eq!(
+            pacman_cmds(&[], &["vim".to_string()], true),
+            vec!["pacman --noprogressbar --color never -Syu vim"]
+        );
+        assert_eq!(
+            pacman_cmds(&[], &[], true),
+            vec!["pacman --noprogressbar --color never -Syu"]
+        );
+    }
+
+    #[test]
+    fn only_install_commands_count_as_install_only() {
+        for c in pacman_cmds(&[], &["vim".to_string()], false) {
+            assert!(is_install_only(&c), "{c}");
+        }
+        for c in pacman_cmds(&[], &["vim".to_string()], true) {
+            assert!(!is_install_only(&c), "{c}");
+        }
+        for c in pacman_cmds(&["/x/a.pkg.tar.zst".to_string()], &[], false) {
+            assert!(!is_install_only(&c), "{c}");
+        }
+    }
+
+    #[test]
+    fn stale_lists_hint_names_the_way_out() {
+        let gone = "error: failed retrieving file 'vim-9.1-1-x86_64.pkg.tar.zst' \
+                    from mirror : The requested URL returned error: 404";
+        assert!(stale_lists_hint(gone).unwrap().contains("system upgrade"));
+        assert!(stale_lists_hint("error: target not found: newpkg").is_some());
+        assert!(stale_lists_hint("error: failed to commit transaction (conflicting files)")
+            .is_none());
+    }
+
     /// `--noconfirm` would answer pacman's questions before the console could,
     /// which is how a conflict used to fail the whole update unasked.
     #[test]
     fn pacman_cmds_leave_questions_to_the_console() {
         let staged = ["/var/cache/deploytix-update/a.pkg.tar.zst".to_string()];
-        for c in pacman_cmds(&staged, &["vim".to_string()]) {
+        for c in pacman_cmds(&staged, &["vim".to_string()], false) {
             assert!(!c.contains("--noconfirm"), "{c}");
             assert!(c.contains("--color never"), "{c}");
         }

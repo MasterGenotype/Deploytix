@@ -139,7 +139,7 @@ pointer move + a grub regeneration.
 
 ```
 deploytix update                 # full pacman -Syu into a new set
-deploytix update vim git         # sync/upgrade and also install these
+deploytix update vim git         # install only these (pacman -S); nothing is upgraded
 deploytix update --keep 5        # retain 5 previous sets when pruning (default 3)
 deploytix update --reboot        # reboot automatically once staged
 deploytix update --aur           # ...then rebuild AUR packages that have updates
@@ -153,7 +153,9 @@ What it does:
 1. Snapshots the current `{@, @usr, @etc}` into a new **writable** set and writes
    its pairing marker.
 2. Mounts the set (root + paired usr/etc, with `/var`, `/home`, `/boot`
-   rbind-mounted) and runs `pacman -Syu` + `mkinitcpio -P` inside it via
+   rbind-mounted) and runs `pacman -Syu` (a full upgrade, when no packages
+   are named) or `pacman -S <names>` (install only — see *Installing without
+   upgrading* below), then `mkinitcpio -P`, inside it via
    `artix-chroot`, or plain `chroot` where `artools-base` is not installed.
    pacman's output streams to the terminal (or the updater's console), and
    any question it asks — typically *"X and Y are in conflict. Remove Y?"*
@@ -170,6 +172,24 @@ What it does:
 
 The running system is never modified, so an interrupted or failed update is a
 no-op.
+
+### Installing without upgrading
+
+Naming packages installs **only** those, plus whatever dependencies they lack.
+Nothing already installed changes version: the system is upgraded only by
+`deploytix update` with no packages (the updater's *Upgrade system* button),
+or by `--aur`, which rebuilds against upgraded libraries and so upgrades too.
+
+The install is `pacman -S`, with no `-y`: it resolves against the package
+lists of the last system upgrade, which match what is installed. Refreshing
+the lists without upgrading (`-Sy`) is the partial upgrade Arch does not
+support — a new package can drag in a newer shared library the installed
+packages were not built against.
+
+The cost: once those lists are old, the mirror may no longer carry the version
+they name (a 404), or a package may be newer than them ("target not found").
+The update then fails, the running system is unchanged, and the error says to
+run a system upgrade first.
 
 ### AUR packages: `--aur`
 
