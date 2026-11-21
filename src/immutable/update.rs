@@ -852,8 +852,9 @@ mod tests {
                     from mirror : The requested URL returned error: 404";
         assert!(stale_lists_hint(gone).unwrap().contains("system upgrade"));
         assert!(stale_lists_hint("error: target not found: newpkg").is_some());
-        assert!(stale_lists_hint("error: failed to commit transaction (conflicting files)")
-            .is_none());
+        assert!(
+            stale_lists_hint("error: failed to commit transaction (conflicting files)").is_none()
+        );
     }
 
     /// `--noconfirm` would answer pacman's questions before the console could,
