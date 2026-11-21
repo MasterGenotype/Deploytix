@@ -1,7 +1,7 @@
 # Maintainer: superphenotype
 pkgbase=deploytix-git
 pkgname=('deploytix-git' 'deploytix-gui-git' 'deploytix-update-gui-git')
-pkgver=1.5.2.r6.gc7d1af6
+pkgver=1.5.2.r17.g926e991
 pkgrel=1
 pkgdesc="Automated Artix Linux deployment installer for removable media and disks"
 arch=('x86_64')
